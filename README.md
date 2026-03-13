@@ -238,11 +238,13 @@ Optional daemon smoke coverage:
 bash tests/test-broker-fast.sh
 bash tests/test-broker-slow.sh
 bash tests/test-broker.sh
+bash scripts/lint-shell.sh
 ```
 
 `tests/test-broker-fast.sh` is the quick broker/stream contract suite.
 `tests/test-broker-slow.sh` covers wrapper/install/bundle-heavy paths.
 `tests/test-broker.sh` runs both.
+`scripts/lint-shell.sh` runs the repository shell lint pass with `shellcheck`.
 
 The public test path documented here is Lean-focused. Internal experimental tooling may have extra
 coverage in-tree, but it is not part of this README.
@@ -288,7 +290,9 @@ bash scripts/install-runat-skills.sh
 ```
 
 See [Installation And Resolution](#installation-and-resolution) for the full install procedure,
-installed layout, and bundle resolution rules.
+installed layout, and bundle resolution rules. The design note in
+[docs/INSTALL_REDESIGN_PLAN.md](docs/INSTALL_REDESIGN_PLAN.md) is now implementation background,
+not the primary user-facing install guide.
 
 For outside users today, the practical client surface is the command layer. The installed skills are
 optional agent add-ons on top of that command path, rather than part of the required CLI install.

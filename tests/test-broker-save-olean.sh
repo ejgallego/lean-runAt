@@ -108,7 +108,9 @@ mkproj "$tmp5"
 
 (cd "$tmp1" && lake build > /dev/null)
 edit_b "$tmp1"
-(cd "$tmp1" && lake build >"$log1" 2>&1 || true)
+if ! (cd "$tmp1" && lake build >"$log1" 2>&1); then
+  :
+fi
 if ! grep -Eq "Built SaveSmoke\\.B|Building SaveSmoke\\.B" "$log1"; then
   echo "expected normal lake build after edit to rebuild SaveSmoke.B" >&2
   cat "$log1" >&2

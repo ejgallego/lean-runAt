@@ -8,6 +8,19 @@ permissions:
   contents: read
 
 jobs:
+  shell-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Shell Lint
+        run: bash scripts/lint-shell.sh
+
   build-and-test:
     runs-on: ubuntu-latest
     steps:

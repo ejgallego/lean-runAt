@@ -106,12 +106,13 @@ wait_for_exit() {
   local label="$2"
   local tries="${3:-40}"
   local delay="${4:-0.5}"
-  local i
-  for i in $(seq 1 "$tries"); do
+  local remaining="$tries"
+  while [ "$remaining" -gt 0 ]; do
     if ! kill -0 "$pid" 2>/dev/null; then
       return 0
     fi
     sleep "$delay"
+    remaining=$((remaining - 1))
   done
   echo "timed out waiting for $label (pid $pid) to exit" >&2
   return 1

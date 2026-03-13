@@ -97,6 +97,8 @@ correctness regression, not yet a performance benchmark.
   install, or bundle-resolution behavior
 - use [tests/test-broker.sh](../tests/test-broker.sh) to execute both suites together before
   landing a broader broker-facing change
+- use [scripts/lint-shell.sh](../scripts/lint-shell.sh) when you change shell wrappers, installer,
+  or shell-based test harnesses; CI runs the same `shellcheck` pass
 
 ## Important Next Gap
 

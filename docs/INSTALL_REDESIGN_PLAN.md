@@ -1,5 +1,9 @@
 # Install Redesign Plan
 
+This document is now an implementation/design note for the install redesign work. For the current
+user-facing install procedure, layout, and resolution rules, use the README section
+`Installation And Resolution`.
+
 ## Goal
 
 Replace the current checkout-bound installer with a self-contained local install that keeps the

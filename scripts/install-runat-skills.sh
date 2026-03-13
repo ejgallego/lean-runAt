@@ -14,6 +14,7 @@ runat_cli="$repo_root/.lake/build/bin/runAt-cli"
 install_notes_path="$repo_root/scripts/install-runat-skills-notes.txt"
 install_codex_skills=0
 install_claude_skills=0
+installed_skill_targets=()
 
 runtime_payload_spec=(
   "copy|rootFiles|RunAt.lean|RunAt.lean"
@@ -455,13 +456,11 @@ install_skill_target() {
   local enabled="$1"
   local label="$2"
   local skills_home="$3"
-  local targets_name="$4"
-  local -n targets_ref="$targets_name"
   if [ "$enabled" -ne 1 ]; then
-    return 0
+    return 1
   fi
   install_skills "$skills_home"
-  targets_ref+=("$label: $skills_home")
+  printf '%s: %s\n' "$label" "$skills_home"
 }
 
 prepare_install_environment() {
@@ -514,20 +513,22 @@ publish_runtime() {
 }
 
 install_requested_skills() {
-  local targets_name="$1"
-  install_skill_target "$install_codex_skills" "Codex" "$codex_skills_home" "$targets_name"
-  install_skill_target "$install_claude_skills" "Claude Code" "$claude_skills_home" "$targets_name"
+  local target=""
+  if target="$(install_skill_target "$install_codex_skills" "Codex" "$codex_skills_home")"; then
+    installed_skill_targets+=("$target")
+  fi
+  if target="$(install_skill_target "$install_claude_skills" "Claude Code" "$claude_skills_home")"; then
+    installed_skill_targets+=("$target")
+  fi
 }
 
 print_install_summary() {
-  local targets_name="$1"
-  local -n targets_ref="$targets_name"
   echo "installed runAt runtime" >&2
   echo "  runtime root: $current_root" >&2
   echo "  wrappers: $bin_home/runat, $bin_home/runat-lean-search" >&2
-  if [ "${#targets_ref[@]}" -gt 0 ]; then
+  if [ "${#installed_skill_targets[@]}" -gt 0 ]; then
     echo "  bundled skills:" >&2
-    for target in "${targets_ref[@]}"; do
+    for target in "${installed_skill_targets[@]}"; do
       echo "    $target" >&2
     done
   else
@@ -550,7 +551,6 @@ main() {
   local payload_id=""
   local version_root=""
   local source_commit=""
-  local installed_skill_targets=()
   parse_args "$@"
   validate_install_config
   prepare_install_environment repo_toolchain
@@ -562,8 +562,8 @@ main() {
 
   prebuild_install_bundle "$version_root" "$repo_toolchain"
   publish_runtime "$version_root"
-  install_requested_skills installed_skill_targets
-  print_install_summary installed_skill_targets
+  install_requested_skills
+  print_install_summary
   print_post_install_notes
 }
 

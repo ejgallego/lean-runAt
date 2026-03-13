@@ -384,6 +384,7 @@ if ! grep -q '"code": "syncBarrierIncomplete"' "$stale_sync_err"; then
   remove_tmp_file "$stale_sync_err"
   exit 1
 fi
+# shellcheck disable=SC2016
 if ! grep -q 'Run `lake build` or fix the upstream module first' "$stale_sync_err"; then
   echo "expected installed wrapper stale-import lean-sync failure to include a recovery hint" >&2
   cat "$stale_sync_err" >&2
