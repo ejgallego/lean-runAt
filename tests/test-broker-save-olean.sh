@@ -16,8 +16,20 @@ if [ -z "$lake_cmd" ]; then
   exit 1
 fi
 
+expect_owned_tmp_path() {
+  case "$1" in
+    /tmp/runat-save-olean-*|/tmp/tmp.*)
+      ;;
+    *)
+      echo "refusing to touch unexpected path: $1" >&2
+      exit 1
+      ;;
+  esac
+}
+
 mkproj() {
   local dest="$1"
+  expect_owned_tmp_path "$dest"
   rm -rf "$dest"
   mkdir -p "$dest"
   rsync -a tests/save_olean_project/ "$dest"/
@@ -74,6 +86,16 @@ log4="$(mktemp /tmp/runat-save-olean-exact-log-XXXXXX)"
 log5="$(mktemp /tmp/runat-save-olean-downstream-log-XXXXXX)"
 
 cleanup() {
+  expect_owned_tmp_path "$tmp1"
+  expect_owned_tmp_path "$tmp2"
+  expect_owned_tmp_path "$tmp3"
+  expect_owned_tmp_path "$tmp4"
+  expect_owned_tmp_path "$tmp5"
+  expect_owned_tmp_path "$log1"
+  expect_owned_tmp_path "$log2"
+  expect_owned_tmp_path "$log3"
+  expect_owned_tmp_path "$log4"
+  expect_owned_tmp_path "$log5"
   rm -rf "$tmp1" "$tmp2" "$tmp3" "$tmp4" "$tmp5" "$log1" "$log2" "$log3" "$log4" "$log5"
 }
 trap cleanup EXIT

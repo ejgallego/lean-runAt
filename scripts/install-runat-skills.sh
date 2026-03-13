@@ -37,8 +37,6 @@ install_skills() {
   mkdir -p "$skills_home/lean-runat" "$skills_home/rocq-runat"
   rsync -a "$repo_root/skills/lean-runat/" "$skills_home/lean-runat/"
   rsync -a "$repo_root/skills/rocq-runat/" "$skills_home/rocq-runat/"
-  rm -rf "$skills_home/lean-rocq-broker"
-  rm -rf "$skills_home/runat-common"
 }
 
 mkdir -p "$bin_home"
@@ -46,8 +44,6 @@ install_skills "$codex_skills_home"
 install_skills "$claude_skills_home"
 ln -sf "$repo_root/scripts/runat" "$bin_home/runat"
 ln -sf "$repo_root/scripts/runat-lean-search" "$bin_home/runat-lean-search"
-rm -rf "$repo_root/$install_bundles_rel" "$repo_root/$runtime_bundles_rel"
-rm -rf "$codex_skills_home/lean-runat/$runtime_bundles_rel" "$claude_skills_home/lean-runat/$runtime_bundles_rel"
 
 if command -v elan >/dev/null 2>&1; then
   ensure_runat_cli

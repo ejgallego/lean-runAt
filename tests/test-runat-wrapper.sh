@@ -6,7 +6,6 @@ cd "$(dirname "$0")/.."
 runat_script="$PWD/scripts/runat"
 search_helper="$PWD/scripts/runat-lean-search"
 client="$PWD/.lake/build/bin/runAt-cli-client"
-repo_root="$PWD"
 
 if [ ! -x "$runat_script" ]; then
   echo "missing runat wrapper at $runat_script" >&2
@@ -91,6 +90,17 @@ expect_file() {
   fi
 }
 
+expect_owned_tmp_dir() {
+  case "$1" in
+    /tmp/runat-wrapper-*)
+      ;;
+    *)
+      echo "refusing to touch unexpected temp dir: $1" >&2
+      exit 1
+      ;;
+  esac
+}
+
 wait_for_exit() {
   local pid="$1"
   local label="$2"
@@ -116,6 +126,7 @@ tmp6="$(mktemp -d /tmp/runat-wrapper-f-XXXXXX)"
 tmp7="$(mktemp -d /tmp/runat-wrapper-g-XXXXXX)"
 tmp8="$(mktemp -d /tmp/runat-wrapper-h-XXXXXX)"
 tmp9="$(mktemp -d /tmp/runat-wrapper-i-XXXXXX)"
+tmp10="$(mktemp -d /tmp/runat-wrapper-j-XXXXXX)"
 busy_pid=""
 
 cleanup() {
@@ -123,7 +134,6 @@ cleanup() {
     kill "$busy_pid" > /dev/null 2>&1 || true
     wait "$busy_pid" 2>/dev/null || true
   fi
-  "$runat_script" --root "$repo_root" shutdown > /dev/null 2>&1 || true
   "$runat_script" --root "$tmp1" shutdown > /dev/null 2>&1 || true
   "$runat_script" --root "$tmp2" shutdown > /dev/null 2>&1 || true
   "$runat_script" --root "$tmp3" shutdown > /dev/null 2>&1 || true
@@ -133,15 +143,35 @@ cleanup() {
   "$runat_script" --root "$tmp7" shutdown > /dev/null 2>&1 || true
   "$runat_script" --root "$tmp8" shutdown > /dev/null 2>&1 || true
   "$runat_script" --root "$tmp9" shutdown > /dev/null 2>&1 || true
-  rm -rf "$tmp1" "$tmp2" "$tmp3" "$tmp4" "$tmp5" "$tmp6" "$tmp7" "$tmp8" "$tmp9"
+  "$runat_script" --root "$tmp10" shutdown > /dev/null 2>&1 || true
+  expect_owned_tmp_dir "$tmp1"
+  expect_owned_tmp_dir "$tmp2"
+  expect_owned_tmp_dir "$tmp3"
+  expect_owned_tmp_dir "$tmp4"
+  expect_owned_tmp_dir "$tmp5"
+  expect_owned_tmp_dir "$tmp6"
+  expect_owned_tmp_dir "$tmp7"
+  expect_owned_tmp_dir "$tmp8"
+  expect_owned_tmp_dir "$tmp9"
+  expect_owned_tmp_dir "$tmp10"
+  rm -rf "$tmp1" "$tmp2" "$tmp3" "$tmp4" "$tmp5" "$tmp6" "$tmp7" "$tmp8" "$tmp9" "$tmp10"
 }
 trap cleanup EXIT
 
 for tmp in "$tmp1" "$tmp2" "$tmp3" "$tmp4" "$tmp5" "$tmp6" "$tmp7" "$tmp8" "$tmp9"; do
+  expect_owned_tmp_dir "$tmp"
   rsync -a tests/save_olean_project/ "$tmp"/
+  expect_owned_tmp_dir "$tmp/.runat"
   rm -rf "$tmp/.runat"
   mkdir -p "$tmp/.runat"
 done
+
+expect_owned_tmp_dir "$tmp10"
+rsync -a tests/save_olean_project/ "$tmp10"/
+mkdir -p "$tmp10/tests/scenario/docs"
+cp tests/scenario/docs/CommandA.lean "$tmp10/tests/scenario/docs/CommandA.lean"
+cp tests/scenario/docs/SlowPoll.lean "$tmp10/tests/scenario/docs/SlowPoll.lean"
+mkdir -p "$tmp10/.runat"
 
 (
   cd "$tmp1"
@@ -329,19 +359,19 @@ if [ "$pid1" != "$pid1_repeat" ] || [ "$port1" != "$port1_repeat" ]; then
 fi
 
 (
-  cd "$repo_root"
-  "$runat_script" --root "$repo_root" shutdown > /dev/null 2>&1 || true
-  "$runat_script" --root "$repo_root" ensure lean > /dev/null
+  cd "$tmp10"
+  "$runat_script" --root "$tmp10" shutdown > /dev/null 2>&1 || true
+  "$runat_script" --root "$tmp10" ensure lean > /dev/null
   interrupt_out="$(mktemp /tmp/runat-wrapper-interrupt-out-XXXXXX)"
   interrupt_err="$(mktemp /tmp/runat-wrapper-interrupt-err-XXXXXX)"
-  interrupt_status="$(python3 - "$runat_script" "$repo_root" "$interrupt_out" "$interrupt_err" <<'PY'
+  interrupt_status="$(python3 - "$runat_script" "$tmp10" "$interrupt_out" "$interrupt_err" <<'PY'
 import os
 import signal
 import subprocess
 import sys
 import time
 
-runat_script, repo_root, out_path, err_path = sys.argv[1:]
+runat_script, project_root, out_path, err_path = sys.argv[1:]
 env = os.environ.copy()
 env["RUNAT_PROGRESS"] = "1"
 env["RUNAT_REQUEST_ID"] = "wrapper-sigint"
@@ -351,7 +381,7 @@ with open(out_path, "wb") as out, open(err_path, "wb") as err:
         [
             runat_script,
             "--root",
-            repo_root,
+            project_root,
             "lean-run-at",
             "tests/scenario/docs/SlowPoll.lean",
             "25",
@@ -402,32 +432,32 @@ PY
     rm -f "$interrupt_out" "$interrupt_err"
     exit 1
   fi
-  post_interrupt_hover="$("$runat_script" --root "$repo_root" lean-hover tests/scenario/docs/CommandA.lean 0 4)"
+  post_interrupt_hover="$("$runat_script" --root "$tmp10" lean-hover tests/scenario/docs/CommandA.lean 0 4)"
   if [ "$(RUNAT_JSON_PAYLOAD="$post_interrupt_hover" read_json_text_field ok)" != "true" ]; then
-    echo "expected wrapper SIGINT cancellation to preserve the repo CLI daemon session" >&2
+    echo "expected wrapper SIGINT cancellation to preserve the isolated CLI daemon session" >&2
     printf '%s\n' "$post_interrupt_hover" >&2
     rm -f "$interrupt_out" "$interrupt_err"
     exit 1
   fi
   rm -f "$interrupt_out" "$interrupt_err"
-  "$runat_script" --root "$repo_root" shutdown > /dev/null 2>&1 || true
+  "$runat_script" --root "$tmp10" shutdown > /dev/null 2>&1 || true
 )
 
 (
-  cd "$repo_root"
-  "$runat_script" --root "$repo_root" shutdown > /dev/null 2>&1 || true
-  "$runat_script" --root "$repo_root" ensure lean > /dev/null
+  cd "$tmp10"
+  "$runat_script" --root "$tmp10" shutdown > /dev/null 2>&1 || true
+  "$runat_script" --root "$tmp10" ensure lean > /dev/null
   duplicate_slow_out="$(mktemp /tmp/runat-wrapper-duplicate-slow-out-XXXXXX)"
   duplicate_slow_err="$(mktemp /tmp/runat-wrapper-duplicate-slow-err-XXXXXX)"
   duplicate_out="$(mktemp /tmp/runat-wrapper-duplicate-out-XXXXXX)"
   duplicate_err="$(mktemp /tmp/runat-wrapper-duplicate-err-XXXXXX)"
   RUNAT_PROGRESS=1 RUNAT_REQUEST_ID=wrapper-duplicate-active \
-    "$runat_script" --root "$repo_root" lean-run-at tests/scenario/docs/SlowPoll.lean 25 2 "poll_sleep_cmd" \
+    "$runat_script" --root "$tmp10" lean-run-at tests/scenario/docs/SlowPoll.lean 25 2 "poll_sleep_cmd" \
     >"$duplicate_slow_out" 2>"$duplicate_slow_err" &
   duplicate_slow_pid=$!
   sleep 1
   if RUNAT_REQUEST_ID=wrapper-duplicate-active \
-      "$runat_script" --root "$repo_root" lean-hover tests/scenario/docs/CommandA.lean 0 4 \
+      "$runat_script" --root "$tmp10" lean-hover tests/scenario/docs/CommandA.lean 0 4 \
       >"$duplicate_out" 2>"$duplicate_err"; then
     echo "expected duplicate active RUNAT_REQUEST_ID wrapper request to fail" >&2
     cat "$duplicate_out" >&2
@@ -465,7 +495,7 @@ PY
     rm -f "$duplicate_slow_out" "$duplicate_slow_err" "$duplicate_out" "$duplicate_err"
     exit 1
   fi
-  cancel_json="$("$runat_script" --root "$repo_root" cancel wrapper-duplicate-active)"
+  cancel_json="$("$runat_script" --root "$tmp10" cancel wrapper-duplicate-active)"
   if [ "$(RUNAT_JSON_PAYLOAD="$cancel_json" read_json_text_field result.cancelled)" != "true" ]; then
     echo "expected duplicate active RUNAT_REQUEST_ID cancel to report cancelled=true" >&2
     printf '%s\n' "$cancel_json" >&2
@@ -495,7 +525,7 @@ PY
     rm -f "$duplicate_slow_out" "$duplicate_slow_err" "$duplicate_out" "$duplicate_err"
     exit 1
   fi
-  stats_out="$("$runat_script" --root "$repo_root" stats)"
+  stats_out="$("$runat_script" --root "$tmp10" stats)"
   if [ "$(RUNAT_JSON_PAYLOAD="$stats_out" read_json_text_field result.byBackend.lean.invalidParamsCount)" -lt 1 ]; then
     echo "expected duplicate active RUNAT_REQUEST_ID wrapper conflict to increment invalidParamsCount" >&2
     printf '%s\n' "$stats_out" >&2
@@ -503,7 +533,7 @@ PY
     exit 1
   fi
   rm -f "$duplicate_slow_out" "$duplicate_slow_err" "$duplicate_out" "$duplicate_err"
-  "$runat_script" --root "$repo_root" shutdown > /dev/null 2>&1 || true
+  "$runat_script" --root "$tmp10" shutdown > /dev/null 2>&1 || true
 )
 
 cat >"$tmp3/BrokenHeader.lean" <<'EOF'
