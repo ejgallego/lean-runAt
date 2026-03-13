@@ -178,6 +178,12 @@ replace_symlink_atomically() {
   rmdir "$tmp_dir"
 }
 
+verify_publish_targets() {
+  ensure_replaceable_path "$current_root" "$install_root" "current link"
+  ensure_replaceable_path "$bin_home/runat" "$bin_home" "runat wrapper link"
+  ensure_replaceable_path "$bin_home/runat-lean-search" "$bin_home" "runat-lean-search link"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --codex)
@@ -508,6 +514,7 @@ install_skills() {
 require_elan
 repo_toolchain="$(awk 'NR==1 {print $1}' "$repo_root/lean-toolchain")"
 require_repo_toolchain "$repo_toolchain"
+verify_publish_targets
 
 mkdir -p "$bin_home" "$versions_root" "$state_root"
 ensure_runtime_artifacts

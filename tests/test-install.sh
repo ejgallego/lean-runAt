@@ -344,6 +344,9 @@ if [ ! -d "$blocked_runat_dir" ]; then
   exit 1
 fi
 assert_not_exists "$blocked_home/.local/bin/runat-lean-search"
+assert_not_exists "$blocked_install_root/current"
+assert_not_exists "$blocked_install_root/versions"
+assert_not_exists "$blocked_install_root/state"
 
 remove_tmp_tree "$source_checkout"
 
