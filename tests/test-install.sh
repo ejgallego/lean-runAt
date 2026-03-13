@@ -331,6 +331,15 @@ assert_bundle_layout "$RUNAT_INSTALL_ROOT/state/install-bundles"
 
 (
   cd "$source_checkout"
+  bash scripts/install-runat.sh --all-supported > /dev/null
+)
+
+assert_version_count "$RUNAT_INSTALL_ROOT/versions" 1
+RUNAT_INSTALL_LAYOUT_JSON="$install_layout_json" assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$toolchain" "$expected_source_commit"
+assert_bundle_layout "$RUNAT_INSTALL_ROOT/state/install-bundles"
+
+(
+  cd "$source_checkout"
   bash scripts/install-runat.sh --toolchain "$toolchain" --all-skills > /dev/null
 )
 
