@@ -92,6 +92,8 @@ When working locally:
 
 - start new Codex tasks from `./scripts/codex-harness.sh session start <task-id>` so the task runs
   in a dedicated git worktree instead of the primary checkout
+- keep destructive shell cleanup scoped to owned temp/worktree paths; do not use broad `rm` or
+  `rm -rf` against repo-local `.runat`, install caches, or user homes as part of normal workflows
 - for broker protocol / stream / barrier changes, run `bash tests/test-broker-fast.sh` first
 - for wrapper / install / bundle-resolution changes, also run `bash tests/test-broker-slow.sh`
 - use `bash tests/test-broker.sh` when you want the aggregate broker suite

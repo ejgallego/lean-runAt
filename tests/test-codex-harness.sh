@@ -56,3 +56,15 @@ if ! grep -q 'use ./scripts/codex-harness.sh session start <task-id> instead' "$
   cat "$primary_err" >&2
   exit 1
 fi
+
+unsafe_root_err="$tmp_root/unsafe-root.err"
+if RUNAT_CODEX_WORKTREE_ROOT="/" ./scripts/codex-harness.sh worktree add "unsafe-root-$$" >"$tmp_root/unsafe-root.out" 2>"$unsafe_root_err"; then
+  echo "expected harness to reject / as RUNAT_CODEX_WORKTREE_ROOT" >&2
+  exit 1
+fi
+
+if ! grep -q 'RUNAT_CODEX_WORKTREE_ROOT must not be /' "$unsafe_root_err"; then
+  echo "expected unsafe worktree root refusal to mention / explicitly" >&2
+  cat "$unsafe_root_err" >&2
+  exit 1
+fi

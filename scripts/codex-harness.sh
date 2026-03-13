@@ -27,6 +27,8 @@ Environment:
 
 Note:
   This is maintainer workflow tooling for this repo. It is not part of the public runAt CLI.
+  Destructive cleanup must stay scoped to harness-owned worktrees under RUNAT_CODEX_WORKTREE_ROOT.
+  Do not use broad rm/rm -rf against repo-local or user-local state from normal maintainer flows.
 EOF
 }
 
@@ -50,6 +52,44 @@ worktree_path_for() {
   printf '%s/%s\n' "${WORKTREE_ROOT}" "$1"
 }
 
+realpath_of() {
+  python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"
+}
+
+ensure_safe_worktree_root() {
+  local resolved_root resolved_repo resolved_primary
+  [[ -n "${WORKTREE_ROOT}" ]] || die "RUNAT_CODEX_WORKTREE_ROOT must not be empty"
+  case "${WORKTREE_ROOT}" in
+    /*)
+      ;;
+    *)
+      die "RUNAT_CODEX_WORKTREE_ROOT must be an absolute path: ${WORKTREE_ROOT}"
+      ;;
+  esac
+  resolved_root="$(realpath_of "${WORKTREE_ROOT}")"
+  resolved_repo="$(realpath_of "${REPO_ROOT}")"
+  resolved_primary="$(realpath_of "$(primary_root)")"
+  [[ "${resolved_root}" != "/" ]] || die "RUNAT_CODEX_WORKTREE_ROOT must not be /"
+  [[ "${resolved_root}" != "${resolved_repo}" ]] || die \
+    "RUNAT_CODEX_WORKTREE_ROOT must not be the repo root: ${resolved_root}"
+  [[ "${resolved_root}" != "${resolved_primary}" ]] || die \
+    "RUNAT_CODEX_WORKTREE_ROOT must not be the primary worktree: ${resolved_root}"
+}
+
+ensure_managed_worktree_path() {
+  local path="$1"
+  local resolved_root resolved_path
+  resolved_root="$(realpath_of "${WORKTREE_ROOT}")"
+  resolved_path="$(realpath_of "${path}")"
+  python3 - "$resolved_root" "$resolved_path" <<'PY' >/dev/null || \
+    die "refusing to operate on unmanaged worktree path: ${path}"
+import os, sys
+root, path = sys.argv[1:]
+if os.path.commonpath([root, path]) != root:
+    raise SystemExit(1)
+PY
+}
+
 ensure_primary_tracked_clean() {
   local tracked_status
   tracked_status="$(git -C "$(primary_root)" status --short --untracked-files=no)"
@@ -58,6 +98,7 @@ ensure_primary_tracked_clean() {
 }
 
 ensure_worktree_root() {
+  ensure_safe_worktree_root
   mkdir -p "${WORKTREE_ROOT}"
 }
 
@@ -71,6 +112,7 @@ add_worktree() {
 
   ensure_primary_tracked_clean
   ensure_worktree_root
+  ensure_managed_worktree_path "${path}"
 
   if [[ -d "${path}" ]]; then
     printf '%s\n' "${path}"
@@ -92,6 +134,8 @@ drop_worktree() {
   branch="$(branch_name_for "${slug}")"
   path="$(worktree_path_for "${slug}")"
 
+  ensure_worktree_root
+  ensure_managed_worktree_path "${path}"
   [[ -d "${path}" ]] || die "unknown worktree path: ${path}"
   git -C "${REPO_ROOT}" worktree remove "${path}" >/dev/null
   if git -C "${REPO_ROOT}" show-ref --verify --quiet "refs/heads/${branch}"; then
