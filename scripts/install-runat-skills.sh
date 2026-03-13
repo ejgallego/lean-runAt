@@ -74,6 +74,110 @@ Requirements:
 EOF
 }
 
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+require_absolute_path() {
+  local path="$1"
+  local label="$2"
+  if [ -z "$path" ]; then
+    die "missing $label"
+  fi
+  case "$path" in
+    /*)
+      ;;
+    *)
+      die "$label must be an absolute path: $path"
+      ;;
+  esac
+}
+
+require_path_within() {
+  local path="$1"
+  local root="$2"
+  local label="$3"
+  require_absolute_path "$path" "$label"
+  require_absolute_path "$root" "$label root"
+  case "$path" in
+    "$root"|"$root"/*)
+      ;;
+    *)
+      die "refusing to use $label outside $root: $path"
+      ;;
+  esac
+}
+
+require_owned_staging_dir() {
+  local path="$1"
+  require_path_within "$path" "$install_root" "staging dir"
+  case "$(basename "$path")" in
+    .staging-*)
+      ;;
+    *)
+      die "refusing to touch unexpected staging dir: $path"
+      ;;
+  esac
+}
+
+ensure_replaceable_path() {
+  local path="$1"
+  local root="$2"
+  local label="$3"
+  require_path_within "$path" "$root" "$label"
+  if [ -d "$path" ] && [ ! -L "$path" ]; then
+    die "refusing to replace directory at $path"
+  fi
+}
+
+remove_owned_staging_dir() {
+  local path="$1"
+  require_owned_staging_dir "$path"
+  rm -rf -- "$path"
+}
+
+copy_repo_path_if_present() {
+  local src="$1"
+  local dest="$2"
+  local dest_root="$3"
+  require_path_within "$src" "$repo_root" "copy source"
+  require_path_within "$dest" "$dest_root" "copy destination"
+  if [ -e "$src" ]; then
+    mkdir -p "$(dirname "$dest")"
+    cp -a "$src" "$dest"
+  fi
+}
+
+move_staging_dir_into_versions() {
+  local staging_dir="$1"
+  local version_dir="$2"
+  require_owned_staging_dir "$staging_dir"
+  require_path_within "$version_dir" "$versions_root" "version dir"
+  mv "$staging_dir" "$version_dir"
+}
+
+replace_symlink_atomically() {
+  local target="$1"
+  local link_path="$2"
+  local allowed_root="$3"
+  local label="$4"
+  local link_dir=""
+  local tmp_dir=""
+  local tmp_link=""
+  require_absolute_path "$target" "$label target"
+  ensure_replaceable_path "$link_path" "$allowed_root" "$label"
+  link_dir="$(dirname "$link_path")"
+  require_path_within "$link_dir" "$allowed_root" "$label parent"
+  mkdir -p "$link_dir"
+  tmp_dir="$(mktemp -d "$link_dir/.link-swap-XXXXXX")"
+  require_path_within "$tmp_dir" "$link_dir" "$label temp dir"
+  tmp_link="$tmp_dir/link"
+  ln -s "$target" "$tmp_link"
+  mv -f "$tmp_link" "$link_path"
+  rmdir "$tmp_dir"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --codex)
@@ -98,6 +202,14 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+require_absolute_path "$repo_root" "repo root"
+require_absolute_path "$bin_home" "bin home"
+require_absolute_path "$install_root" "install root"
+require_path_within "$versions_root" "$install_root" "versions root"
+require_path_within "$current_root" "$install_root" "current link"
+require_path_within "$state_root" "$install_root" "state root"
+require_path_within "$install_bundles_root" "$state_root" "install bundle root"
 
 hash_tool() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -176,10 +288,8 @@ require_repo_toolchain() {
 copy_if_present() {
   local src="$1"
   local dest="$2"
-  if [ -e "$src" ]; then
-    mkdir -p "$(dirname "$dest")"
-    cp -a "$src" "$dest"
-  fi
+  local dest_root="$3"
+  copy_repo_path_if_present "$src" "$dest" "$dest_root"
 }
 
 stage_runtime_tree() {
@@ -190,17 +300,17 @@ stage_runtime_tree() {
   local dest_rel=""
   mkdir -p "$dest"
   for path in "${runtime_root_files[@]}"; do
-    copy_if_present "$repo_root/$path" "$dest/$path"
+    copy_if_present "$repo_root/$path" "$dest/$path" "$dest"
   done
   for path in "${runtime_source_dirs[@]}"; do
-    copy_if_present "$repo_root/$path" "$dest/$path"
+    copy_if_present "$repo_root/$path" "$dest/$path" "$dest"
   done
   for mapping in "${runtime_binary_artifacts[@]}"; do
     src_rel="${mapping%%:*}"
     dest_rel="${mapping#*:}"
-    copy_if_present "$repo_root/$src_rel" "$dest/$dest_rel"
+    copy_if_present "$repo_root/$src_rel" "$dest/$dest_rel" "$dest"
   done
-  copy_if_present "$repo_root/.lake/packages" "$dest/.lake/packages"
+  copy_if_present "$repo_root/.lake/packages" "$dest/.lake/packages" "$dest"
 }
 
 write_runat_wrapper() {
@@ -389,6 +499,7 @@ prebuild_bundle() {
 
 install_skills() {
   local skills_home="$1"
+  require_absolute_path "$skills_home" "skills home"
   mkdir -p "$skills_home/lean-runat" "$skills_home/rocq-runat"
   rsync -a "$repo_root/skills/lean-runat/" "$skills_home/lean-runat/"
   rsync -a "$repo_root/skills/rocq-runat/" "$skills_home/rocq-runat/"
@@ -402,16 +513,16 @@ mkdir -p "$bin_home" "$versions_root" "$state_root"
 ensure_runtime_artifacts
 
 staging_root="$(mktemp -d "$install_root/.staging-XXXXXX")"
-trap 'rm -rf "$staging_root"' EXIT
+trap 'remove_owned_staging_dir "$staging_root"' EXIT
 stage_install_version "$staging_root" "$current_root" "$install_bundles_root"
 payload_id="$(hash_tree "$staging_root")"
 version_root="$versions_root/$payload_id"
 source_commit="$(repo_source_commit)"
 write_install_manifest "$staging_root/manifest.json" "$payload_id" "$repo_toolchain" "$source_commit"
 if [ ! -d "$version_root" ]; then
-  mv "$staging_root" "$version_root"
+  move_staging_dir_into_versions "$staging_root" "$version_root"
 else
-  rm -rf "$staging_root"
+  remove_owned_staging_dir "$staging_root"
 fi
 trap - EXIT
 
@@ -422,9 +533,9 @@ fi
 echo "prebuilding runAt bundle for $repo_toolchain" >&2
 prebuild_bundle "$version_root" "$repo_toolchain" "$install_bundles_root"
 
-ln -sfn "$version_root" "$current_root"
-ln -sfn "$current_root/bin/runat" "$bin_home/runat"
-ln -sfn "$current_root/bin/runat-lean-search" "$bin_home/runat-lean-search"
+replace_symlink_atomically "$version_root" "$current_root" "$install_root" "current link"
+replace_symlink_atomically "$current_root/bin/runat" "$bin_home/runat" "$bin_home" "runat wrapper link"
+replace_symlink_atomically "$current_root/bin/runat-lean-search" "$bin_home/runat-lean-search" "$bin_home" "runat-lean-search link"
 
 if [ "$install_codex_skills" -eq 1 ]; then
   install_skills "$codex_skills_home"
