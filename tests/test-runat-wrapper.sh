@@ -947,6 +947,35 @@ EOF
     exit 1
   fi
 
+  wrapper_shadow_root="$tmp1/wrapper-shadow-root"
+  mkdir -p "$wrapper_shadow_root/scripts" "$wrapper_shadow_root/.lake/build/bin" "$wrapper_shadow_root/libexec"
+  cp "$runat_script" "$wrapper_shadow_root/scripts/runat"
+  cat > "$wrapper_shadow_root/.lake/build/bin/runAt-cli" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'checkout\n'
+EOF
+  cat > "$wrapper_shadow_root/libexec/runAt-cli" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'installed\n'
+EOF
+  chmod +x "$wrapper_shadow_root/.lake/build/bin/runAt-cli" "$wrapper_shadow_root/libexec/runAt-cli"
+
+  wrapper_shadow_out="$("$wrapper_shadow_root/scripts/runat" stats)"
+  if [ "$wrapper_shadow_out" != "checkout" ]; then
+    echo "expected checkout wrapper to prefer .lake/build over sibling libexec when RUNAT_HOME is unset" >&2
+    printf '%s\n' "$wrapper_shadow_out" >&2
+    exit 1
+  fi
+
+  wrapper_override_out="$(RUNAT_HOME="$wrapper_shadow_root" "$wrapper_shadow_root/scripts/runat" stats)"
+  if [ "$wrapper_override_out" != "installed" ]; then
+    echo "expected explicit RUNAT_HOME to prefer libexec in the overridden runtime" >&2
+    printf '%s\n' "$wrapper_override_out" >&2
+    exit 1
+  fi
+
   helper_root="$("$search_helper" mint HandleSmoke.lean 0 27 "constructor")"
   if [ "$(RUNAT_JSON_PAYLOAD="$helper_root" read_json_text_field ok)" != "true" ]; then
     echo "expected helper mint to succeed" >&2

@@ -21,11 +21,19 @@ resolve_script_path() {
 
 script_path="$(resolve_script_path)"
 script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
-repo_root="${RUNAT_HOME:-$(cd -P "$script_dir/.." && pwd)}"
-if [ -x "$repo_root/libexec/runAt-cli" ]; then
-  runat_bin="$repo_root/libexec/runAt-cli"
+if [ -n "${RUNAT_HOME:-}" ]; then
+  repo_root="$RUNAT_HOME"
+  if [ -x "$repo_root/libexec/runAt-cli" ]; then
+    runat_bin="$repo_root/libexec/runAt-cli"
+  else
+    runat_bin="$repo_root/.lake/build/bin/runAt-cli"
+  fi
 else
+  repo_root="$(cd -P "$script_dir/.." && pwd)"
   runat_bin="$repo_root/.lake/build/bin/runAt-cli"
+  if [ ! -x "$runat_bin" ] && [ -x "$repo_root/libexec/runAt-cli" ]; then
+    runat_bin="$repo_root/libexec/runAt-cli"
+  fi
 fi
 
 if [ ! -x "$runat_bin" ]; then

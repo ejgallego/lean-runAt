@@ -251,6 +251,25 @@ assert_not_exists "$RUNAT_INSTALL_ROOT/current"
 assert_version_count "$RUNAT_INSTALL_ROOT/versions" 0
 assert_not_exists "$RUNAT_INSTALL_ROOT/state"
 
+relative_root_err="$(mktemp "$tmp_root/install-relative-root-XXXXXX")"
+if (
+  cd "$source_checkout"
+  RUNAT_INSTALL_ROOT="relative/install-root" bash scripts/install-runat-skills.sh > /dev/null 2>"$relative_root_err"
+); then
+  echo "expected install to fail when RUNAT_INSTALL_ROOT is relative" >&2
+  cat "$relative_root_err" >&2
+  remove_tmp_file "$relative_root_err"
+  exit 1
+fi
+if ! grep -q 'install root must be an absolute path' "$relative_root_err"; then
+  echo "expected relative install root failure to explain the absolute-path requirement" >&2
+  cat "$relative_root_err" >&2
+  remove_tmp_file "$relative_root_err"
+  exit 1
+fi
+remove_tmp_file "$relative_root_err"
+assert_not_exists "$source_checkout/relative"
+
 (
   cd "$source_checkout"
   bash scripts/install-runat-skills.sh > /dev/null
@@ -297,6 +316,34 @@ for skills_home in "$CODEX_HOME" "$CLAUDE_HOME"; do
 done
 assert_version_count "$RUNAT_INSTALL_ROOT/versions" 1
 assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$toolchain" "$expected_source_commit"
+
+blocked_home="$tmp_root/blocked-home"
+blocked_install_root="$tmp_root/blocked-install-root"
+blocked_runat_dir="$blocked_home/.local/bin/runat"
+mkdir -p "$blocked_runat_dir" "$blocked_install_root"
+blocked_wrapper_err="$(mktemp "$tmp_root/install-wrapper-dir-XXXXXX")"
+if (
+  cd "$source_checkout"
+  HOME="$blocked_home" RUNAT_INSTALL_ROOT="$blocked_install_root" \
+    bash scripts/install-runat-skills.sh > /dev/null 2>"$blocked_wrapper_err"
+); then
+  echo "expected install to fail when the wrapper target path is a real directory" >&2
+  cat "$blocked_wrapper_err" >&2
+  remove_tmp_file "$blocked_wrapper_err"
+  exit 1
+fi
+if ! grep -q "refusing to replace directory at $blocked_runat_dir" "$blocked_wrapper_err"; then
+  echo "expected wrapper-directory install failure to explain the refusal" >&2
+  cat "$blocked_wrapper_err" >&2
+  remove_tmp_file "$blocked_wrapper_err"
+  exit 1
+fi
+remove_tmp_file "$blocked_wrapper_err"
+if [ ! -d "$blocked_runat_dir" ]; then
+  echo "expected blocked wrapper directory to remain untouched" >&2
+  exit 1
+fi
+assert_not_exists "$blocked_home/.local/bin/runat-lean-search"
 
 remove_tmp_tree "$source_checkout"
 

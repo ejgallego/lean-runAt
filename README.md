@@ -287,7 +287,18 @@ If you want the wrapper on `PATH`, install it with:
 bash scripts/install-runat-skills.sh
 ```
 
-That installs the self-contained runtime:
+Installation procedure:
+
+1. Ensure `elan` is on `PATH`.
+2. Run `bash scripts/install-runat-skills.sh` for the base runtime.
+3. Optionally rerun with `--codex`, `--claude`, or `--all-skills` to install the bundled agent
+   skills.
+4. Ensure `~/.local/bin` is on `PATH`, then restart Codex or Claude Code if you installed skills.
+
+The installer requires `RUNAT_INSTALL_ROOT` to be an absolute path when you override it, and it
+refuses to replace a real directory at the public wrapper paths.
+
+The base install writes the self-contained runtime:
 
 - `runat` into `~/.local/bin`
 - `runat-lean-search` into `~/.local/bin`
@@ -358,6 +369,8 @@ That installer:
 - points `~/.local/bin/runat` and `runat-lean-search` at `RUNAT_INSTALL_ROOT/current`
 - requires `elan` on `PATH` and prebuilds an installed Lean bundle under
   `RUNAT_INSTALL_ROOT/state/install-bundles`
+- requires `RUNAT_INSTALL_ROOT` to be absolute when overridden
+- refuses to replace a real directory at the public wrapper link paths
 - installs bundled skills only when you pass `--codex`, `--claude`, or `--all-skills`
 
 The important terminology is:

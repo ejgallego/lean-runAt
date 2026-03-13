@@ -30,8 +30,6 @@ Use one dedicated artifact install root, defaulting to `~/.local/share/runat` an
     libexec/runAt-cli
     libexec/runAt-cli-daemon
     libexec/runAt-cli-client
-    share/skills/lean-runat/...
-    share/skills/rocq-runat/...
     manifest.json
   state/install-bundles/<toolchain>/...
 ```
@@ -49,7 +47,7 @@ The installer should:
 1. Build or locate the required runtime artifacts from the source checkout.
 2. Resolve the artifact install root from `RUNAT_INSTALL_ROOT`, defaulting to `~/.local/share/runat`.
 3. Copy those artifacts into a new versioned install directory under that root.
-4. Copy the shipped skill files into that install directory.
+4. Install the shipped skill files into agent homes only when explicitly requested.
 5. Prebuild the pinned Lean bundle into the install state directory when possible.
 6. Update `current` atomically.
 7. Point `~/.local/bin/runat` and `runat-lean-search` at the installed wrappers, not the checkout.
@@ -87,9 +85,11 @@ defensive:
 - avoid depending on the caller's cwd; resolve all internal paths once and pass absolute paths
 - treat the artifact install root as first-class shell configuration, not an inferred side effect of
   the checkout layout
+- reject relative install roots and other ambiguous filesystem targets up front
 - make all filesystem transitions atomic where possible: stage in a temp dir, validate, then rename
 - check required tools explicitly and fail with one targeted message per missing dependency
 - do not delete repo-local or user-local state outside the install root unless the user asked for cleanup
+- refuse to replace real directories at public wrapper link paths
 - keep path resolution portable across GNU and BSD userlands
 - keep checksum generation deterministic by sorting manifest inputs and hashing file contents, not mtimes
 

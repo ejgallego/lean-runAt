@@ -164,11 +164,23 @@ private def defaultBundlePaths (home : System.FilePath) : IO BundlePaths := do
   let checkoutDaemon := home / ".lake" / "build" / "bin" / "runAt-cli-daemon"
   let checkoutClient := home / ".lake" / "build" / "bin" / "runAt-cli-client"
   let checkoutPlugin := home / ".lake" / "build" / "lib" / "librunAt_RunAt.so"
-  pure {
-    daemon := if (← installedDaemon.pathExists) then installedDaemon else checkoutDaemon
-    client := if (← installedClient.pathExists) then installedClient else checkoutClient
-    plugin := if (← installedPlugin.pathExists) then installedPlugin else checkoutPlugin
-  }
+  let installedReady :=
+    (← installedDaemon.pathExists) &&
+    (← installedClient.pathExists) &&
+    (← installedPlugin.pathExists)
+  pure <|
+    if installedReady then
+      {
+        daemon := installedDaemon
+        client := installedClient
+        plugin := installedPlugin
+      }
+    else
+      {
+        daemon := checkoutDaemon
+        client := checkoutClient
+        plugin := checkoutPlugin
+      }
 
 private def ensurePathExists (kind : String) (path : System.FilePath) : IO Unit := do
   unless ← path.pathExists do
