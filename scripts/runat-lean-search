@@ -1,9 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-script_path="$(readlink -f "${BASH_SOURCE[0]}")"
-script_dir="$(cd "$(dirname "$script_path")" && pwd)"
-repo_root="${RUNAT_HOME:-$(cd "$script_dir/.." && pwd)}"
+resolve_script_path() {
+  local source="${BASH_SOURCE[0]}"
+  local dir=""
+  while [ -L "$source" ]; do
+    dir="$(cd -P "$(dirname "$source")" && pwd)"
+    source="$(readlink "$source")"
+    case "$source" in
+      /*)
+        ;;
+      *)
+        source="$dir/$source"
+        ;;
+    esac
+  done
+  dir="$(cd -P "$(dirname "$source")" && pwd)"
+  printf '%s/%s\n' "$dir" "$(basename "$source")"
+}
+
+script_path="$(resolve_script_path)"
+script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
+repo_root="${RUNAT_HOME:-$(cd -P "$script_dir/.." && pwd)}"
 runat_script="$repo_root/scripts/runat"
 
 usage() {

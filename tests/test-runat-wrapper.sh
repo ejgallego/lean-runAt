@@ -910,6 +910,43 @@ EOF
     exit 1
   fi
 
+  portable_wrapper_bin="$tmp1/portable-wrapper-bin"
+  system_readlink="$(command -v readlink)"
+  mkdir -p "$portable_wrapper_bin"
+  ln -sf "$runat_script" "$portable_wrapper_bin/runat"
+  ln -sf "$search_helper" "$portable_wrapper_bin/runat-lean-search"
+  cat > "$portable_wrapper_bin/readlink" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "\${1:-}" = "-f" ]; then
+  echo "unexpected readlink -f in portability test" >&2
+  exit 64
+fi
+
+exec "$system_readlink" "\$@"
+EOF
+  chmod +x "$portable_wrapper_bin/readlink"
+
+  portable_stats_out="$(PATH="$portable_wrapper_bin:$PATH" "$portable_wrapper_bin/runat" stats)"
+  if [ "$(RUNAT_JSON_PAYLOAD="$portable_stats_out" read_json_text_field ok)" != "true" ]; then
+    echo "expected symlinked wrapper to work when readlink -f is unavailable" >&2
+    printf '%s\n' "$portable_stats_out" >&2
+    exit 1
+  fi
+
+  portable_helper_root="$(PATH="$portable_wrapper_bin:$PATH" "$portable_wrapper_bin/runat-lean-search" mint HandleSmoke.lean 0 27 "constructor")"
+  if [ "$(RUNAT_JSON_PAYLOAD="$portable_helper_root" read_json_text_field ok)" != "true" ]; then
+    echo "expected symlinked helper to work when readlink -f is unavailable" >&2
+    printf '%s\n' "$portable_helper_root" >&2
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$portable_helper_root" read_json_text_field result.handle.backend)" != "lean" ]; then
+    echo "expected symlinked helper mint to return a lean handle" >&2
+    printf '%s\n' "$portable_helper_root" >&2
+    exit 1
+  fi
+
   helper_root="$("$search_helper" mint HandleSmoke.lean 0 27 "constructor")"
   if [ "$(RUNAT_JSON_PAYLOAD="$helper_root" read_json_text_field ok)" != "true" ]; then
     echo "expected helper mint to succeed" >&2

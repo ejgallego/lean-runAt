@@ -16,13 +16,16 @@ both skills need it.
 From the `runAt` repo root:
 
 ```bash
-bash scripts/install-runat-skills.sh
+bash scripts/install-runat-skills.sh --codex
 ```
 
-The installer puts `runat` and `runat-lean-search` in `~/.local/bin`, installs the bundled skills
-for both Codex and Claude Code under `$CODEX_HOME/skills` and `$CLAUDE_HOME/skills` when those are
-set, otherwise under `~/.codex/skills` and `~/.claude/skills`, and prebuilds the pinned
-`lean-toolchain` bundle into the installed `lean-runat` skill cache.
+Use `--claude` instead when installing for Claude Code, or `--all-skills` when you want both agent
+skill sets.
+
+The installer puts `runat` and `runat-lean-search` in `~/.local/bin`, stages the self-contained
+runtime under `RUNAT_INSTALL_ROOT` (default `~/.local/share/runat`), requires `elan` on `PATH`,
+prebuilds the pinned `lean-toolchain` bundle under `RUNAT_INSTALL_ROOT/state/install-bundles`, and
+installs the bundled skills only for the agent flags you request.
 
 Restart Codex or Claude Code after installation.
 
@@ -139,7 +142,7 @@ Use `runat`, not raw JSON and not raw LSP.
 - infers the target project root from the current directory or `--root`
 - keeps one CLI daemon per project root and records it in `<root>/.runat/cli-daemon.json`
   - in sandboxed or read-only project trees, set `RUNAT_CONTROL_DIR` to a writable directory; `runat` uses a per-root subdirectory there
-- resolves a toolchain-keyed Lean bundle, preferring the installed `lean-runat` bundle cache and
+- resolves a toolchain-keyed Lean bundle, preferring the installed runAt bundle cache and
   falling back to a project-local runtime bundle under `<root>/.runat/bundles` or `RUNAT_BUNDLE_DIR`
 - owns CLI daemon startup, shutdown, and registry handling
 - resolves Lean with `elan which lean`

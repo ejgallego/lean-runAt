@@ -17,12 +17,16 @@ duplicate short guidance if both skills need it.
 From the `runAt` repo root:
 
 ```bash
-bash scripts/install-runat-skills.sh
+bash scripts/install-runat-skills.sh --codex
 ```
 
-The installer puts `runat` in `~/.local/bin` and installs the Lean and Rocq skills for both Codex
-and Claude Code. During install it also prebuilds the pinned `lean-toolchain` bundle into the
-installed `lean-runat` skill cache.
+Use `--claude` instead when installing for Claude Code, or `--all-skills` when you want both agent
+skill sets.
+
+The installer puts `runat` in `~/.local/bin`, stages the self-contained runtime under
+`RUNAT_INSTALL_ROOT` (default `~/.local/share/runat`), requires `elan` on `PATH`, prebuilds the
+pinned `lean-toolchain` bundle under `RUNAT_INSTALL_ROOT/state/install-bundles`, and installs the
+Lean and Rocq bundled skills only for the agent flags you request.
 
 Restart Codex or Claude Code after installation.
 
@@ -74,7 +78,7 @@ Use `runat`, not raw JSON and not raw LSP.
   - in sandboxed or read-only project trees, set `RUNAT_CONTROL_DIR` to a writable directory
 - for Lean-backed brokers, bundle builds can be redirected via `RUNAT_BUNDLE_DIR` in the same way as
   `RUNAT_CONTROL_DIR` to avoid project-local cache writes
-- Lean-backed runtime resolution first tries the installed `lean-runat` bundle cache and then falls
+- Lean-backed runtime resolution first tries the installed runAt bundle cache and then falls
   back to the project-local bundle cache
 - owns CLI daemon startup, shutdown, and registry handling
 - resolves `coq-lsp` from the target project's local `_opam` when available

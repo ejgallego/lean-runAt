@@ -12,7 +12,7 @@ runtime, wrappers, and caches separate from any developer checkout.
 - Reinstall deletes repo-local `.runat` bundle caches as a side effect.
 - Installed Lean bundles live under agent skill homes, which couples command-line runtime behavior to
   Codex/Claude skill installation.
-- The wrapper entrypoints use `readlink -f`, which is not portable to macOS/BSD shells.
+- Wrapper path resolution must stay portable across GNU and BSD userlands.
 
 ## Target Layout
 
@@ -132,7 +132,8 @@ Acceptance:
 ### Phase 3: Split Runtime Install From Skill Install
 
 - Make the base installer install the runtime only.
-- Add explicit optional flags or a follow-up command for Codex and Claude skill installation.
+- Add explicit optional `--codex`, `--claude`, and `--all-skills` modes for Codex and Claude skill
+  installation.
 - Keep a convenience mode that installs runtime plus both skill sets for maintainers.
 
 Acceptance:
@@ -142,7 +143,7 @@ Acceptance:
 
 ### Phase 4: Harden Portability And Upgrade Semantics
 
-- Replace `readlink -f` with a portable path-resolution approach.
+- Keep wrapper path resolution portable across GNU and BSD userlands and cover it with tests.
 - Write a manifest with payload checksum, source commit, toolchain, and artifact paths.
 - Make reinstall/upgrade atomic by preparing a new version directory and then switching `current`.
 - Add cleanup policy for old `versions/` directories without touching active state.
@@ -160,10 +161,10 @@ Extend `tests/test-install.sh` to cover:
 - configurable artifact install root via `RUNAT_INSTALL_ROOT`
 - installed command still works after the source checkout is renamed or made unavailable
 - base install without Codex/Claude homes
+- explicit skill install flags after the base runtime install
 - reinstall preserves repo-local `.runat` and installed bundle state
 - reinstall with identical payload reuses the same version directory/checksum instead of duplicating it
-- missing `elan` behavior is explicit: either fail early or succeed only when a runnable runtime is
-  already staged
+- missing `elan` fails early with no install side effects
 - installed bundle resolution prefers the install-owned cache over local fallback
 
 Add a small wrapper portability test for path resolution so shell behavior does not depend on GNU
@@ -172,13 +173,7 @@ Add a small wrapper portability test for path resolution so shell behavior does 
 ## Migration Notes
 
 - Keep the current `bash scripts/install-runat-skills.sh` entrypoint initially, but change its
-  behavior to produce the new install tree.
+  behavior to produce the new install tree and treat skill installation as an explicit opt-in.
 - Preserve `RUNAT_HOME`, `RUNAT_INSTALL_BUNDLE_DIR`, `RUNAT_BUNDLE_DIR`, and `RUNAT_CONTROL_DIR`.
 - For one transition window, wrapper resolution may still look in the old skill-home install bundle
   locations as a fallback, but docs should mark that path deprecated.
-
-## Open Decisions
-
-- Whether the base installer should fail hard when `elan` is missing and no runnable CLI artifacts
-  are already available.
-- Whether skill installation belongs in the same script with flags or in a separate script.

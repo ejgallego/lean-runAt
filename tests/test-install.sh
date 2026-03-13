@@ -11,7 +11,7 @@ export CODEX_HOME="$tmp_root/codex"
 export CLAUDE_HOME="$tmp_root/claude"
 export RUNAT_INSTALL_ROOT="$tmp_root/install-root"
 
-mkdir -p "$HOME" "$CODEX_HOME" "$CLAUDE_HOME" "$RUNAT_INSTALL_ROOT"
+mkdir -p "$HOME" "$RUNAT_INSTALL_ROOT"
 
 toolchain="$(awk 'NR==1 {print $1}' lean-toolchain)"
 source_checkout="$tmp_root/source-checkout"
@@ -20,6 +20,14 @@ assert_file() {
   local path="$1"
   if [ ! -f "$path" ]; then
     echo "missing file: $path" >&2
+    exit 1
+  fi
+}
+
+assert_not_exists() {
+  local path="$1"
+  if [ -e "$path" ]; then
+    echo "expected path to be absent: $path" >&2
     exit 1
   fi
 }
@@ -57,6 +65,98 @@ assert_runtime_layout() {
   assert_file "$runtime_root/bin/runat-lean-search"
 }
 
+assert_manifest_metadata() {
+  local manifest_path="$1"
+  local expected_payload="$2"
+  local expected_toolchain="$3"
+  local expected_source_commit="$4"
+  python3 - "$manifest_path" "$expected_payload" "$expected_toolchain" "$expected_source_commit" <<'PY'
+import json
+import sys
+
+manifest_path, expected_payload, expected_toolchain, expected_source_commit = sys.argv[1:]
+with open(manifest_path, "r", encoding="utf-8") as f:
+    manifest = json.load(f)
+
+if manifest.get("schemaVersion") != 1:
+    raise SystemExit(f"unexpected manifest schemaVersion: {manifest.get('schemaVersion')}")
+if manifest.get("payloadHash") != expected_payload:
+    raise SystemExit(f"unexpected manifest payloadHash: {manifest.get('payloadHash')}")
+if manifest.get("toolchain") != expected_toolchain:
+    raise SystemExit(f"unexpected manifest toolchain: {manifest.get('toolchain')}")
+actual_source_commit = manifest.get("sourceCommit", "sentinel")
+if expected_source_commit:
+    if actual_source_commit != expected_source_commit:
+        raise SystemExit(f"unexpected manifest sourceCommit: {actual_source_commit}")
+else:
+    if actual_source_commit is not None:
+        raise SystemExit(f"expected manifest sourceCommit to be null in non-git install copy: {actual_source_commit}")
+
+artifacts = manifest.get("artifacts")
+if not isinstance(artifacts, dict):
+    raise SystemExit("manifest artifacts payload is missing")
+
+root_files = artifacts.get("rootFiles")
+source_dirs = artifacts.get("sourceDirs")
+runtime_paths = artifacts.get("runtimePaths")
+wrapper_paths = artifacts.get("wrapperPaths")
+
+expected_root_files = {"RunAt.lean", "RunAtCli.lean", "lakefile.lean", "lakefile.toml", "lake-manifest.json", "lean-toolchain"}
+expected_source_dirs = {"RunAt", "RunAtCli", "ffi"}
+expected_runtime_paths = {
+    ".lake/build/bin/runAt-cli",
+    ".lake/build/bin/runAt-cli-daemon",
+    ".lake/build/bin/runAt-cli-client",
+    ".lake/build/lib/librunAt_RunAt.so",
+    ".lake/packages",
+}
+expected_wrapper_paths = {"bin/runat", "bin/runat-lean-search"}
+
+if set(root_files or []) != expected_root_files:
+    raise SystemExit(f"unexpected manifest rootFiles: {root_files}")
+if set(source_dirs or []) != expected_source_dirs:
+    raise SystemExit(f"unexpected manifest sourceDirs: {source_dirs}")
+if set(runtime_paths or []) != expected_runtime_paths:
+    raise SystemExit(f"unexpected manifest runtimePaths: {runtime_paths}")
+if set(wrapper_paths or []) != expected_wrapper_paths:
+    raise SystemExit(f"unexpected manifest wrapperPaths: {wrapper_paths}")
+PY
+}
+
+assert_version_count() {
+  local versions_root="$1"
+  local expected="$2"
+  local actual
+  if [ -d "$versions_root" ]; then
+    actual="$(find "$versions_root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+  else
+    actual="0"
+  fi
+  if [ "$actual" != "$expected" ]; then
+    echo "expected $expected installed runtime version(s) under $versions_root, got $actual" >&2
+    exit 1
+  fi
+}
+
+path_without_elan() {
+  local old_ifs="$IFS"
+  local dir=""
+  local filtered=()
+  IFS=':'
+  for dir in $PATH; do
+    [ -n "$dir" ] || dir="."
+    if [ -x "$dir/elan" ]; then
+      continue
+    fi
+    filtered+=("$dir")
+  done
+  IFS="$old_ifs"
+  (
+    IFS=':'
+    printf '%s' "${filtered[*]}"
+  )
+}
+
 assert_bundle_layout() {
   local bundle_root="$1"
   local metadata
@@ -81,10 +181,40 @@ assert_bundle_layout() {
 }
 
 rsync -a --exclude='.git/' ./ "$source_checkout"/
+path_no_elan="$(path_without_elan)"
+if PATH="$path_no_elan" command -v elan >/dev/null 2>&1; then
+  echo "failed to construct a PATH without elan for the negative install test" >&2
+  exit 1
+fi
+missing_elan_err="$(mktemp "$tmp_root/install-missing-elan-XXXXXX")"
+if (
+  cd "$source_checkout"
+  PATH="$path_no_elan" bash scripts/install-runat-skills.sh > /dev/null 2>"$missing_elan_err"
+); then
+  echo "expected install to fail when elan is missing from PATH" >&2
+  cat "$missing_elan_err" >&2
+  rm -f "$missing_elan_err"
+  exit 1
+fi
+if ! grep -q 'missing elan on PATH' "$missing_elan_err"; then
+  echo "expected missing-elan install failure to explain the prebuild requirement" >&2
+  cat "$missing_elan_err" >&2
+  rm -f "$missing_elan_err"
+  exit 1
+fi
+rm -f "$missing_elan_err"
+assert_not_exists "$HOME/.local"
+assert_not_exists "$CODEX_HOME"
+assert_not_exists "$CLAUDE_HOME"
+assert_not_exists "$RUNAT_INSTALL_ROOT/current"
+assert_version_count "$RUNAT_INSTALL_ROOT/versions" 0
+assert_not_exists "$RUNAT_INSTALL_ROOT/state"
+
 (
   cd "$source_checkout"
   bash scripts/install-runat-skills.sh > /dev/null
 )
+expected_source_commit="$(git -C "$source_checkout" rev-parse HEAD 2>/dev/null || true)"
 
 installed_runat="$HOME/.local/bin/runat"
 installed_helper="$HOME/.local/bin/runat-lean-search"
@@ -103,6 +233,20 @@ fi
 assert_symlink_target "$installed_runat" "$installed_runtime_root/bin/runat"
 assert_symlink_target "$installed_helper" "$installed_runtime_root/bin/runat-lean-search"
 assert_runtime_layout "$installed_runtime_root"
+assert_version_count "$RUNAT_INSTALL_ROOT/versions" 1
+installed_version_root="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$installed_runtime_root")"
+installed_payload_id="$(basename "$installed_version_root")"
+assert_file "$installed_runtime_root/manifest.json"
+assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$toolchain" "$expected_source_commit"
+
+assert_not_exists "$CODEX_HOME"
+assert_not_exists "$CLAUDE_HOME"
+assert_bundle_layout "$RUNAT_INSTALL_ROOT/state/install-bundles"
+
+(
+  cd "$source_checkout"
+  bash scripts/install-runat-skills.sh --all-skills > /dev/null
+)
 
 for skills_home in "$CODEX_HOME" "$CLAUDE_HOME"; do
   assert_file "$skills_home/skills/lean-runat/SKILL.md"
@@ -110,7 +254,8 @@ for skills_home in "$CODEX_HOME" "$CLAUDE_HOME"; do
   assert_no_skill_socket_guidance "$skills_home/skills/lean-runat/SKILL.md"
   assert_no_skill_socket_guidance "$skills_home/skills/rocq-runat/SKILL.md"
 done
-assert_bundle_layout "$RUNAT_INSTALL_ROOT/state/install-bundles"
+assert_version_count "$RUNAT_INSTALL_ROOT/versions" 1
+assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$toolchain" "$expected_source_commit"
 
 rm -rf "$source_checkout"
 

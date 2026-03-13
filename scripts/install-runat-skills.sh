@@ -11,6 +11,9 @@ current_root="$install_root/current"
 state_root="$install_root/state"
 install_bundles_root="$state_root/install-bundles"
 runat_cli="$repo_root/.lake/build/bin/runAt-cli"
+install_codex_skills=0
+install_claude_skills=0
+installed_skill_targets=()
 
 runtime_root_files=(
   "RunAt.lean"
@@ -34,6 +37,60 @@ runtime_build_paths=(
   ".lake/build/lib/librunAt_RunAt.so"
   ".lake/packages"
 )
+
+runtime_wrapper_paths=(
+  "bin/runat"
+  "bin/runat-lean-search"
+)
+
+usage() {
+  cat <<EOF
+Usage:
+  bash scripts/install-runat-skills.sh [--codex] [--claude] [--all-skills]
+
+Installs the self-contained runAt runtime into:
+  $install_root
+
+Default behavior installs the runtime only. Optional flags add bundled skills:
+  --codex       install bundled Lean and Rocq skills into $codex_skills_home
+  --claude      install bundled Lean and Rocq skills into $claude_skills_home
+  --all-skills  install bundled skills for both Codex and Claude Code
+  -h, --help    show this help
+
+Environment:
+  RUNAT_INSTALL_ROOT   override the runtime install root
+  CODEX_HOME           override the Codex home used by --codex
+  CLAUDE_HOME          override the Claude home used by --claude
+
+Requirements:
+  elan must be on PATH so the installer can prebuild the pinned Lean bundle
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --codex)
+      install_codex_skills=1
+      ;;
+    --claude)
+      install_claude_skills=1
+      ;;
+    --all-skills)
+      install_codex_skills=1
+      install_claude_skills=1
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
 
 hash_tool() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -79,6 +136,34 @@ ensure_runtime_artifacts() {
     cd "$repo_root"
     lake build RunAt:shared runAt-cli runAt-cli-daemon runAt-cli-client
   )
+}
+
+json_null_or_string() {
+  local value="${1-}"
+  if [ -z "$value" ]; then
+    printf 'null'
+  else
+    printf '"%s"' "$value"
+  fi
+}
+
+repo_source_commit() {
+  git -C "$repo_root" rev-parse HEAD 2>/dev/null || true
+}
+
+require_elan() {
+  if ! command -v elan >/dev/null 2>&1; then
+    echo "missing elan on PATH; runAt install requires elan to prebuild the pinned Lean bundle" >&2
+    exit 1
+  fi
+}
+
+require_repo_toolchain() {
+  local toolchain="$1"
+  if [ -z "$toolchain" ]; then
+    echo "missing pinned Lean toolchain in $repo_root/lean-toolchain; refusing incomplete install" >&2
+    exit 1
+  fi
 }
 
 copy_if_present() {
@@ -232,6 +317,54 @@ stage_install_version() {
   write_search_helper "$dest/bin/runat-lean-search" "$default_home"
 }
 
+write_manifest_array() {
+  local dest="$1"
+  local entries_name="$2"
+  shift 2
+  local entries=("$@")
+  local idx=0
+  printf '    "%s": [\n' "$entries_name" >>"$dest"
+  for idx in "${!entries[@]}"; do
+    if [ "$idx" -gt 0 ]; then
+      printf ',\n' >>"$dest"
+    fi
+    printf '      "%s"' "${entries[$idx]}" >>"$dest"
+  done
+  printf '\n    ]' >>"$dest"
+}
+
+write_install_manifest() {
+  local dest="$1"
+  local payload_id="$2"
+  local toolchain="$3"
+  local source_commit="$4"
+  cat >"$dest" <<EOF
+{
+  "schemaVersion": 1,
+  "payloadHash": "$payload_id",
+  "toolchain": "$toolchain",
+  "sourceCommit": $(json_null_or_string "$source_commit"),
+  "artifacts": {
+EOF
+  write_manifest_array "$dest" "rootFiles" "${runtime_root_files[@]}"
+  cat >>"$dest" <<EOF
+,
+EOF
+  write_manifest_array "$dest" "sourceDirs" "${runtime_source_dirs[@]}"
+  cat >>"$dest" <<EOF
+,
+EOF
+  write_manifest_array "$dest" "runtimePaths" "${runtime_build_paths[@]}"
+  cat >>"$dest" <<EOF
+,
+EOF
+  write_manifest_array "$dest" "wrapperPaths" "${runtime_wrapper_paths[@]}"
+  cat >>"$dest" <<'EOF'
+  }
+}
+EOF
+}
+
 prebuild_bundle() {
   local runtime_home="$1"
   local toolchain="$2"
@@ -248,9 +381,11 @@ install_skills() {
   rsync -a "$repo_root/skills/rocq-runat/" "$skills_home/rocq-runat/"
 }
 
+require_elan
+repo_toolchain="$(awk 'NR==1 {print $1}' "$repo_root/lean-toolchain")"
+require_repo_toolchain "$repo_toolchain"
+
 mkdir -p "$bin_home" "$versions_root" "$state_root"
-install_skills "$codex_skills_home"
-install_skills "$claude_skills_home"
 ensure_runtime_artifacts
 
 staging_root="$(mktemp -d "$install_root/.staging-XXXXXX")"
@@ -258,6 +393,8 @@ trap 'rm -rf "$staging_root"' EXIT
 stage_install_version "$staging_root" "$current_root" "$install_bundles_root"
 payload_id="$(hash_tree "$staging_root")"
 version_root="$versions_root/$payload_id"
+source_commit="$(repo_source_commit)"
+write_install_manifest "$staging_root/manifest.json" "$payload_id" "$repo_toolchain" "$source_commit"
 if [ ! -d "$version_root" ]; then
   mv "$staging_root" "$version_root"
 else
@@ -265,24 +402,45 @@ else
 fi
 trap - EXIT
 
-if command -v elan >/dev/null 2>&1; then
-  repo_toolchain="$(awk 'NR==1 {print $1}' "$repo_root/lean-toolchain")"
-  if [ -n "$repo_toolchain" ]; then
-    echo "prebuilding runAt bundle for $repo_toolchain" >&2
-    prebuild_bundle "$version_root" "$repo_toolchain" "$install_bundles_root"
-  else
-    echo "warning: could not determine repo lean-toolchain; skipping bundle prebuild" >&2
-  fi
-else
-  echo "warning: elan not found on PATH; skipping bundle prebuild" >&2
+if [ ! -f "$version_root/manifest.json" ]; then
+  write_install_manifest "$version_root/manifest.json" "$payload_id" "$repo_toolchain" "$source_commit"
 fi
+
+echo "prebuilding runAt bundle for $repo_toolchain" >&2
+prebuild_bundle "$version_root" "$repo_toolchain" "$install_bundles_root"
 
 ln -sfn "$version_root" "$current_root"
 ln -sfn "$current_root/bin/runat" "$bin_home/runat"
 ln -sfn "$current_root/bin/runat-lean-search" "$bin_home/runat-lean-search"
 
+if [ "$install_codex_skills" -eq 1 ]; then
+  install_skills "$codex_skills_home"
+  installed_skill_targets+=("Codex: $codex_skills_home")
+fi
+
+if [ "$install_claude_skills" -eq 1 ]; then
+  install_skills "$claude_skills_home"
+  installed_skill_targets+=("Claude Code: $claude_skills_home")
+fi
+
+echo "installed runAt runtime" >&2
+echo "  runtime root: $current_root" >&2
+echo "  wrappers: $bin_home/runat, $bin_home/runat-lean-search" >&2
+if [ "${#installed_skill_targets[@]}" -gt 0 ]; then
+  echo "  bundled skills:" >&2
+  for target in "${installed_skill_targets[@]}"; do
+    echo "    $target" >&2
+  done
+else
+  cat >&2 <<'EOF'
+  bundled skills: not installed
+  install Codex skills with: bash scripts/install-runat-skills.sh --codex
+  install Claude Code skills with: bash scripts/install-runat-skills.sh --claude
+  install both skill sets with: bash scripts/install-runat-skills.sh --all-skills
+EOF
+fi
+
 cat >&2 <<'EOF'
-installed runAt wrapper and skills
 
 human workflow:
   runat ensure lean
