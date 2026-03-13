@@ -184,38 +184,42 @@ verify_publish_targets() {
   ensure_replaceable_path "$bin_home/runat-lean-search" "$bin_home" "runat-lean-search link"
 }
 
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --codex)
-      install_codex_skills=1
-      ;;
-    --claude)
-      install_claude_skills=1
-      ;;
-    --all-skills)
-      install_codex_skills=1
-      install_claude_skills=1
-      ;;
-    -h|--help|help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "unknown option: $1" >&2
-      usage >&2
-      exit 1
-      ;;
-  esac
-  shift
-done
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --codex)
+        install_codex_skills=1
+        ;;
+      --claude)
+        install_claude_skills=1
+        ;;
+      --all-skills)
+        install_codex_skills=1
+        install_claude_skills=1
+        ;;
+      -h|--help|help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "unknown option: $1" >&2
+        usage >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+}
 
-require_absolute_path "$repo_root" "repo root"
-require_absolute_path "$bin_home" "bin home"
-require_absolute_path "$install_root" "install root"
-require_path_within "$versions_root" "$install_root" "versions root"
-require_path_within "$current_root" "$install_root" "current link"
-require_path_within "$state_root" "$install_root" "state root"
-require_path_within "$install_bundles_root" "$state_root" "install bundle root"
+validate_install_config() {
+  require_absolute_path "$repo_root" "repo root"
+  require_absolute_path "$bin_home" "bin home"
+  require_absolute_path "$install_root" "install root"
+  require_path_within "$versions_root" "$install_root" "versions root"
+  require_path_within "$current_root" "$install_root" "current link"
+  require_path_within "$state_root" "$install_root" "state root"
+  require_path_within "$install_bundles_root" "$state_root" "install bundle root"
+}
 
 hash_tool() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -511,67 +515,76 @@ install_skills() {
   rsync -a "$repo_root/skills/rocq-runat/" "$skills_home/rocq-runat/"
 }
 
-require_elan
-repo_toolchain="$(awk 'NR==1 {print $1}' "$repo_root/lean-toolchain")"
-require_repo_toolchain "$repo_toolchain"
-verify_publish_targets
+prepare_install_environment() {
+  require_elan
+  repo_toolchain="$(awk 'NR==1 {print $1}' "$repo_root/lean-toolchain")"
+  require_repo_toolchain "$repo_toolchain"
+  verify_publish_targets
+  mkdir -p "$bin_home" "$versions_root" "$state_root"
+  ensure_runtime_artifacts
+}
 
-mkdir -p "$bin_home" "$versions_root" "$state_root"
-ensure_runtime_artifacts
+prepare_install_version() {
+  local staging_root="$1"
+  stage_install_version "$staging_root" "$current_root" "$install_bundles_root"
+  payload_id="$(hash_tree "$staging_root")"
+  version_root="$versions_root/$payload_id"
+  source_commit="$(repo_source_commit)"
+  write_install_manifest "$staging_root/manifest.json" "$payload_id" "$repo_toolchain" "$source_commit"
+  if [ ! -d "$version_root" ]; then
+    move_staging_dir_into_versions "$staging_root" "$version_root"
+  else
+    remove_owned_staging_dir "$staging_root"
+  fi
+  if [ ! -f "$version_root/manifest.json" ]; then
+    write_install_manifest "$version_root/manifest.json" "$payload_id" "$repo_toolchain" "$source_commit"
+  fi
+}
 
-staging_root="$(mktemp -d "$install_root/.staging-XXXXXX")"
-trap 'remove_owned_staging_dir "$staging_root"' EXIT
-stage_install_version "$staging_root" "$current_root" "$install_bundles_root"
-payload_id="$(hash_tree "$staging_root")"
-version_root="$versions_root/$payload_id"
-source_commit="$(repo_source_commit)"
-write_install_manifest "$staging_root/manifest.json" "$payload_id" "$repo_toolchain" "$source_commit"
-if [ ! -d "$version_root" ]; then
-  move_staging_dir_into_versions "$staging_root" "$version_root"
-else
-  remove_owned_staging_dir "$staging_root"
-fi
-trap - EXIT
+prebuild_install_bundle() {
+  echo "prebuilding runAt bundle for $repo_toolchain" >&2
+  prebuild_bundle "$version_root" "$repo_toolchain" "$install_bundles_root"
+}
 
-if [ ! -f "$version_root/manifest.json" ]; then
-  write_install_manifest "$version_root/manifest.json" "$payload_id" "$repo_toolchain" "$source_commit"
-fi
+publish_runtime() {
+  replace_symlink_atomically "$version_root" "$current_root" "$install_root" "current link"
+  replace_symlink_atomically "$current_root/bin/runat" "$bin_home/runat" "$bin_home" "runat wrapper link"
+  replace_symlink_atomically "$current_root/bin/runat-lean-search" "$bin_home/runat-lean-search" "$bin_home" "runat-lean-search link"
+}
 
-echo "prebuilding runAt bundle for $repo_toolchain" >&2
-prebuild_bundle "$version_root" "$repo_toolchain" "$install_bundles_root"
+install_requested_skills() {
+  if [ "$install_codex_skills" -eq 1 ]; then
+    install_skills "$codex_skills_home"
+    installed_skill_targets+=("Codex: $codex_skills_home")
+  fi
 
-replace_symlink_atomically "$version_root" "$current_root" "$install_root" "current link"
-replace_symlink_atomically "$current_root/bin/runat" "$bin_home/runat" "$bin_home" "runat wrapper link"
-replace_symlink_atomically "$current_root/bin/runat-lean-search" "$bin_home/runat-lean-search" "$bin_home" "runat-lean-search link"
+  if [ "$install_claude_skills" -eq 1 ]; then
+    install_skills "$claude_skills_home"
+    installed_skill_targets+=("Claude Code: $claude_skills_home")
+  fi
+}
 
-if [ "$install_codex_skills" -eq 1 ]; then
-  install_skills "$codex_skills_home"
-  installed_skill_targets+=("Codex: $codex_skills_home")
-fi
-
-if [ "$install_claude_skills" -eq 1 ]; then
-  install_skills "$claude_skills_home"
-  installed_skill_targets+=("Claude Code: $claude_skills_home")
-fi
-
-echo "installed runAt runtime" >&2
-echo "  runtime root: $current_root" >&2
-echo "  wrappers: $bin_home/runat, $bin_home/runat-lean-search" >&2
-if [ "${#installed_skill_targets[@]}" -gt 0 ]; then
-  echo "  bundled skills:" >&2
-  for target in "${installed_skill_targets[@]}"; do
-    echo "    $target" >&2
-  done
-else
-  cat >&2 <<'EOF'
+print_install_summary() {
+  echo "installed runAt runtime" >&2
+  echo "  runtime root: $current_root" >&2
+  echo "  wrappers: $bin_home/runat, $bin_home/runat-lean-search" >&2
+  if [ "${#installed_skill_targets[@]}" -gt 0 ]; then
+    echo "  bundled skills:" >&2
+    for target in "${installed_skill_targets[@]}"; do
+      echo "    $target" >&2
+    done
+  else
+    cat >&2 <<'EOF'
   bundled skills: not installed
   install Codex skills with: bash scripts/install-runat-skills.sh --codex
   install Claude Code skills with: bash scripts/install-runat-skills.sh --claude
   install both skill sets with: bash scripts/install-runat-skills.sh --all-skills
 EOF
-fi
+  fi
+}
 
-cat >&2 <<'EOF'
+print_post_install_notes() {
+  cat >&2 <<'EOF'
 
 human workflow:
   runat ensure lean
@@ -592,3 +605,24 @@ diagnostics:
 docs:
   see skills/lean-runat/SKILL.md for the Lean workflow contract
 EOF
+}
+
+main() {
+  local staging_root=""
+  parse_args "$@"
+  validate_install_config
+  prepare_install_environment
+
+  staging_root="$(mktemp -d "$install_root/.staging-XXXXXX")"
+  trap 'remove_owned_staging_dir "$staging_root"' EXIT
+  prepare_install_version "$staging_root"
+  trap - EXIT
+
+  prebuild_install_bundle
+  publish_runtime
+  install_requested_skills
+  print_install_summary
+  print_post_install_notes
+}
+
+main "$@"
