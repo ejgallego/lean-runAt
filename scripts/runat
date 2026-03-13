@@ -22,7 +22,11 @@ resolve_script_path() {
 script_path="$(resolve_script_path)"
 script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
 repo_root="${RUNAT_HOME:-$(cd -P "$script_dir/.." && pwd)}"
-runat_bin="$repo_root/.lake/build/bin/runAt-cli"
+if [ -x "$repo_root/libexec/runAt-cli" ]; then
+  runat_bin="$repo_root/libexec/runAt-cli"
+else
+  runat_bin="$repo_root/.lake/build/bin/runAt-cli"
+fi
 
 if [ ! -x "$runat_bin" ]; then
   echo "missing runAt CLI at $runat_bin" >&2

@@ -57,10 +57,11 @@ assert_runtime_layout() {
   assert_file "$runtime_root/RunAtCli.lean"
   assert_file "$runtime_root/RunAtCli/Broker/Server.lean"
   assert_file "$runtime_root/RunAt/Internal/SaveArtifacts.lean"
-  assert_file "$runtime_root/.lake/build/bin/runAt-cli"
-  assert_file "$runtime_root/.lake/build/bin/runAt-cli-daemon"
-  assert_file "$runtime_root/.lake/build/bin/runAt-cli-client"
-  assert_file "$runtime_root/.lake/build/lib/librunAt_RunAt.so"
+  assert_file "$runtime_root/libexec/runAt-cli"
+  assert_file "$runtime_root/libexec/runAt-cli-daemon"
+  assert_file "$runtime_root/libexec/runAt-cli-client"
+  assert_file "$runtime_root/libexec/librunAt_RunAt.so"
+  assert_not_exists "$runtime_root/.lake/build"
   assert_file "$runtime_root/bin/runat"
   assert_file "$runtime_root/bin/runat-lean-search"
 }
@@ -104,10 +105,10 @@ wrapper_paths = artifacts.get("wrapperPaths")
 expected_root_files = {"RunAt.lean", "RunAtCli.lean", "lakefile.lean", "lakefile.toml", "lake-manifest.json", "lean-toolchain"}
 expected_source_dirs = {"RunAt", "RunAtCli", "ffi"}
 expected_runtime_paths = {
-    ".lake/build/bin/runAt-cli",
-    ".lake/build/bin/runAt-cli-daemon",
-    ".lake/build/bin/runAt-cli-client",
-    ".lake/build/lib/librunAt_RunAt.so",
+    "libexec/runAt-cli",
+    "libexec/runAt-cli-daemon",
+    "libexec/runAt-cli-client",
+    "libexec/librunAt_RunAt.so",
     ".lake/packages",
 }
 expected_wrapper_paths = {"bin/runat", "bin/runat-lean-search"}

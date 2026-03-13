@@ -31,11 +31,18 @@ runtime_source_dirs=(
 )
 
 runtime_build_paths=(
-  ".lake/build/bin/runAt-cli"
-  ".lake/build/bin/runAt-cli-daemon"
-  ".lake/build/bin/runAt-cli-client"
-  ".lake/build/lib/librunAt_RunAt.so"
+  "libexec/runAt-cli"
+  "libexec/runAt-cli-daemon"
+  "libexec/runAt-cli-client"
+  "libexec/librunAt_RunAt.so"
   ".lake/packages"
+)
+
+runtime_binary_artifacts=(
+  ".lake/build/bin/runAt-cli:libexec/runAt-cli"
+  ".lake/build/bin/runAt-cli-daemon:libexec/runAt-cli-daemon"
+  ".lake/build/bin/runAt-cli-client:libexec/runAt-cli-client"
+  ".lake/build/lib/librunAt_RunAt.so:libexec/librunAt_RunAt.so"
 )
 
 runtime_wrapper_paths=(
@@ -178,6 +185,9 @@ copy_if_present() {
 stage_runtime_tree() {
   local dest="$1"
   local path=""
+  local mapping=""
+  local src_rel=""
+  local dest_rel=""
   mkdir -p "$dest"
   for path in "${runtime_root_files[@]}"; do
     copy_if_present "$repo_root/$path" "$dest/$path"
@@ -185,9 +195,12 @@ stage_runtime_tree() {
   for path in "${runtime_source_dirs[@]}"; do
     copy_if_present "$repo_root/$path" "$dest/$path"
   done
-  for path in "${runtime_build_paths[@]}"; do
-    copy_if_present "$repo_root/$path" "$dest/$path"
+  for mapping in "${runtime_binary_artifacts[@]}"; do
+    src_rel="${mapping%%:*}"
+    dest_rel="${mapping#*:}"
+    copy_if_present "$repo_root/$src_rel" "$dest/$dest_rel"
   done
+  copy_if_present "$repo_root/.lake/packages" "$dest/.lake/packages"
 }
 
 write_runat_wrapper() {
@@ -202,7 +215,7 @@ default_runat_home="$default_home"
 default_install_bundle_dir="$default_install_bundles"
 runat_home="\${RUNAT_HOME:-\$default_runat_home}"
 runat_install_bundle_dir="\${RUNAT_INSTALL_BUNDLE_DIR:-\$default_install_bundle_dir}"
-runat_bin="\$runat_home/.lake/build/bin/runAt-cli"
+runat_bin="\$runat_home/libexec/runAt-cli"
 
 if [ ! -x "\$runat_bin" ]; then
   echo "missing runAt CLI at \$runat_bin" >&2
@@ -371,7 +384,7 @@ prebuild_bundle() {
   local bundle_home="$3"
   mkdir -p "$bundle_home"
   RUNAT_HOME="$runtime_home" RUNAT_INSTALL_BUNDLE_DIR="$bundle_home" \
-    "$runtime_home/.lake/build/bin/runAt-cli" bundle-install "$toolchain"
+    "$runtime_home/libexec/runAt-cli" bundle-install "$toolchain"
 }
 
 install_skills() {
