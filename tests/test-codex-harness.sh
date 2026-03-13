@@ -5,12 +5,29 @@ cd "$(dirname "$0")/.."
 repo_root="$(pwd)"
 primary_root="$(git worktree list --porcelain | awk '/^worktree / { print $2; exit }')"
 
-tmp_root="$(mktemp -d)"
+tmp_root="$(mktemp -d /tmp/runat-codex-harness-XXXXXX)"
 
 export RUNAT_CODEX_WORKTREE_ROOT="$tmp_root/worktrees"
 task_id="test-codex-harness-$$"
 task_slug="${task_id}"
 worktree_path="$RUNAT_CODEX_WORKTREE_ROOT/$task_slug"
+
+expect_owned_tmp_dir() {
+  case "$1" in
+    /tmp/runat-codex-harness-*|/tmp/runat-validate-*/tmp/runat-codex-harness-*)
+      ;;
+    *)
+      echo "refusing to touch unexpected temp dir: $1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+remove_owned_tmp_tree() {
+  local path="$1"
+  expect_owned_tmp_dir "$path"
+  rm -rf -- "$path"
+}
 
 cleanup() {
   if [ -d "$worktree_path" ]; then
@@ -19,7 +36,7 @@ cleanup() {
   if git show-ref --verify --quiet "refs/heads/codex/$task_slug"; then
     git branch -D "codex/$task_slug" >/dev/null 2>&1 || true
   fi
-  rm -rf "$tmp_root"
+  remove_owned_tmp_tree "$tmp_root"
 }
 trap cleanup EXIT
 

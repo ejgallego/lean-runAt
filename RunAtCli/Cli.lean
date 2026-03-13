@@ -22,6 +22,14 @@ private structure BundleMetadata where
   builtAt : String
   deriving FromJson, ToJson
 
+private structure InstallLayout where
+  rootFiles : List String
+  sourceDirs : List String
+  runtimePaths : List String
+  wrapperPaths : List String
+  sourceHashInputs : List String
+  deriving ToJson
+
 private structure RegistryEntry where
   daemonId : String
   pid : Nat
@@ -236,6 +244,32 @@ private def runtimeBundleCacheRoot (root : System.FilePath) : IO System.FilePath
   | some path => pure (System.FilePath.mk path)
   | none => pure (runAtStateDir root / runtimeBundlesDirName)
 
+private def supportedLeanToolchainsPath (home : System.FilePath) : System.FilePath :=
+  home / "supported-lean-toolchains"
+
+private def nonCommentLines (text : String) : List String :=
+  (text.splitOn "\n").filterMap fun raw =>
+    let line := trimLine raw
+    if line.isEmpty || line.startsWith "#" then none else some line
+
+private def supportedLeanToolchains (home : System.FilePath) : IO (System.FilePath × List String) := do
+  let path := supportedLeanToolchainsPath home
+  unless ← path.pathExists do
+    throw <| IO.userError s!"missing supported Lean toolchain registry at {path}"
+  pure (path, nonCommentLines (← IO.FS.readFile path))
+
+private def ensureSupportedLeanToolchain (home : System.FilePath) (toolchain : String) : IO Unit := do
+  let (path, toolchains) ← supportedLeanToolchains home
+  unless toolchains.elem toolchain do
+    throw <| IO.userError <| String.intercalate "\n" [
+      s!"unsupported Lean toolchain: {toolchain}",
+      s!"supported toolchain registry: {path}",
+      "run `runat supported-toolchains lean` to list the validated toolchains"
+    ]
+
+private def boolText (value : Bool) : String :=
+  if value then "true" else "false"
+
 private def bundleWorkspaceFor (bundleDir : System.FilePath) : System.FilePath :=
   bundleDir / "workspace"
 
@@ -268,10 +302,40 @@ private def mixField (acc : UInt64) (text : String) : UInt64 :=
   hashString text <| hashByte acc 0
 
 private def bundleRootFiles : List String :=
-  ["RunAt.lean", "RunAtCli.lean", "lakefile.lean", "lakefile.toml", "lake-manifest.json", "lean-toolchain"]
+  ["RunAt.lean", "RunAtCli.lean", "lakefile.lean", "lakefile.toml", "lake-manifest.json", "lean-toolchain",
+    "supported-lean-toolchains"]
 
 private def bundleSourceDirs : List String :=
   ["RunAt", "RunAtCli", "ffi"]
+
+private def bundleSourceHashInputLabels : List String :=
+  bundleRootFiles ++ bundleSourceDirs.map (· ++ "/**")
+
+private def installRuntimePaths : List String :=
+  ["libexec/runAt-cli", "libexec/runAt-cli-daemon", "libexec/runAt-cli-client",
+    "libexec/librunAt_RunAt.so", ".lake/packages"]
+
+private def installWrapperPaths : List String :=
+  ["bin/runat", "bin/runat-lean-search"]
+
+private def installLayout : InstallLayout :=
+  {
+    rootFiles := bundleRootFiles
+    sourceDirs := bundleSourceDirs
+    runtimePaths := installRuntimePaths
+    wrapperPaths := installWrapperPaths
+    sourceHashInputs := bundleSourceHashInputLabels
+  }
+
+private def installManifestJson (payloadHash : String) (sourceCommit? : Option String) (toolchains : List String) :
+    Json :=
+  Json.mkObj [
+    ("schemaVersion", toJson (2 : Nat)),
+    ("payloadHash", toJson payloadHash),
+    ("toolchains", toJson toolchains),
+    ("sourceCommit", sourceCommit?.map toJson |>.getD Json.null),
+    ("artifacts", toJson installLayout)
+  ]
 
 private partial def collectTreeFiles (current : System.FilePath) : IO (Array System.FilePath) := do
   let entries := (← current.readDir).qsort (fun a b => a.fileName < b.fileName)
@@ -319,11 +383,6 @@ private def sourceHash (home : System.FilePath) : IO String := do
   let mut acc : UInt64 := 14695981039346656037
   for path in files do
     acc ← mixFileHash acc root path
-  let packagesDir := root / ".lake" / "packages"
-  if ← packagesDir.pathExists then
-    let packageFiles ← collectTreeFiles packagesDir
-    for path in sortedPaths packageFiles do
-      acc ← mixFileHash acc root path
   pure s!"{acc.toNat}"
 
 private def bundleIdFor (toolchain source platformKey : String) : String :=
@@ -461,6 +520,7 @@ private partial def existingToolchainBundleInAny? (cacheRoots : List System.File
       | none => existingToolchainBundleInAny? rest home toolchain
 
 private def ensureToolchainBundleIn (cacheRoot home : System.FilePath) (toolchain : String) : IO (BundlePaths × String) := do
+  ensureSupportedLeanToolchain home toolchain
   let (bundleDir, bundleId, srcHash) ← bundleDirFor cacheRoot home toolchain
   let workspace := bundleWorkspaceFor bundleDir
   withLock (bundleDir / "lock") do
@@ -469,6 +529,7 @@ private def ensureToolchainBundleIn (cacheRoot home : System.FilePath) (toolchai
   pure (bundlePathsFor workspace, bundleId)
 
 private def ensureToolchainBundle (root home : System.FilePath) (toolchain : String) : IO (BundlePaths × String) := do
+  ensureSupportedLeanToolchain home toolchain
   match ← existingToolchainBundleInAny? (← installBundleCacheRoots) home toolchain with
   | some bundle => pure bundle
   | none =>
@@ -1177,6 +1238,7 @@ private def usage : String :=
     "  runat [--root PATH] [--socket PATH | --port N] rocq-goals-after <path> <line> <character> [text...]",
     "  runat [--root PATH] [--socket PATH | --port N] rocq-goals-prev <path> <line> <character> [text...]",
     "  runat bundle-install <toolchain>",
+    "  runat supported-toolchains lean",
     "  runat [--root PATH] doctor lean|rocq",
     "  runat [--root PATH] open-files",
     "  runat [--root PATH] cancel <request-id>",
@@ -1220,8 +1282,12 @@ private partial def parseCliOptions (opts : CliOptions) : List String → IO Cli
 
 private def printLeanDoctorInfo (home root : System.FilePath) : IO Unit := do
   let toolchain ← leanToolchain root
+  let (supportPath, supportedToolchains) ← supportedLeanToolchains home
+  let toolchainSupported := supportedToolchains.elem toolchain
   let leanCmd ← leanBin root
   let runtimeRoot ← runtimeBundleCacheRoot root
+  let platform ← bundlePlatform
+  let srcHash ← sourceHash home
   let installed? ← existingToolchainBundleInAny? (← installBundleCacheRoots) home toolchain
   let runtime? ← existingToolchainBundle? runtimeRoot home toolchain
   let (paths, bundleId, source, ready) ←
@@ -1234,10 +1300,16 @@ private def printLeanDoctorInfo (home root : System.FilePath) : IO Unit := do
             let (paths, bundleId) ← predictedToolchainBundle runtimeRoot home toolchain
             pure (paths, bundleId, "missing", false)
   IO.println s!"project toolchain: {toolchain}"
+  IO.println s!"project toolchain supported: {boolText toolchainSupported}"
+  IO.println s!"supported toolchains registry: {supportPath}"
   IO.println s!"lean binary: {leanCmd}"
+  IO.println s!"bundle platform: {platform}"
   IO.println s!"bundle source: {source}"
+  IO.println s!"bundle source hash: {srcHash}"
+  IO.println "bundle key inputs: toolchain, platform, source hash"
+  IO.println s!"bundle source inputs: {String.intercalate ", " bundleSourceHashInputLabels}"
   IO.println s!"bundle id: {bundleId}"
-  IO.println s!"bundle ready: {if ready then "true" else "false"}"
+  IO.println s!"bundle ready: {boolText ready}"
   IO.println s!"bundle daemon: {paths.daemon}"
   IO.println s!"bundle client: {paths.client}"
   IO.println s!"plugin: {paths.plugin}"
@@ -1246,7 +1318,7 @@ private def printRocqDoctorInfo (home root : System.FilePath) : IO Unit := do
   let paths ← defaultBundlePaths home
   let helpersReady := (← paths.daemon.pathExists) && (← paths.client.pathExists)
   IO.println s!"coq-lsp: {(← maybeRocqCmd root).getD ""}"
-  IO.println s!"daemon helpers ready: {if helpersReady then "true" else "false"}"
+  IO.println s!"daemon helpers ready: {boolText helpersReady}"
   IO.println s!"daemon binary: {paths.daemon}"
   IO.println s!"client binary: {paths.client}"
 
@@ -1273,6 +1345,28 @@ private def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backe
         IO.println "daemon status: stale"
       else
         IO.println "daemon status: absent"
+
+private def printSupportedToolchains (home : System.FilePath) (backendName : String) : IO Unit := do
+  match backendName with
+  | "lean" =>
+      let (_, toolchains) ← supportedLeanToolchains home
+      for toolchain in toolchains do
+        IO.println toolchain
+  | _ =>
+      throw <| IO.userError "usage: runat supported-toolchains lean"
+
+private def printInstallLayout : IO Unit := do
+  printJsonLine (toJson installLayout)
+
+private def printInstallManifest (payloadHash : String) (sourceCommitArg : String) (toolchains : List String) : IO Unit := do
+  if toolchains.isEmpty then
+    throw <| IO.userError "usage: runat install-manifest <payload-hash> <source-commit|-> <toolchain...>"
+  let sourceCommit? :=
+    if sourceCommitArg == "-" then
+      none
+    else
+      some sourceCommitArg
+  printJsonLine (installManifestJson payloadHash sourceCommit? toolchains)
 
 private def shutdownProjectDaemon (opts : CliOptions) : IO Unit := do
   let root ← projectRootAny opts
@@ -1315,6 +1409,12 @@ private def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit :=
             pure <| roots.headD (runAtStateDir home / installBundlesDirName)
       let _ ← ensureToolchainBundleIn cacheRoot home toolchain
       pure ()
+  | "supported-toolchains" :: backend :: [] =>
+      printSupportedToolchains home backend
+  | "install-layout" :: [] =>
+      printInstallLayout
+  | "install-manifest" :: payloadHash :: sourceCommitArg :: toolchains =>
+      printInstallManifest payloadHash sourceCommitArg toolchains
   | "ensure" :: backend :: [] =>
       let backend := if backend == "rocq" then Backend.rocq else Backend.lean
       let root ← projectRoot opts backend

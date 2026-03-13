@@ -7,7 +7,7 @@ tmp_root="$(mktemp -d /tmp/runat-install-XXXXXX)"
 
 expect_owned_tmp_dir() {
   case "$1" in
-    /tmp/runat-install-*)
+    /tmp/runat-install-*|/tmp/runat-validate-*/tmp/runat-install-*)
       ;;
     *)
       echo "refusing to touch unexpected temp dir: $1" >&2
@@ -97,6 +97,7 @@ assert_runtime_layout() {
   assert_file "$runtime_root/RunAtCli.lean"
   assert_file "$runtime_root/RunAtCli/Broker/Server.lean"
   assert_file "$runtime_root/RunAt/Internal/SaveArtifacts.lean"
+  assert_file "$runtime_root/supported-lean-toolchains"
   assert_file "$runtime_root/libexec/runAt-cli"
   assert_file "$runtime_root/libexec/runAt-cli-daemon"
   assert_file "$runtime_root/libexec/runAt-cli-client"
@@ -113,25 +114,29 @@ assert_manifest_metadata() {
   local expected_source_commit="$4"
   python3 - "$manifest_path" "$expected_payload" "$expected_toolchain" "$expected_source_commit" <<'PY'
 import json
+import os
 import sys
 
 manifest_path, expected_payload, expected_toolchain, expected_source_commit = sys.argv[1:]
 with open(manifest_path, "r", encoding="utf-8") as f:
     manifest = json.load(f)
+layout = json.loads(os.environ["RUNAT_INSTALL_LAYOUT_JSON"])
 
-if manifest.get("schemaVersion") != 1:
+if manifest.get("schemaVersion") != 2:
     raise SystemExit(f"unexpected manifest schemaVersion: {manifest.get('schemaVersion')}")
 if manifest.get("payloadHash") != expected_payload:
     raise SystemExit(f"unexpected manifest payloadHash: {manifest.get('payloadHash')}")
-if manifest.get("toolchain") != expected_toolchain:
-    raise SystemExit(f"unexpected manifest toolchain: {manifest.get('toolchain')}")
-actual_source_commit = manifest.get("sourceCommit", "sentinel")
+if manifest.get("toolchains") != [expected_toolchain]:
+    raise SystemExit(f"unexpected manifest toolchains: {manifest.get('toolchains')}")
+if "toolchain" in manifest:
+    raise SystemExit(f"unexpected legacy manifest toolchain field: {manifest.get('toolchain')}")
+actual_source_commit = manifest.get("sourceCommit", None)
 if expected_source_commit:
     if actual_source_commit != expected_source_commit:
         raise SystemExit(f"unexpected manifest sourceCommit: {actual_source_commit}")
 else:
     if actual_source_commit is not None:
-        raise SystemExit(f"expected manifest sourceCommit to be null in non-git install copy: {actual_source_commit}")
+        raise SystemExit(f"expected manifest sourceCommit to be null or absent in non-git install copy: {actual_source_commit}")
 
 artifacts = manifest.get("artifacts")
 if not isinstance(artifacts, dict):
@@ -142,16 +147,10 @@ source_dirs = artifacts.get("sourceDirs")
 runtime_paths = artifacts.get("runtimePaths")
 wrapper_paths = artifacts.get("wrapperPaths")
 
-expected_root_files = {"RunAt.lean", "RunAtCli.lean", "lakefile.lean", "lakefile.toml", "lake-manifest.json", "lean-toolchain"}
-expected_source_dirs = {"RunAt", "RunAtCli", "ffi"}
-expected_runtime_paths = {
-    "libexec/runAt-cli",
-    "libexec/runAt-cli-daemon",
-    "libexec/runAt-cli-client",
-    "libexec/librunAt_RunAt.so",
-    ".lake/packages",
-}
-expected_wrapper_paths = {"bin/runat", "bin/runat-lean-search"}
+expected_root_files = set(layout.get("rootFiles") or [])
+expected_source_dirs = set(layout.get("sourceDirs") or [])
+expected_runtime_paths = set(layout.get("runtimePaths") or [])
+expected_wrapper_paths = set(layout.get("wrapperPaths") or [])
 
 if set(root_files or []) != expected_root_files:
     raise SystemExit(f"unexpected manifest rootFiles: {root_files}")
@@ -270,11 +269,33 @@ fi
 remove_tmp_file "$relative_root_err"
 assert_not_exists "$source_checkout/relative"
 
+unsupported_install_err="$(mktemp "$tmp_root/install-unsupported-toolchain-XXXXXX")"
+if (
+  cd "$source_checkout"
+  bash scripts/install-runat-skills.sh --toolchain leanprover/lean4:v4.26.0 > /dev/null 2>"$unsupported_install_err"
+); then
+  echo "expected install to fail when an unsupported toolchain is requested explicitly" >&2
+  cat "$unsupported_install_err" >&2
+  remove_tmp_file "$unsupported_install_err"
+  exit 1
+fi
+if ! grep -q 'unsupported Lean toolchain requested for install: leanprover/lean4:v4.26.0' "$unsupported_install_err"; then
+  echo "expected unsupported installer toolchain failure to name the rejected toolchain" >&2
+  cat "$unsupported_install_err" >&2
+  remove_tmp_file "$unsupported_install_err"
+  exit 1
+fi
+remove_tmp_file "$unsupported_install_err"
+assert_not_exists "$RUNAT_INSTALL_ROOT/current"
+assert_version_count "$RUNAT_INSTALL_ROOT/versions" 0
+assert_not_exists "$RUNAT_INSTALL_ROOT/state"
+
 (
   cd "$source_checkout"
   bash scripts/install-runat-skills.sh > /dev/null
 )
 expected_source_commit="$(git -C "$source_checkout" rev-parse HEAD 2>/dev/null || true)"
+install_layout_json="$(cd "$source_checkout" && ./.lake/build/bin/runAt-cli install-layout)"
 
 installed_runat="$HOME/.local/bin/runat"
 installed_helper="$HOME/.local/bin/runat-lean-search"
@@ -297,7 +318,7 @@ assert_version_count "$RUNAT_INSTALL_ROOT/versions" 1
 installed_version_root="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$installed_runtime_root")"
 installed_payload_id="$(basename "$installed_version_root")"
 assert_file "$installed_runtime_root/manifest.json"
-assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$toolchain" "$expected_source_commit"
+RUNAT_INSTALL_LAYOUT_JSON="$install_layout_json" assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$toolchain" "$expected_source_commit"
 
 assert_not_exists "$CODEX_HOME"
 assert_not_exists "$CLAUDE_HOME"
@@ -305,7 +326,7 @@ assert_bundle_layout "$RUNAT_INSTALL_ROOT/state/install-bundles"
 
 (
   cd "$source_checkout"
-  bash scripts/install-runat-skills.sh --all-skills > /dev/null
+  bash scripts/install-runat-skills.sh --toolchain "$toolchain" --all-skills > /dev/null
 )
 
 for skills_home in "$CODEX_HOME" "$CLAUDE_HOME"; do
@@ -315,7 +336,7 @@ for skills_home in "$CODEX_HOME" "$CLAUDE_HOME"; do
   assert_no_skill_socket_guidance "$skills_home/skills/rocq-runat/SKILL.md"
 done
 assert_version_count "$RUNAT_INSTALL_ROOT/versions" 1
-assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$toolchain" "$expected_source_commit"
+RUNAT_INSTALL_LAYOUT_JSON="$install_layout_json" assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$toolchain" "$expected_source_commit"
 
 blocked_home="$tmp_root/blocked-home"
 blocked_install_root="$tmp_root/blocked-install-root"
@@ -353,7 +374,39 @@ remove_tmp_tree "$source_checkout"
 project_root="$tmp_root/external-project"
 rsync -a tests/save_olean_project/ "$project_root"/
 
+supported_out="$("$installed_runat" supported-toolchains lean)"
+if ! printf '%s\n' "$supported_out" | grep -qx "$toolchain"; then
+  echo "expected supported-toolchains lean to include the pinned repo toolchain" >&2
+  printf '%s\n' "$supported_out" >&2
+  exit 1
+fi
+
 doctor_out="$("$installed_runat" --root "$project_root" doctor lean)"
+if ! printf '%s\n' "$doctor_out" | grep -q 'project toolchain supported: true'; then
+  echo "expected installed wrapper doctor lean to report a supported project toolchain" >&2
+  printf '%s\n' "$doctor_out" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$doctor_out" | grep -q 'supported toolchains registry: '; then
+  echo "expected installed wrapper doctor lean to report the support registry path" >&2
+  printf '%s\n' "$doctor_out" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$doctor_out" | grep -q 'bundle source inputs: '; then
+  echo "expected installed wrapper doctor lean to report bundle source inputs" >&2
+  printf '%s\n' "$doctor_out" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$doctor_out" | grep -q 'supported-lean-toolchains'; then
+  echo "expected installed wrapper doctor lean to include supported-lean-toolchains in the source-hash inputs" >&2
+  printf '%s\n' "$doctor_out" >&2
+  exit 1
+fi
+if printf '%s\n' "$doctor_out" | grep -q '\.lake/packages'; then
+  echo "expected installed wrapper doctor lean to exclude .lake/packages from bundle source-hash inputs" >&2
+  printf '%s\n' "$doctor_out" >&2
+  exit 1
+fi
 if ! printf '%s\n' "$doctor_out" | grep -q 'bundle source: installed'; then
   echo "expected installed wrapper doctor lean to resolve the installed bundle" >&2
   printf '%s\n' "$doctor_out" >&2
@@ -364,6 +417,38 @@ if ! printf '%s\n' "$doctor_out" | grep -q 'bundle ready: true'; then
   printf '%s\n' "$doctor_out" >&2
   exit 1
 fi
+
+unsupported_project_root="$tmp_root/external-project-unsupported"
+rsync -a tests/save_olean_project/ "$unsupported_project_root"/
+printf 'leanprover/lean4:v4.26.0\n' > "$unsupported_project_root/lean-toolchain"
+
+unsupported_doctor_out="$("$installed_runat" --root "$unsupported_project_root" doctor lean)"
+if ! printf '%s\n' "$unsupported_doctor_out" | grep -q 'project toolchain supported: false'; then
+  echo "expected doctor lean to report unsupported toolchains explicitly" >&2
+  printf '%s\n' "$unsupported_doctor_out" >&2
+  exit 1
+fi
+
+unsupported_err="$(mktemp "$tmp_root/install-unsupported-toolchain-XXXXXX")"
+if "$installed_runat" --root "$unsupported_project_root" ensure lean >"$unsupported_err" 2>&1; then
+  echo "expected installed wrapper ensure lean to reject an unsupported toolchain" >&2
+  cat "$unsupported_err" >&2
+  remove_tmp_file "$unsupported_err"
+  exit 1
+fi
+if ! grep -q 'unsupported Lean toolchain: leanprover/lean4:v4.26.0' "$unsupported_err"; then
+  echo "expected unsupported toolchain failure to name the rejected toolchain" >&2
+  cat "$unsupported_err" >&2
+  remove_tmp_file "$unsupported_err"
+  exit 1
+fi
+if ! grep -q 'run `runat supported-toolchains lean` to list the validated toolchains' "$unsupported_err"; then
+  echo "expected unsupported toolchain failure to advertise the support registry command" >&2
+  cat "$unsupported_err" >&2
+  remove_tmp_file "$unsupported_err"
+  exit 1
+fi
+remove_tmp_file "$unsupported_err"
 
 (
   cd "$project_root"

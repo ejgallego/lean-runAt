@@ -5,9 +5,27 @@ cd "$(dirname "$0")/.."
 
 tmp_bundle_dir="$(mktemp -d /tmp/runat-broker-bundles-XXXXXX)"
 tmp_env_root="$(mktemp -d /tmp/runat-broker-env-XXXXXX)"
+
+expect_owned_tmp_dir() {
+  case "$1" in
+    /tmp/runat-broker-bundles-*|/tmp/runat-broker-env-*|/tmp/runat-validate-*/tmp/runat-broker-bundles-*|/tmp/runat-validate-*/tmp/runat-broker-env-*)
+      ;;
+    *)
+      echo "refusing to touch unexpected temp dir: $1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+remove_owned_tmp_tree() {
+  local path="$1"
+  expect_owned_tmp_dir "$path"
+  rm -rf -- "$path"
+}
+
 cleanup() {
-  rm -rf "$tmp_bundle_dir"
-  rm -rf "$tmp_env_root"
+  remove_owned_tmp_tree "$tmp_bundle_dir"
+  remove_owned_tmp_tree "$tmp_env_root"
 }
 trap cleanup EXIT
 

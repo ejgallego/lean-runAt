@@ -91,13 +91,23 @@ workspace package graph. Standalone `.lean` files outside that graph are not val
 
 - Lean plugin loading currently depends on `-Dexperimental.module=true`.
 - Lean plugin loading is toolchain-keyed, not toolchain-agnostic.
+- Supported Lean toolchains are listed in `supported-lean-toolchains`.
 - The supported fast path is the Lean toolchain pinned by this repository's `lean-toolchain`,
   because the plugin uses internal Lean APIs.
-- The install script prebuilds an installed-skill bundle cache for that pinned toolchain.
+- The install script prebuilds an installed-skill bundle cache for that pinned toolchain by
+  default.
+- The install script also accepts `--toolchain <toolchain>` for explicit supported bundles and
+  `--all-supported` for the full validated allowlist.
 - Runtime requests first try that installed-skill bundle cache, then fall back to a project-local
-  runtime bundle under `.runat/bundles/`.
-- Outside users can still try other Lean toolchains, but that path is best-effort and the first use
-  of a new toolchain must build a matching local fallback bundle.
+  runtime bundle under `.runat/bundles/` for supported toolchains.
+- Unsupported Lean toolchains fail early instead of attempting an opportunistic build.
+- `runat supported-toolchains lean` lists the validated toolchains, and `runat doctor lean`
+  reports support state, bundle source, and bundle key inputs.
+- Bundle rebuild keys intentionally exclude the full `.lake/packages` checkout tree and instead use
+  the runtime source tree plus `lean-toolchain`, `lake-manifest.json`, and
+  `supported-lean-toolchains`.
+- The first use of a supported but not-yet-prebuilt toolchain must still build a matching local
+  fallback bundle.
 - On a cold machine, that local fallback build may need network access to fetch dependencies.
 - In sandboxed agent environments, CLI daemon startup itself may require elevated permissions even when
   the installed bundle and project-local `.runat` paths resolve correctly.

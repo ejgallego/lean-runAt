@@ -18,11 +18,28 @@ fi
 
 tmp_repo="$(mktemp -d /tmp/runat-wrapper-rocq-XXXXXX)"
 
+expect_owned_tmp_dir() {
+  case "$1" in
+    /tmp/runat-wrapper-rocq-*|/tmp/runat-validate-*/tmp/runat-wrapper-rocq-*)
+      ;;
+    *)
+      echo "refusing to touch unexpected temp dir: $1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+remove_owned_tmp_tree() {
+  local path="$1"
+  expect_owned_tmp_dir "$path"
+  rm -rf -- "$path"
+}
+
 cleanup() {
   if [ -d "$tmp_repo/tests/rocq/Minimal" ]; then
     RUNAT_ROCQ_CMD="$rocq_cmd" "$tmp_repo/scripts/runat" --root "$tmp_repo/tests/rocq/Minimal" shutdown > /dev/null 2>&1 || true
   fi
-  rm -rf "$tmp_repo"
+  remove_owned_tmp_tree "$tmp_repo"
 }
 trap cleanup EXIT
 

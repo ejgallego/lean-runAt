@@ -92,13 +92,40 @@ expect_file() {
 
 expect_owned_tmp_dir() {
   case "$1" in
-    /tmp/runat-wrapper-*)
+    /tmp/runat-wrapper-*|/tmp/runat-validate-*/tmp/runat-wrapper-*)
       ;;
     *)
       echo "refusing to touch unexpected temp dir: $1" >&2
       exit 1
       ;;
   esac
+}
+
+expect_path_within_tmp_dir() {
+  local path="$1"
+  local root="$2"
+  expect_owned_tmp_dir "$root"
+  case "$path" in
+    "$root"|"$root"/*)
+      ;;
+    *)
+      echo "refusing to touch path outside temp root $root: $path" >&2
+      exit 1
+      ;;
+  esac
+}
+
+remove_owned_tmp_tree() {
+  local path="$1"
+  expect_owned_tmp_dir "$path"
+  rm -rf -- "$path"
+}
+
+remove_tmp_tree_within() {
+  local path="$1"
+  local root="$2"
+  expect_path_within_tmp_dir "$path" "$root"
+  rm -rf -- "$path"
 }
 
 wait_for_exit() {
@@ -145,25 +172,23 @@ cleanup() {
   "$runat_script" --root "$tmp8" shutdown > /dev/null 2>&1 || true
   "$runat_script" --root "$tmp9" shutdown > /dev/null 2>&1 || true
   "$runat_script" --root "$tmp10" shutdown > /dev/null 2>&1 || true
-  expect_owned_tmp_dir "$tmp1"
-  expect_owned_tmp_dir "$tmp2"
-  expect_owned_tmp_dir "$tmp3"
-  expect_owned_tmp_dir "$tmp4"
-  expect_owned_tmp_dir "$tmp5"
-  expect_owned_tmp_dir "$tmp6"
-  expect_owned_tmp_dir "$tmp7"
-  expect_owned_tmp_dir "$tmp8"
-  expect_owned_tmp_dir "$tmp9"
-  expect_owned_tmp_dir "$tmp10"
-  rm -rf "$tmp1" "$tmp2" "$tmp3" "$tmp4" "$tmp5" "$tmp6" "$tmp7" "$tmp8" "$tmp9" "$tmp10"
+  remove_owned_tmp_tree "$tmp1"
+  remove_owned_tmp_tree "$tmp2"
+  remove_owned_tmp_tree "$tmp3"
+  remove_owned_tmp_tree "$tmp4"
+  remove_owned_tmp_tree "$tmp5"
+  remove_owned_tmp_tree "$tmp6"
+  remove_owned_tmp_tree "$tmp7"
+  remove_owned_tmp_tree "$tmp8"
+  remove_owned_tmp_tree "$tmp9"
+  remove_owned_tmp_tree "$tmp10"
 }
 trap cleanup EXIT
 
 for tmp in "$tmp1" "$tmp2" "$tmp3" "$tmp4" "$tmp5" "$tmp6" "$tmp7" "$tmp8" "$tmp9"; do
   expect_owned_tmp_dir "$tmp"
   rsync -a tests/save_olean_project/ "$tmp"/
-  expect_owned_tmp_dir "$tmp/.runat"
-  rm -rf "$tmp/.runat"
+  remove_tmp_tree_within "$tmp/.runat" "$tmp"
   mkdir -p "$tmp/.runat"
 done
 

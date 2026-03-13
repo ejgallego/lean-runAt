@@ -14,6 +14,8 @@ runat_cli="$repo_root/.lake/build/bin/runAt-cli"
 install_notes_path="$repo_root/scripts/install-runat-skills-notes.txt"
 install_codex_skills=0
 install_claude_skills=0
+install_all_supported=0
+requested_toolchains=()
 installed_skill_targets=()
 
 runtime_payload_spec=(
@@ -23,6 +25,7 @@ runtime_payload_spec=(
   "copy|rootFiles|lakefile.toml|lakefile.toml"
   "copy|rootFiles|lake-manifest.json|lake-manifest.json"
   "copy|rootFiles|lean-toolchain|lean-toolchain"
+  "copy|rootFiles|supported-lean-toolchains|supported-lean-toolchains"
   "copy|sourceDirs|RunAt|RunAt"
   "copy|sourceDirs|RunAtCli|RunAtCli"
   "copy|sourceDirs|ffi|ffi"
@@ -38,12 +41,15 @@ runtime_payload_spec=(
 usage() {
   cat <<EOF
 Usage:
-  bash scripts/install-runat-skills.sh [--codex] [--claude] [--all-skills]
+  bash scripts/install-runat-skills.sh [--toolchain TOOLCHAIN ... | --all-supported] [--codex] [--claude] [--all-skills]
 
 Installs the self-contained runAt runtime into:
   $install_root
 
 Default behavior installs the runtime only. Optional flags add bundled skills:
+  --toolchain    prebuild one supported Lean toolchain; may be repeated
+  --all-supported
+                prebuild every supported Lean toolchain
   --codex       install bundled Lean and Rocq skills into $codex_skills_home
   --claude      install bundled Lean and Rocq skills into $claude_skills_home
   --all-skills  install bundled skills for both Codex and Claude Code
@@ -55,7 +61,7 @@ Environment:
   CLAUDE_HOME          override the Claude home used by --claude
 
 Requirements:
-  elan must be on PATH so the installer can prebuild the pinned Lean bundle
+  elan must be on PATH so the installer can prebuild the selected Lean bundle(s)
 EOF
 }
 
@@ -172,6 +178,16 @@ verify_publish_targets() {
 parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --toolchain)
+        if [ "$#" -lt 2 ]; then
+          die "missing value for --toolchain"
+        fi
+        requested_toolchains+=("$2")
+        shift
+        ;;
+      --all-supported)
+        install_all_supported=1
+        ;;
       --codex)
         install_codex_skills=1
         ;;
@@ -218,6 +234,62 @@ hash_tool() {
   fi
 }
 
+read_supported_toolchains() {
+  local output_name="$1"
+  local -n output_ref="$output_name"
+  mapfile -t output_ref < <("$runat_cli" supported-toolchains lean)
+}
+
+array_contains() {
+  local needle="$1"
+  shift
+  local value=""
+  for value in "$@"; do
+    if [ "$value" = "$needle" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_install_toolchains() {
+  local repo_toolchain="$1"
+  local output_name="$2"
+  local -n output_ref="$output_name"
+  local supported_toolchains=()
+  local selected=()
+  local toolchain=""
+
+  if [ "$install_all_supported" -eq 1 ] && [ "${#requested_toolchains[@]}" -gt 0 ]; then
+    die "cannot combine --all-supported with --toolchain"
+  fi
+
+  read_supported_toolchains supported_toolchains
+  if [ "${#supported_toolchains[@]}" -eq 0 ]; then
+    die "runAt CLI reported no supported Lean toolchains"
+  fi
+
+  if [ "$install_all_supported" -eq 1 ]; then
+    selected=("${supported_toolchains[@]}")
+  elif [ "${#requested_toolchains[@]}" -gt 0 ]; then
+    for toolchain in "${requested_toolchains[@]}"; do
+      if ! array_contains "$toolchain" "${supported_toolchains[@]}"; then
+        die "unsupported Lean toolchain requested for install: $toolchain"
+      fi
+      if ! array_contains "$toolchain" "${selected[@]}"; then
+        selected+=("$toolchain")
+      fi
+    done
+  else
+    if ! array_contains "$repo_toolchain" "${supported_toolchains[@]}"; then
+      die "pinned Lean toolchain is not in supported-lean-toolchains: $repo_toolchain"
+    fi
+    selected=("$repo_toolchain")
+  fi
+
+  output_ref=("${selected[@]}")
+}
+
 hash_tree() {
   local root="$1"
   local tool
@@ -251,15 +323,6 @@ ensure_runtime_artifacts() {
     cd "$repo_root"
     lake build RunAt:shared runAt-cli runAt-cli-daemon runAt-cli-client
   )
-}
-
-json_null_or_string() {
-  local value="${1-}"
-  if [ -z "$value" ]; then
-    printf 'null'
-  else
-    printf '"%s"' "$value"
-  fi
 }
 
 repo_source_commit() {
@@ -358,81 +421,17 @@ stage_install_version() {
   done
 }
 
-write_manifest_array() {
-  local dest="$1"
-  local entries_name="$2"
-  shift 2
-  local entries=("$@")
-  local idx=0
-  printf '    "%s": [\n' "$entries_name" >>"$dest"
-  for idx in "${!entries[@]}"; do
-    if [ "$idx" -gt 0 ]; then
-      printf ',\n' >>"$dest"
-    fi
-    printf '      "%s"' "${entries[$idx]}" >>"$dest"
-  done
-  printf '\n    ]' >>"$dest"
-}
-
 write_install_manifest() {
   local dest="$1"
   local payload_id="$2"
-  local toolchain="$3"
-  local source_commit="$4"
-  local entry=""
-  local mode=""
-  local manifest_group=""
-  local src_rel=""
-  local dest_rel=""
-  local root_files=()
-  local source_dirs=()
-  local runtime_paths=()
-  local wrapper_paths=()
-  for entry in "${runtime_payload_spec[@]}"; do
-    IFS='|' read -r mode manifest_group src_rel dest_rel <<< "$entry"
-    case "$manifest_group" in
-      rootFiles)
-        root_files+=("$dest_rel")
-        ;;
-      sourceDirs)
-        source_dirs+=("$dest_rel")
-        ;;
-      runtimePaths)
-        runtime_paths+=("$dest_rel")
-        ;;
-      wrapperPaths)
-        wrapper_paths+=("$dest_rel")
-        ;;
-      *)
-        die "unknown manifest payload group: $manifest_group"
-        ;;
-    esac
-  done
-  cat >"$dest" <<EOF
-{
-  "schemaVersion": 1,
-  "payloadHash": "$payload_id",
-  "toolchain": "$toolchain",
-  "sourceCommit": $(json_null_or_string "$source_commit"),
-  "artifacts": {
-EOF
-  write_manifest_array "$dest" "rootFiles" "${root_files[@]}"
-  cat >>"$dest" <<EOF
-,
-EOF
-  write_manifest_array "$dest" "sourceDirs" "${source_dirs[@]}"
-  cat >>"$dest" <<EOF
-,
-EOF
-  write_manifest_array "$dest" "runtimePaths" "${runtime_paths[@]}"
-  cat >>"$dest" <<EOF
-,
-EOF
-  write_manifest_array "$dest" "wrapperPaths" "${wrapper_paths[@]}"
-  cat >>"$dest" <<'EOF'
-  }
-}
-EOF
+  local source_commit="$3"
+  local toolchains_name="$4"
+  local -n toolchains_ref="$toolchains_name"
+  local source_commit_arg="-"
+  if [ -n "$source_commit" ]; then
+    source_commit_arg="$source_commit"
+  fi
+  "$runat_cli" install-manifest "$payload_id" "$source_commit_arg" "${toolchains_ref[@]}" >"$dest"
 }
 
 prebuild_bundle() {
@@ -465,21 +464,25 @@ install_skill_target() {
 
 prepare_install_environment() {
   local toolchain_name="$1"
+  local selected_name="$2"
   local -n toolchain_ref="$toolchain_name"
+  local -n selected_ref="$selected_name"
   require_elan
   toolchain_ref="$(awk 'NR==1 {print $1}' "$repo_root/lean-toolchain")"
   require_repo_toolchain "$toolchain_ref"
+  ensure_runtime_artifacts
+  resolve_install_toolchains "$toolchain_ref" selected_ref
   verify_publish_targets
   mkdir -p "$bin_home" "$versions_root" "$state_root"
-  ensure_runtime_artifacts
 }
 
 prepare_install_version() {
   local staging_root="$1"
-  local toolchain="$2"
+  local toolchains_name="$2"
   local payload_name="$3"
   local version_root_name="$4"
   local source_commit_name="$5"
+  local -n toolchains_ref="$toolchains_name"
   local -n payload_ref="$payload_name"
   local -n version_root_ref="$version_root_name"
   local -n source_commit_ref="$source_commit_name"
@@ -487,22 +490,25 @@ prepare_install_version() {
   payload_ref="$(hash_tree "$staging_root")"
   version_root_ref="$versions_root/$payload_ref"
   source_commit_ref="$(repo_source_commit)"
-  write_install_manifest "$staging_root/manifest.json" "$payload_ref" "$toolchain" "$source_commit_ref"
+  write_install_manifest "$staging_root/manifest.json" "$payload_ref" "$source_commit_ref" "$toolchains_name"
   if [ ! -d "$version_root_ref" ]; then
     move_staging_dir_into_versions "$staging_root" "$version_root_ref"
   else
     remove_owned_staging_dir "$staging_root"
   fi
   if [ ! -f "$version_root_ref/manifest.json" ]; then
-    write_install_manifest "$version_root_ref/manifest.json" "$payload_ref" "$toolchain" "$source_commit_ref"
+    write_install_manifest "$version_root_ref/manifest.json" "$payload_ref" "$source_commit_ref" "$toolchains_name"
   fi
 }
 
-prebuild_install_bundle() {
+prebuild_install_bundles() {
   local version_root="$1"
-  local toolchain="$2"
-  echo "prebuilding runAt bundle for $toolchain" >&2
-  prebuild_bundle "$version_root" "$toolchain" "$install_bundles_root"
+  shift
+  local toolchain=""
+  for toolchain in "$@"; do
+    echo "prebuilding runAt bundle for $toolchain" >&2
+    prebuild_bundle "$version_root" "$toolchain" "$install_bundles_root"
+  done
 }
 
 publish_runtime() {
@@ -548,19 +554,20 @@ print_post_install_notes() {
 main() {
   local staging_root=""
   local repo_toolchain=""
+  local selected_toolchains=()
   local payload_id=""
   local version_root=""
   local source_commit=""
   parse_args "$@"
   validate_install_config
-  prepare_install_environment repo_toolchain
+  prepare_install_environment repo_toolchain selected_toolchains
 
   staging_root="$(mktemp -d "$install_root/.staging-XXXXXX")"
   trap 'remove_owned_staging_dir "$staging_root"' EXIT
-  prepare_install_version "$staging_root" "$repo_toolchain" payload_id version_root source_commit
+  prepare_install_version "$staging_root" selected_toolchains payload_id version_root source_commit
   trap - EXIT
 
-  prebuild_install_bundle "$version_root" "$repo_toolchain"
+  prebuild_install_bundles "$version_root" "${selected_toolchains[@]}"
   publish_runtime "$version_root"
   install_requested_skills
   print_install_summary

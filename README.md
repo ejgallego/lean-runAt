@@ -293,9 +293,7 @@ bash scripts/install-runat-skills.sh
 ```
 
 See [Installation And Resolution](#installation-and-resolution) for the full install procedure,
-installed layout, and bundle resolution rules. The design note in
-[docs/INSTALL_REDESIGN_PLAN.md](docs/INSTALL_REDESIGN_PLAN.md) is now implementation background,
-not the primary user-facing install guide.
+installed layout, and bundle resolution rules.
 
 For outside users today, the practical client surface is the command layer. The installed skills are
 optional agent add-ons on top of that command path, rather than part of the required CLI install.
@@ -346,9 +344,11 @@ Installation procedure:
 
 1. Ensure `elan` is on `PATH`.
 2. Run `bash scripts/install-runat-skills.sh` for the base runtime.
-3. Optionally rerun with `--codex`, `--claude`, or `--all-skills` to install the bundled agent
+3. Optionally add `--toolchain <toolchain>` one or more times to prebuild explicit supported Lean
+   bundles, or `--all-supported` to prebuild the full supported allowlist.
+4. Optionally rerun with `--codex`, `--claude`, or `--all-skills` to install the bundled agent
    skills.
-4. Ensure `~/.local/bin` is on `PATH`, then restart Codex or Claude Code if you installed skills.
+5. Ensure `~/.local/bin` is on `PATH`, then restart Codex or Claude Code if you installed skills.
 
 That installer:
 
@@ -356,7 +356,7 @@ That installer:
 - puts `runat-lean-search` in `~/.local/bin`
 - stages an immutable runtime under `RUNAT_INSTALL_ROOT`, defaulting to `~/.local/share/runat`
 - points `~/.local/bin/runat` and `runat-lean-search` at `RUNAT_INSTALL_ROOT/current`
-- requires `elan` on `PATH` and prebuilds an installed Lean bundle under
+- requires `elan` on `PATH` and prebuilds the selected supported Lean bundle(s) under
   `RUNAT_INSTALL_ROOT/state/install-bundles`
 - requires `RUNAT_INSTALL_ROOT` to be absolute when overridden
 - refuses to replace a real directory at the public wrapper link paths
@@ -368,6 +368,8 @@ Optional skill install commands:
 bash scripts/install-runat-skills.sh --codex
 bash scripts/install-runat-skills.sh --claude
 bash scripts/install-runat-skills.sh --all-skills
+bash scripts/install-runat-skills.sh --toolchain leanprover/lean4:v4.29.0-rc6
+bash scripts/install-runat-skills.sh --all-supported
 ```
 
 Those flags install the bundled Lean and Rocq skills into `$CODEX_HOME/skills` or
@@ -399,11 +401,15 @@ Resolution order for Lean is:
 3. Installed-bundle lookup: if `RUNAT_INSTALL_BUNDLE_DIR` is set, only that installed cache root is
    checked. The installed wrapper sets this to `RUNAT_INSTALL_ROOT/state/install-bundles` by
    default.
-4. If a matching installed bundle already exists for the target Lean toolchain, `runat` uses it.
-5. If no installed bundle matches, `runat` falls back to the local runtime bundle cache under
+4. `runat` only serves Lean toolchains listed in `supported-lean-toolchains`. Use
+   `runat supported-toolchains lean` to inspect that allowlist.
+5. If a matching installed bundle already exists for a supported target Lean toolchain, `runat`
+   uses it.
+6. If no installed bundle matches, `runat` falls back to the local runtime bundle cache under
    `RUNAT_BUNDLE_DIR` when set, otherwise under `<root>/.runat/bundles`, and builds that bundle on
-   demand if needed.
-6. Daemon control metadata lives under `RUNAT_CONTROL_DIR` when set, otherwise under
+   demand for that supported toolchain.
+7. Unsupported toolchains fail early before bundle reuse or build.
+8. Daemon control metadata lives under `RUNAT_CONTROL_DIR` when set, otherwise under
    `<root>/.runat`, with one daemon registry per project root. Under `RUNAT_CONTROL_DIR`, `runat`
    uses a per-root subdirectory rather than writing the registry file directly at the top level.
 
@@ -411,9 +417,10 @@ In practice this means:
 
 - use the installed bundle when your project's Lean toolchain matches a bundle that was prebuilt by
   the installer
-- use the local runtime bundle only as fallback for a toolchain that is not already available in the
-  installed cache
-- expect first-run latency and possibly network access only on that local fallback path
+- use the local runtime bundle only as fallback for a supported toolchain that is not already
+  available in the installed cache
+- expect first-run latency and possibly network access only on that supported local fallback path
+- expect unsupported toolchains to fail immediately instead of trying an opportunistic build
 - do not think of the installed cache and the local runtime cache as different plugin types; they are
   the same bundle format in two locations
 
@@ -450,6 +457,7 @@ runat lean-deps "Foo.lean"
 runat lean-save "MyPkg/Sub/Module.lean"
 runat lean-close-save "MyPkg/Sub/Module.lean"
 runat open-files
+runat supported-toolchains lean
 runat doctor lean
 ```
 
@@ -482,7 +490,8 @@ Important wrapper rules:
 `open-files` reports the files currently tracked by the live daemon for the current project,
 including `saved` / `notSaved`, direct Lean deps when available, checkpoint/save eligibility fields,
 and the last compact `fileProgress` observed for that tracked version. `doctor lean` is the
-companion operational check for daemon health and bundle resolution.
+companion operational check for daemon health, toolchain support state, bundle source, and bundle
+key inputs.
 
 The wrapper also exposes alpha handle commands for exact continuation from speculative state, and
 the install script exposes `runat-lean-search` as a shorter shell helper on top of those same
@@ -534,11 +543,18 @@ For workflow examples and edge cases, see:
 - Lean plugin loading currently relies on shared-library support with `-Dexperimental.module=true`.
 - Lean bundles are toolchain-keyed. The wrapper does not try to make one `.so` work across multiple
   Lean toolchains; instead it builds and reuses one cached bundle per toolchain.
+- Supported Lean toolchains are listed in `supported-lean-toolchains`.
 - The supported fast path is the toolchain pinned by this repository's `lean-toolchain`, because
-  the plugin uses internal Lean APIs.
-- If no installed bundle matches, the wrapper tries a local fallback `lake build`. On a cold
-  machine this may need network access to fetch dependencies.
-- The first use of an unsupported or not-yet-prebuilt Lean toolchain may therefore take noticeably
+  the plugin uses internal Lean APIs and the installer prebuilds that bundle by default.
+- Unsupported Lean toolchains fail early. Use `runat supported-toolchains lean` to list the current
+  allowlist and `runat doctor lean` to inspect the selected toolchain, bundle source, and bundle
+  key inputs.
+- Bundle rebuild keys use the selected toolchain, platform, and a source hash over the runtime
+  source tree plus `lean-toolchain`, `lake-manifest.json`, and `supported-lean-toolchains`.
+- Bundle rebuild keys intentionally do not hash the full `.lake/packages` checkout tree.
+- If no installed bundle matches a supported toolchain, the wrapper tries a local fallback
+  `lake build`. On a cold machine this may need network access to fetch dependencies.
+- The first use of a supported but not-yet-prebuilt Lean toolchain may therefore take noticeably
   longer while the matching local fallback bundle is built.
 - The daemon is intentionally conservative across multi-file edits.
 - If you edit a file that is imported by the current target file, do not trust downstream `runAt`

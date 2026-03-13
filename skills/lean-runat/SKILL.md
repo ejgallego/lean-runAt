@@ -24,8 +24,9 @@ skill sets.
 
 The installer puts `runat` and `runat-lean-search` in `~/.local/bin`, stages the self-contained
 runtime under `RUNAT_INSTALL_ROOT` (default `~/.local/share/runat`), requires `elan` on `PATH`,
-prebuilds the pinned `lean-toolchain` bundle under `RUNAT_INSTALL_ROOT/state/install-bundles`, and
-installs the bundled skills only for the agent flags you request.
+prebuilds the pinned `lean-toolchain` bundle under `RUNAT_INSTALL_ROOT/state/install-bundles` by
+default, supports `--toolchain <toolchain>` and `--all-supported` for explicit supported bundle
+selection, and installs the bundled skills only for the agent flags you request.
 
 Restart Codex or Claude Code after installation.
 
@@ -149,9 +150,11 @@ Use `runat`, not raw JSON and not raw LSP.
   - in sandboxed or read-only project trees, set `RUNAT_CONTROL_DIR` to a writable directory; `runat` uses a per-root subdirectory there
 - resolves a toolchain-keyed Lean bundle, preferring the installed runAt bundle cache and
   falling back to a project-local runtime bundle under `<root>/.runat/bundles` or `RUNAT_BUNDLE_DIR`
+- only serves Lean toolchains listed in `supported-lean-toolchains`
 - owns CLI daemon startup, shutdown, and registry handling
 - resolves Lean with `elan which lean`
-- builds a local fallback bundle only when no matching installed bundle exists for the target Lean toolchain
+- builds a local fallback bundle only when no matching installed bundle exists for the target supported Lean toolchain
+- fails early on unsupported Lean toolchains; use `runat supported-toolchains lean` to inspect the allowlist
 - restarts the CLI daemon if the effective Lean startup configuration for that root changes
 - `runat shutdown`, `runat stats`, and `runat reset-stats` apply to the current project only
 - wrapper commands talk to the per-project CLI daemon over localhost TCP; they are not direct in-process Lean calls
@@ -176,6 +179,7 @@ Default rules:
 - if exact continuation matters: mint a handle
 - if search branches: use `lean-run-with`, `lean-run-with-linear`, and `lean-release`
 - if you want shorter shell commands for search loops: use `runat-lean-search`
+- if bundle resolution or startup looks wrong: check `runat doctor lean` before guessing
 
 ## Fast Path
 
