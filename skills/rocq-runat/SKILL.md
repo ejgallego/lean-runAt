@@ -17,7 +17,7 @@ duplicate short guidance if both skills need it.
 From the `runAt` repo root:
 
 ```bash
-bash scripts/install-runat-skills.sh --codex
+./scripts/install-runat.sh --codex
 ```
 
 Use `--claude` instead when installing for Claude Code, or `--all-skills` when you want both agent

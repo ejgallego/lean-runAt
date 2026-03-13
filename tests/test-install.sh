@@ -229,7 +229,7 @@ fi
 missing_elan_err="$(mktemp "$tmp_root/install-missing-elan-XXXXXX")"
 if (
   cd "$source_checkout"
-  PATH="$path_no_elan" bash scripts/install-runat-skills.sh > /dev/null 2>"$missing_elan_err"
+  PATH="$path_no_elan" bash scripts/install-runat.sh > /dev/null 2>"$missing_elan_err"
 ); then
   echo "expected install to fail when elan is missing from PATH" >&2
   cat "$missing_elan_err" >&2
@@ -253,7 +253,7 @@ assert_not_exists "$RUNAT_INSTALL_ROOT/state"
 relative_root_err="$(mktemp "$tmp_root/install-relative-root-XXXXXX")"
 if (
   cd "$source_checkout"
-  RUNAT_INSTALL_ROOT="relative/install-root" bash scripts/install-runat-skills.sh > /dev/null 2>"$relative_root_err"
+  RUNAT_INSTALL_ROOT="relative/install-root" bash scripts/install-runat.sh > /dev/null 2>"$relative_root_err"
 ); then
   echo "expected install to fail when RUNAT_INSTALL_ROOT is relative" >&2
   cat "$relative_root_err" >&2
@@ -272,7 +272,7 @@ assert_not_exists "$source_checkout/relative"
 unsupported_install_err="$(mktemp "$tmp_root/install-unsupported-toolchain-XXXXXX")"
 if (
   cd "$source_checkout"
-  bash scripts/install-runat-skills.sh --toolchain leanprover/lean4:v4.26.0 > /dev/null 2>"$unsupported_install_err"
+  bash scripts/install-runat.sh --toolchain leanprover/lean4:v4.26.0 > /dev/null 2>"$unsupported_install_err"
 ); then
   echo "expected install to fail when an unsupported toolchain is requested explicitly" >&2
   cat "$unsupported_install_err" >&2
@@ -292,7 +292,7 @@ assert_not_exists "$RUNAT_INSTALL_ROOT/state"
 
 (
   cd "$source_checkout"
-  bash scripts/install-runat-skills.sh > /dev/null
+  bash scripts/install-runat.sh > /dev/null
 )
 expected_source_commit="$(git -C "$source_checkout" rev-parse HEAD 2>/dev/null || true)"
 install_layout_json="$(cd "$source_checkout" && ./.lake/build/bin/runAt-cli install-layout)"
@@ -326,7 +326,7 @@ assert_bundle_layout "$RUNAT_INSTALL_ROOT/state/install-bundles"
 
 (
   cd "$source_checkout"
-  bash scripts/install-runat-skills.sh --toolchain "$toolchain" --all-skills > /dev/null
+  bash scripts/install-runat.sh --toolchain "$toolchain" --all-skills > /dev/null
 )
 
 for skills_home in "$CODEX_HOME" "$CLAUDE_HOME"; do
@@ -346,7 +346,7 @@ blocked_wrapper_err="$(mktemp "$tmp_root/install-wrapper-dir-XXXXXX")"
 if (
   cd "$source_checkout"
   HOME="$blocked_home" RUNAT_INSTALL_ROOT="$blocked_install_root" \
-    bash scripts/install-runat-skills.sh > /dev/null 2>"$blocked_wrapper_err"
+    bash scripts/install-runat.sh > /dev/null 2>"$blocked_wrapper_err"
 ); then
   echo "expected install to fail when the wrapper target path is a real directory" >&2
   cat "$blocked_wrapper_err" >&2

@@ -11,12 +11,19 @@ current_root="$install_root/current"
 state_root="$install_root/state"
 install_bundles_root="$state_root/install-bundles"
 runat_cli="$repo_root/.lake/build/bin/runAt-cli"
-install_notes_path="$repo_root/scripts/install-runat-skills-notes.txt"
+install_notes_path="$repo_root/scripts/install-runat-notes.txt"
+installer_cmd="./scripts/install-runat.sh"
 install_codex_skills=0
 install_claude_skills=0
 install_all_supported=0
 requested_toolchains=()
 installed_skill_targets=()
+style_reset=""
+style_bold=""
+style_green=""
+style_blue=""
+style_yellow=""
+style_dim=""
 
 runtime_payload_spec=(
   "copy|rootFiles|RunAt.lean|RunAt.lean"
@@ -41,12 +48,19 @@ runtime_payload_spec=(
 usage() {
   cat <<EOF
 Usage:
-  bash scripts/install-runat-skills.sh [--toolchain TOOLCHAIN ... | --all-supported] [--codex] [--claude] [--all-skills]
+  $installer_cmd [--toolchain TOOLCHAIN ... | --all-supported] [--codex] [--claude] [--all-skills]
 
-Installs the self-contained runAt runtime into:
+Installs the local runAt command wrappers and self-contained runtime under:
   $install_root
 
-Default behavior installs the runtime only. Optional flags add bundled skills:
+With no flags, this installs:
+  - $bin_home/runat
+  - $bin_home/runat-lean-search
+  - one prebuilt toolchain build for the repo-pinned Lean toolchain
+
+With no agent flags, this does not install Codex or Claude Code skills.
+
+Optional flags:
   --toolchain    prebuild one supported Lean toolchain; may be repeated
   --all-supported
                 prebuild every supported Lean toolchain
@@ -63,6 +77,41 @@ Environment:
 Requirements:
   elan must be on PATH so the installer can prebuild the selected Lean bundle(s)
 EOF
+}
+
+setup_styles() {
+  if [ -t 2 ] && [ "${TERM:-}" != "dumb" ] && [ -z "${NO_COLOR:-}" ]; then
+    style_reset=$'\033[0m'
+    style_bold=$'\033[1m'
+    style_green=$'\033[32m'
+    style_blue=$'\033[34m'
+    style_yellow=$'\033[33m'
+    style_dim=$'\033[2m'
+  fi
+}
+
+print_section() {
+  local color="$1"
+  local title="$2"
+  printf '\n%s%s%s%s\n' "$style_bold" "$color" "$title" "$style_reset" >&2
+}
+
+print_field() {
+  local label="$1"
+  local value="$2"
+  printf '  %s%-18s%s %s\n' "$style_dim" "$label" "$style_reset" "$value" >&2
+}
+
+path_contains_dir() {
+  local dir="$1"
+  case ":${PATH:-}:" in
+    *":$dir:"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 die() {
@@ -529,25 +578,65 @@ install_requested_skills() {
 }
 
 print_install_summary() {
-  echo "installed runAt runtime" >&2
-  echo "  runtime root: $current_root" >&2
-  echo "  wrappers: $bin_home/runat, $bin_home/runat-lean-search" >&2
-  if [ "${#installed_skill_targets[@]}" -gt 0 ]; then
-    echo "  bundled skills:" >&2
-    for target in "${installed_skill_targets[@]}"; do
-      echo "    $target" >&2
+  local version_root="$1"
+  shift
+  local toolchain=""
+  local codex_status="not installed"
+  local claude_status="not installed"
+  local path_status="$bin_home is not on PATH yet"
+
+  if path_contains_dir "$bin_home"; then
+    path_status="ready for direct \`runat\` use in this shell"
+  fi
+  for toolchain in "${installed_skill_targets[@]}"; do
+    case "$toolchain" in
+      Codex:*)
+        codex_status="installed at ${toolchain#Codex: }"
+        ;;
+      "Claude Code:"*)
+        claude_status="installed at ${toolchain#Claude Code: }"
+        ;;
+    esac
+  done
+
+  print_section "$style_green" "Install Complete"
+  print_field "runat" "$bin_home/runat"
+  print_field "search helper" "$bin_home/runat-lean-search"
+  print_field "active install" "$current_root"
+  print_field "versioned install" "$version_root"
+  print_field "Lean toolchain store" "$install_bundles_root"
+  if [ "$#" -gt 0 ]; then
+    print_field "prebuilt toolchains" "$1"
+    shift
+    for toolchain in "$@"; do
+      printf '  %s%-18s%s %s\n' "$style_dim" "" "$style_reset" "$toolchain" >&2
     done
   else
-    cat >&2 <<'EOF'
-  bundled skills: not installed
-  install Codex skills with: bash scripts/install-runat-skills.sh --codex
-  install Claude Code skills with: bash scripts/install-runat-skills.sh --claude
-  install both skill sets with: bash scripts/install-runat-skills.sh --all-skills
-EOF
+    print_field "prebuilt toolchains" "none"
+  fi
+  print_field "shell PATH" "$path_status"
+
+  print_section "$style_blue" "Agent Skills"
+  print_field "Codex skill" "$codex_status"
+  print_field "Claude skill" "$claude_status"
+  if [ "$codex_status" = "not installed" ] && [ "$claude_status" = "not installed" ]; then
+    print_field "note" "the base install does not add agent skills unless you request them"
+  fi
+
+  print_section "$style_yellow" "Optional Next Steps"
+  if [ "$codex_status" = "not installed" ]; then
+    print_field "Codex" "$installer_cmd --codex"
+  fi
+  if [ "$claude_status" = "not installed" ]; then
+    print_field "Claude Code" "$installer_cmd --claude"
+  fi
+  if [ "$codex_status" = "not installed" ] || [ "$claude_status" = "not installed" ]; then
+    print_field "both skills" "$installer_cmd --all-skills"
   fi
 }
 
 print_post_install_notes() {
+  print_section "$style_blue" "Try It"
   cat "$install_notes_path" >&2
 }
 
@@ -558,6 +647,7 @@ main() {
   local payload_id=""
   local version_root=""
   local source_commit=""
+  setup_styles
   parse_args "$@"
   validate_install_config
   prepare_install_environment repo_toolchain selected_toolchains
@@ -570,7 +660,7 @@ main() {
   prebuild_install_bundles "$version_root" "${selected_toolchains[@]}"
   publish_runtime "$version_root"
   install_requested_skills
-  print_install_summary
+  print_install_summary "$version_root" "${selected_toolchains[@]}"
   print_post_install_notes
 }
 

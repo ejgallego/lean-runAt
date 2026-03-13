@@ -289,7 +289,7 @@ From another Lean project, call the wrapper by absolute path:
 If you want the wrapper on `PATH`, install it with:
 
 ```bash
-bash scripts/install-runat-skills.sh
+./scripts/install-runat.sh
 ```
 
 See [Installation And Resolution](#installation-and-resolution) for the full install procedure,
@@ -338,12 +338,12 @@ Future distribution work is:
 
 ### Install
 
-Use `bash scripts/install-runat-skills.sh` as the supported install path today.
+Use `./scripts/install-runat.sh` as the supported install path today.
 
 Installation procedure:
 
 1. Ensure `elan` is on `PATH`.
-2. Run `bash scripts/install-runat-skills.sh` for the base runtime.
+2. Run `./scripts/install-runat.sh` for the base runtime.
 3. Optionally add `--toolchain <toolchain>` one or more times to prebuild explicit supported Lean
    bundles, or `--all-supported` to prebuild the full supported allowlist.
 4. Optionally rerun with `--codex`, `--claude`, or `--all-skills` to install the bundled agent
@@ -365,11 +365,11 @@ That installer:
 Optional skill install commands:
 
 ```bash
-bash scripts/install-runat-skills.sh --codex
-bash scripts/install-runat-skills.sh --claude
-bash scripts/install-runat-skills.sh --all-skills
-bash scripts/install-runat-skills.sh --toolchain leanprover/lean4:v4.29.0-rc6
-bash scripts/install-runat-skills.sh --all-supported
+./scripts/install-runat.sh --codex
+./scripts/install-runat.sh --claude
+./scripts/install-runat.sh --all-skills
+./scripts/install-runat.sh --toolchain leanprover/lean4:v4.29.0-rc6
+./scripts/install-runat.sh --all-supported
 ```
 
 Those flags install the bundled Lean and Rocq skills into `$CODEX_HOME/skills` or
