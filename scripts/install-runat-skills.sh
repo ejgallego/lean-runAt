@@ -11,9 +11,9 @@ current_root="$install_root/current"
 state_root="$install_root/state"
 install_bundles_root="$state_root/install-bundles"
 runat_cli="$repo_root/.lake/build/bin/runAt-cli"
+install_notes_path="$repo_root/scripts/install-runat-skills-notes.txt"
 install_codex_skills=0
 install_claude_skills=0
-installed_skill_targets=()
 
 runtime_payload_spec=(
   "copy|rootFiles|RunAt.lean|RunAt.lean"
@@ -199,6 +199,7 @@ validate_install_config() {
   require_absolute_path "$repo_root" "repo root"
   require_absolute_path "$bin_home" "bin home"
   require_absolute_path "$install_root" "install root"
+  require_absolute_path "$install_notes_path" "install notes path"
   require_path_within "$versions_root" "$install_root" "versions root"
   require_path_within "$current_root" "$install_root" "current link"
   require_path_within "$state_root" "$install_root" "state root"
@@ -454,17 +455,21 @@ install_skill_target() {
   local enabled="$1"
   local label="$2"
   local skills_home="$3"
+  local targets_name="$4"
+  local -n targets_ref="$targets_name"
   if [ "$enabled" -ne 1 ]; then
     return 0
   fi
   install_skills "$skills_home"
-  installed_skill_targets+=("$label: $skills_home")
+  targets_ref+=("$label: $skills_home")
 }
 
 prepare_install_environment() {
+  local toolchain_name="$1"
+  local -n toolchain_ref="$toolchain_name"
   require_elan
-  repo_toolchain="$(awk 'NR==1 {print $1}' "$repo_root/lean-toolchain")"
-  require_repo_toolchain "$repo_toolchain"
+  toolchain_ref="$(awk 'NR==1 {print $1}' "$repo_root/lean-toolchain")"
+  require_repo_toolchain "$toolchain_ref"
   verify_publish_targets
   mkdir -p "$bin_home" "$versions_root" "$state_root"
   ensure_runtime_artifacts
@@ -472,44 +477,57 @@ prepare_install_environment() {
 
 prepare_install_version() {
   local staging_root="$1"
+  local toolchain="$2"
+  local payload_name="$3"
+  local version_root_name="$4"
+  local source_commit_name="$5"
+  local -n payload_ref="$payload_name"
+  local -n version_root_ref="$version_root_name"
+  local -n source_commit_ref="$source_commit_name"
   stage_install_version "$staging_root" "$current_root" "$install_bundles_root"
-  payload_id="$(hash_tree "$staging_root")"
-  version_root="$versions_root/$payload_id"
-  source_commit="$(repo_source_commit)"
-  write_install_manifest "$staging_root/manifest.json" "$payload_id" "$repo_toolchain" "$source_commit"
-  if [ ! -d "$version_root" ]; then
-    move_staging_dir_into_versions "$staging_root" "$version_root"
+  payload_ref="$(hash_tree "$staging_root")"
+  version_root_ref="$versions_root/$payload_ref"
+  source_commit_ref="$(repo_source_commit)"
+  write_install_manifest "$staging_root/manifest.json" "$payload_ref" "$toolchain" "$source_commit_ref"
+  if [ ! -d "$version_root_ref" ]; then
+    move_staging_dir_into_versions "$staging_root" "$version_root_ref"
   else
     remove_owned_staging_dir "$staging_root"
   fi
-  if [ ! -f "$version_root/manifest.json" ]; then
-    write_install_manifest "$version_root/manifest.json" "$payload_id" "$repo_toolchain" "$source_commit"
+  if [ ! -f "$version_root_ref/manifest.json" ]; then
+    write_install_manifest "$version_root_ref/manifest.json" "$payload_ref" "$toolchain" "$source_commit_ref"
   fi
 }
 
 prebuild_install_bundle() {
-  echo "prebuilding runAt bundle for $repo_toolchain" >&2
-  prebuild_bundle "$version_root" "$repo_toolchain" "$install_bundles_root"
+  local version_root="$1"
+  local toolchain="$2"
+  echo "prebuilding runAt bundle for $toolchain" >&2
+  prebuild_bundle "$version_root" "$toolchain" "$install_bundles_root"
 }
 
 publish_runtime() {
+  local version_root="$1"
   replace_symlink_atomically "$version_root" "$current_root" "$install_root" "current link"
   replace_symlink_atomically "$current_root/bin/runat" "$bin_home/runat" "$bin_home" "runat wrapper link"
   replace_symlink_atomically "$current_root/bin/runat-lean-search" "$bin_home/runat-lean-search" "$bin_home" "runat-lean-search link"
 }
 
 install_requested_skills() {
-  install_skill_target "$install_codex_skills" "Codex" "$codex_skills_home"
-  install_skill_target "$install_claude_skills" "Claude Code" "$claude_skills_home"
+  local targets_name="$1"
+  install_skill_target "$install_codex_skills" "Codex" "$codex_skills_home" "$targets_name"
+  install_skill_target "$install_claude_skills" "Claude Code" "$claude_skills_home" "$targets_name"
 }
 
 print_install_summary() {
+  local targets_name="$1"
+  local -n targets_ref="$targets_name"
   echo "installed runAt runtime" >&2
   echo "  runtime root: $current_root" >&2
   echo "  wrappers: $bin_home/runat, $bin_home/runat-lean-search" >&2
-  if [ "${#installed_skill_targets[@]}" -gt 0 ]; then
+  if [ "${#targets_ref[@]}" -gt 0 ]; then
     echo "  bundled skills:" >&2
-    for target in "${installed_skill_targets[@]}"; do
+    for target in "${targets_ref[@]}"; do
       echo "    $target" >&2
     done
   else
@@ -523,44 +541,29 @@ EOF
 }
 
 print_post_install_notes() {
-  cat >&2 <<'EOF'
-
-human workflow:
-  runat ensure lean
-  runat lean-run-at "Foo.lean" 10 2 "exact trivial"
-  # after a real edit saved to disk
-  runat lean-sync "Foo.lean"
-  # for a synced workspace module
-  runat lean-save "MyPkg/Sub/Module.lean"
-  # separate lean-run-at calls do not chain; for exact continuation use:
-  runat lean-run-at-handle "Foo.lean" 10 2 "constructor"
-
-diagnostics:
-  lean-sync / lean-save / lean-close-save stream errors by default
-  add +full to include warnings, info, and hints
-  wrapper stderr is human-facing
-  runAt-cli-client request-stream is the machine-readable surface
-
-docs:
-  see skills/lean-runat/SKILL.md for the Lean workflow contract
-EOF
+  cat "$install_notes_path" >&2
 }
 
 main() {
   local staging_root=""
+  local repo_toolchain=""
+  local payload_id=""
+  local version_root=""
+  local source_commit=""
+  local installed_skill_targets=()
   parse_args "$@"
   validate_install_config
-  prepare_install_environment
+  prepare_install_environment repo_toolchain
 
   staging_root="$(mktemp -d "$install_root/.staging-XXXXXX")"
   trap 'remove_owned_staging_dir "$staging_root"' EXIT
-  prepare_install_version "$staging_root"
+  prepare_install_version "$staging_root" "$repo_toolchain" payload_id version_root source_commit
   trap - EXIT
 
-  prebuild_install_bundle
-  publish_runtime
-  install_requested_skills
-  print_install_summary
+  prebuild_install_bundle "$version_root" "$repo_toolchain"
+  publish_runtime "$version_root"
+  install_requested_skills installed_skill_targets
+  print_install_summary installed_skill_targets
   print_post_install_notes
 }
 

@@ -1,0 +1,19 @@
+
+human workflow:
+  runat ensure lean
+  runat lean-run-at "Foo.lean" 10 2 "exact trivial"
+  # after a real edit saved to disk
+  runat lean-sync "Foo.lean"
+  # for a synced workspace module
+  runat lean-save "MyPkg/Sub/Module.lean"
+  # separate lean-run-at calls do not chain; for exact continuation use:
+  runat lean-run-at-handle "Foo.lean" 10 2 "constructor"
+
+diagnostics:
+  lean-sync / lean-save / lean-close-save stream errors by default
+  add +full to include warnings, info, and hints
+  wrapper stderr is human-facing
+  runAt-cli-client request-stream is the machine-readable surface
+
+docs:
+  see skills/lean-runat/SKILL.md for the Lean workflow contract
