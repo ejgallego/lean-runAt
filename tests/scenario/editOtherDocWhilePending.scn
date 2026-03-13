@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Lean FRO LLC. All rights reserved.
+# Released under Apache 2.0 license as described in the file LICENSE.
+# Author: Emilio J. Gallego Arias
+
 # Editing one document should not disturb a pending request in another document.
 open slow {"path":"docs/SlowClose.lean"}
 open fast {"path":"docs/CommandB.lean"}

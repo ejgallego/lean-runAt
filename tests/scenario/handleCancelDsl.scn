@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Lean FRO LLC. All rights reserved.
+# Released under Apache 2.0 license as described in the file LICENSE.
+# Author: Emilio J. Gallego Arias
+
 # Follow-up handle cancellation via the text scenario DSL.
 open poll {"path":"docs/SlowPoll.lean"}
 sync poll

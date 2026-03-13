@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Lean FRO LLC. All rights reserved.
+# Released under Apache 2.0 license as described in the file LICENSE.
+# Author: Emilio J. Gallego Arias
+
 # Non-linear handle branching from a nested proof split.
 open branch {"path":"docs/NestedBranchProof.lean"}
 open cmd {"path":"docs/CommandA.lean"}

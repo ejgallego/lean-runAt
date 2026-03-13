@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Lean FRO LLC. All rights reserved.
+# Released under Apache 2.0 license as described in the file LICENSE.
+# Author: Emilio J. Gallego Arias
+
 # Editing a document while a runAt request is pending should stale the request.
 open proof {"path":"docs/SimpleProof.lean"}
 send r runAt proof {"line":1,"character":2,"text":"exact trivial"}

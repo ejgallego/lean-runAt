@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Lean FRO LLC. All rights reserved.
+# Released under Apache 2.0 license as described in the file LICENSE.
+# Author: Emilio J. Gallego Arias
+
 # Requests with a line beyond the end of the document are invalid.
 open a {"path":"docs/CommandA.lean"}
 send r runAt a {"line":99,"character":0,"text":"#check Nat"}
