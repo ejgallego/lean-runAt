@@ -295,13 +295,6 @@ require_repo_toolchain() {
   fi
 }
 
-copy_if_present() {
-  local src="$1"
-  local dest="$2"
-  local dest_root="$3"
-  copy_repo_path_if_present "$src" "$dest" "$dest_root"
-}
-
 stage_runtime_tree() {
   local dest="$1"
   local path=""
@@ -310,17 +303,17 @@ stage_runtime_tree() {
   local dest_rel=""
   mkdir -p "$dest"
   for path in "${runtime_root_files[@]}"; do
-    copy_if_present "$repo_root/$path" "$dest/$path" "$dest"
+    copy_repo_path_if_present "$repo_root/$path" "$dest/$path" "$dest"
   done
   for path in "${runtime_source_dirs[@]}"; do
-    copy_if_present "$repo_root/$path" "$dest/$path" "$dest"
+    copy_repo_path_if_present "$repo_root/$path" "$dest/$path" "$dest"
   done
   for mapping in "${runtime_binary_artifacts[@]}"; do
     src_rel="${mapping%%:*}"
     dest_rel="${mapping#*:}"
-    copy_if_present "$repo_root/$src_rel" "$dest/$dest_rel" "$dest"
+    copy_repo_path_if_present "$repo_root/$src_rel" "$dest/$dest_rel" "$dest"
   done
-  copy_if_present "$repo_root/.lake/packages" "$dest/.lake/packages" "$dest"
+  copy_repo_path_if_present "$repo_root/.lake/packages" "$dest/.lake/packages" "$dest"
 }
 
 write_runat_wrapper() {
@@ -515,6 +508,17 @@ install_skills() {
   rsync -a "$repo_root/skills/rocq-runat/" "$skills_home/rocq-runat/"
 }
 
+install_skill_target() {
+  local enabled="$1"
+  local label="$2"
+  local skills_home="$3"
+  if [ "$enabled" -ne 1 ]; then
+    return 0
+  fi
+  install_skills "$skills_home"
+  installed_skill_targets+=("$label: $skills_home")
+}
+
 prepare_install_environment() {
   require_elan
   repo_toolchain="$(awk 'NR==1 {print $1}' "$repo_root/lean-toolchain")"
@@ -553,15 +557,8 @@ publish_runtime() {
 }
 
 install_requested_skills() {
-  if [ "$install_codex_skills" -eq 1 ]; then
-    install_skills "$codex_skills_home"
-    installed_skill_targets+=("Codex: $codex_skills_home")
-  fi
-
-  if [ "$install_claude_skills" -eq 1 ]; then
-    install_skills "$claude_skills_home"
-    installed_skill_targets+=("Claude Code: $claude_skills_home")
-  fi
+  install_skill_target "$install_codex_skills" "Codex" "$codex_skills_home"
+  install_skill_target "$install_claude_skills" "Claude Code" "$claude_skills_home"
 }
 
 print_install_summary() {
