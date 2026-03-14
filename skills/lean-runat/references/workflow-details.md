@@ -141,6 +141,8 @@ What is not a valid checkpoint target:
 - by default they stream only errors
 - add `+full` to widen the current request to warnings, info, and hints
 - the final JSON does not replay streamed diagnostics
+- when `lean-save` or `lean-close-save` returns `invalidParams` for document errors, the transport
+  `error.message` includes a compact preview of underlying diagnostics and/or command messages
 - wrapper `stderr` is the human-facing diagnostic surface
 - `runAt-cli-client request-stream ...` is the machine-facing streamed surface
 - do not parse wrapper `stderr` in tooling

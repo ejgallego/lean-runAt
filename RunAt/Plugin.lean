@@ -210,18 +210,60 @@ private def writeIlean
   ensureParentDir ileanFile
   IO.FS.writeFile ileanFile (Json.compress <| toJson ilean)
 
+private def singleLineText (text : String) : String :=
+  let parts := text.splitOn "\n"
+  let parts := parts.filterMap fun part =>
+    let trimmed := part.trimAscii.toString
+    if trimmed.isEmpty then none else some trimmed
+  String.intercalate " " parts
+
+private def formatErrorDiagnostic (diagnostic : Lean.Widget.InteractiveDiagnostic) : String :=
+  let diagnostic := Lean.Widget.InteractiveDiagnostic.toDiagnostic diagnostic
+  let line := diagnostic.range.start.line + 1
+  let character := diagnostic.range.start.character + 1
+  s!"{line}:{character}: {singleLineText diagnostic.message}"
+
+private def summarizeErrorItems (items : Array String) (maxItems : Nat := 3) : String :=
+  let limit := Nat.min maxItems items.size
+  let shown := items.extract 0 limit
+  let extra := items.size - shown.size
+  let suffix := if extra > 0 then s!" (and {extra} more)" else ""
+  s!"{String.intercalate " | " shown.toList}{suffix}"
+
+private def saveArtifactsErrorMessage
+    (diagnosticErrors : Array Lean.Widget.InteractiveDiagnostic)
+    (commandErrors : Array String) : String :=
+  let detailParts : List String :=
+    [
+      if !diagnosticErrors.isEmpty then
+        some s!"diagnostics: {summarizeErrorItems (diagnosticErrors.map formatErrorDiagnostic)}"
+      else
+        none,
+      if !commandErrors.isEmpty then
+        some s!"commandMessages: {summarizeErrorItems commandErrors}"
+      else
+        none
+    ].filterMap id
+  if detailParts.isEmpty then
+    "cannot save artifacts for a document with errors"
+  else
+    s!"cannot save artifacts for a document with errors; {String.intercalate "; " detailParts}"
+
 private def saveCurrentArtifacts
     (doc : Lean.Server.FileWorker.EditableDocument)
     (snaps : List Snapshots.Snapshot)
     (p : RunAt.Internal.SaveArtifactsParams) : RequestM RunAt.Internal.SaveArtifactsResult := do
   checkRequestCancelled
   let diagnostics ← doc.diagnosticsRef.get
-  if diagnostics.any (fun diag => diag.severity? == some .error) then
-    throw <| RequestError.invalidParams "cannot save artifacts for a document with errors"
+  let diagnosticErrors := diagnostics.filter (fun diag => diag.severity? == some .error)
   let some cmdState := Lean.Language.Lean.waitForFinalCmdState? doc.initSnap
     | throw <| RequestError.invalidParams "document did not elaborate successfully"
-  if cmdState.messages.toList.any (fun msg => msg.severity == MessageSeverity.error) then
-    throw <| RequestError.invalidParams "cannot save artifacts for a document with errors"
+  let mut commandErrors : Array String := #[]
+  for msg in cmdState.messages.toList do
+    if msg.severity == MessageSeverity.error then
+      commandErrors := commandErrors.push (singleLineText (← msg.data.toString))
+  if !diagnosticErrors.isEmpty || !commandErrors.isEmpty then
+    throw <| RequestError.invalidParams (saveArtifactsErrorMessage diagnosticErrors commandErrors)
   let env := cmdState.env
   let mainModule := env.mainModule
   let oleanFile := mkFilePath p.oleanFile

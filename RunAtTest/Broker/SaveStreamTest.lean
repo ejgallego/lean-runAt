@@ -103,6 +103,31 @@ def main : IO Unit := do
       throw <| IO.userError
         s!"expected unchanged full save_olean to avoid replaying stale diagnostics, got {(toJson repeatDiagnostics).compress}"
 
+    IO.FS.writeFile (root / "SaveSmoke" / "B.lean") <| String.intercalate "\n" [
+      "def bVal : Nat := 1",
+      "",
+      "def brokenSave : Nat := \"oops\""
+    ] ++ "\n"
+    let (errorResp, _errorProgress, errorDiagnostics) ← runClientWithStream endpoint {
+      op := .saveOlean
+      root? := some root.toString
+      path? := some "SaveSmoke/B.lean"
+      fullDiagnostics? := some true
+    }
+    expectErrCode errorResp "invalidParams"
+    let some error := errorResp.error?
+      | throw <| IO.userError s!"expected save_olean error payload, got {(toJson errorResp).compress}"
+    if !error.message.contains "cannot save artifacts for a document with errors;" then
+      throw <| IO.userError
+        s!"expected save_olean error to explain artifact rejection, got {error.message}"
+    if !error.message.contains "diagnostics:" then
+      throw <| IO.userError
+        s!"expected save_olean error to include diagnostic details, got {error.message}"
+    unless errorDiagnostics.any (fun diagnostic =>
+      diagnostic.path == "SaveSmoke/B.lean" && diagnostic.severity? == some .error) do
+      throw <| IO.userError
+        s!"expected save_olean error stream to include an error diagnostic for SaveSmoke/B.lean, got {(toJson errorDiagnostics).compress}"
+
     writeSaveWarningFile root "-- full close-save"
     let (closeResp, closeProgress, closeDiagnostics) ← runClientWithStream endpoint {
       op := .close
@@ -118,8 +143,8 @@ def main : IO Unit := do
       throw <| IO.userError s!"expected close-save payload to report closed = true, got {closePayload.compress}"
     let savedPayload ← IO.ofExcept <| closePayload.getObjVal? "saved"
     let closeVersion ← IO.ofExcept <| savedPayload.getObjValAs? Nat "version"
-    if closeVersion != 3 then
-      throw <| IO.userError s!"expected close-save saved version 3 after a fresh edit, got {closeVersion}"
+    if closeVersion != 4 then
+      throw <| IO.userError s!"expected close-save saved version 4 after a fresh edit, got {closeVersion}"
     let closeTop := ← requireFileProgress "full close-save" closeResp
     if !closeTop.done then
       throw <| IO.userError s!"expected full close-save top-level fileProgress.done = true, got {(toJson closeTop).compress}"
