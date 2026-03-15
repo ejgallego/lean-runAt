@@ -15,6 +15,12 @@ practical workflows.
 
 Current scope, limitations, and direction live in [docs/STATUS.md](docs/STATUS.md).
 
+## Start Here
+
+- using the project as a human: stay in this README, then go to [skills/lean-beam/SKILL.md](skills/lean-beam/SKILL.md) for the Lean workflow contract
+- contributing as a human: read [CONTRIBUTING.md](CONTRIBUTING.md), then [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
+- working as an AI agent or reviewing agent workflow: start with [AGENTS.md](AGENTS.md), then the relevant skill doc
+
 ## Human-Facing Surface
 
 For most users, the practical entry point is `lean-beam`.
@@ -113,10 +119,10 @@ More detail on test coverage and gaps lives in [docs/TESTING.md](docs/TESTING.md
 - [docs/STATUS.md](docs/STATUS.md): current scope, limitations, and direction
 - [skills/lean-beam/SKILL.md](skills/lean-beam/SKILL.md): Lean workflow contract
 - [skills/rocq-beam/SKILL.md](skills/rocq-beam/SKILL.md): auxiliary Rocq workflow surface
+- [CONTRIBUTING.md](CONTRIBUTING.md): commit, PR, and contributor workflow guidance
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): AI-first maintainer workflow and harness guidance
 - [docs/TESTING.md](docs/TESTING.md): test coverage and gaps
 - [docs/experimental.md](docs/experimental.md): unstable experimental surfaces
-- [CONTRIBUTING.md](CONTRIBUTING.md): commit, PR, and contributor workflow guidance
-- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): AI-first local development and harness workflow
 - [AGENTS.md](AGENTS.md): repo-specific agent instructions
 
 ## License
