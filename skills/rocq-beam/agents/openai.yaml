@@ -3,9 +3,9 @@
 # Author: Emilio J. Gallego Arias
 
 interface:
-  display_name: "Rocq Beam"
-  short_description: "Direct Rocq proof-state access"
-  default_prompt: "Use $rocq-beam on an external Rocq project for isolated on-disk goal probes through coq-lsp via lean-beam; save before probing and do not assume hidden cross-request proof state or unsaved-buffer access."
+  display_name: "Rocq Beam Aux"
+  short_description: "Auxiliary Rocq goal probes"
+  default_prompt: "Use $rocq-beam when an external Rocq project needs the auxiliary Rocq goal-probe surface exposed through lean-beam; save before probing, use lean-beam rocq-goals-after / rocq-goals-prev, and do not assume hidden cross-request proof state or unsaved-buffer access."
 
 policy:
   allow_implicit_invocation: true

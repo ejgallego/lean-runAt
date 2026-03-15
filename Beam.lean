@@ -6,6 +6,7 @@ Author: Emilio J. Gallego Arias
 
 import Beam.Broker.Client
 import Beam.Broker.Config
+import Beam.Broker.Deps
 import Beam.Broker.LakeSave
 import Beam.Broker.Lean
 import Beam.Broker.Protocol

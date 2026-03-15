@@ -68,6 +68,9 @@ def saveArtifactsMethod : String :=
 def saveReadinessMethod : String :=
   RunAt.Internal.saveReadinessMethod
 
+def directImportsMethod : String :=
+  RunAt.Internal.directImportsMethod
+
 def goalsMethod (mode? : Option GoalMode := none) : String :=
   match mode?.getD .after with
   | .after => RunAt.goalsAfterMethod

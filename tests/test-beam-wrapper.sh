@@ -858,6 +858,22 @@ EOF
     printf '%s\n' "$sync_third" >&2
     exit 1
   fi
+  refresh_out="$("$beam_script" lean-refresh SaveSmoke/B.lean)"
+  if [ "$(RUNAT_JSON_PAYLOAD="$refresh_out" read_json_text_field ok)" != "true" ]; then
+    echo "expected lean-refresh to succeed for a tracked Lean file" >&2
+    printf '%s\n' "$refresh_out" >&2
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$refresh_out" read_json_text_field result.saveReady)" != "true" ]; then
+    echo "expected lean-refresh to report saveReady = true for an unchanged file" >&2
+    printf '%s\n' "$refresh_out" >&2
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$refresh_out" read_json_text_field fileProgress.done)" != "true" ]; then
+    echo "expected lean-refresh to expose completed top-level fileProgress" >&2
+    printf '%s\n' "$refresh_out" >&2
+    exit 1
+  fi
   sleep 1
   doctor_out="$("$beam_script" doctor lean)"
   if ! printf '%s\n' "$doctor_out" | grep -q 'daemon status: live'; then
@@ -1542,31 +1558,49 @@ fi
   "$beam_script" ensure lean > /dev/null
   printf 'def bVal : Nat := "broken"\n' > SaveSmoke/B.lean
 
+  stale_sync_json="$(mktemp /tmp/beam-wrapper-stale-sync-json-XXXXXX)"
   stale_sync_err="$(mktemp /tmp/beam-wrapper-stale-sync-XXXXXX)"
-  if "$beam_script" lean-sync SaveSmoke/A.lean >"$stale_sync_err" 2>&1; then
+  if "$beam_script" lean-sync SaveSmoke/A.lean >"$stale_sync_json" 2>"$stale_sync_err"; then
     echo "expected lean-sync to fail when an imported target is stale and rebuild cannot complete" >&2
+    cat "$stale_sync_json" >&2
     cat "$stale_sync_err" >&2
+    rm -f "$stale_sync_json"
     rm -f "$stale_sync_err"
     exit 1
   fi
   if ! grep -q 'Lean diagnostics barrier did not complete' "$stale_sync_err"; then
     echo "expected stale-import lean-sync failure to explain the incomplete diagnostics barrier" >&2
+    cat "$stale_sync_json" >&2
     cat "$stale_sync_err" >&2
+    rm -f "$stale_sync_json"
     rm -f "$stale_sync_err"
     exit 1
   fi
-  if ! grep -q '"code": "syncBarrierIncomplete"' "$stale_sync_err"; then
+  if [ "$(RUNAT_JSON_PAYLOAD="$(cat "$stale_sync_json")" read_json_text_field error.code)" != "syncBarrierIncomplete" ]; then
     echo "expected stale-import lean-sync failure to expose syncBarrierIncomplete" >&2
+    cat "$stale_sync_json" >&2
     cat "$stale_sync_err" >&2
+    rm -f "$stale_sync_json"
     rm -f "$stale_sync_err"
     exit 1
   fi
   if grep -q 'Beam daemon connection closed' "$stale_sync_err"; then
     echo "expected stale-import lean-sync failure to stay structured instead of reporting a dropped daemon connection" >&2
+    cat "$stale_sync_json" >&2
     cat "$stale_sync_err" >&2
+    rm -f "$stale_sync_json"
     rm -f "$stale_sync_err"
     exit 1
   fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$(cat "$stale_sync_json")" read_json_text_field error.data.recoveryPlan.1)" != "lake build" ]; then
+    echo "expected stale-import lean-sync failure to include a lake build fallback plan" >&2
+    cat "$stale_sync_json" >&2
+    cat "$stale_sync_err" >&2
+    rm -f "$stale_sync_json"
+    rm -f "$stale_sync_err"
+    exit 1
+  fi
+  rm -f "$stale_sync_json"
   rm -f "$stale_sync_err"
 
   stale_save_err="$(mktemp /tmp/beam-wrapper-stale-save-XXXXXX)"
@@ -1595,6 +1629,80 @@ fi
     exit 1
   fi
   rm -f "$stale_save_err"
+
+  printf 'def bVal : Nat := 2\n' > SaveSmoke/B.lean
+  recovered_b_sync="$("$beam_script" lean-sync SaveSmoke/B.lean)"
+  if [ "$(RUNAT_JSON_PAYLOAD="$recovered_b_sync" read_json_text_field ok)" != "true" ]; then
+    echo "expected lean-sync on the recovered dependency to succeed" >&2
+    printf '%s\n' "$recovered_b_sync" >&2
+    exit 1
+  fi
+  recovered_b_save="$("$beam_script" lean-save SaveSmoke/B.lean)"
+  if [ "$(RUNAT_JSON_PAYLOAD="$recovered_b_save" read_json_text_field ok)" != "true" ]; then
+    echo "expected lean-save on the recovered dependency to succeed" >&2
+    printf '%s\n' "$recovered_b_save" >&2
+    exit 1
+  fi
+  stale_after_save_json="$(mktemp /tmp/beam-wrapper-stale-after-save-json-XXXXXX)"
+  stale_after_save_err="$(mktemp /tmp/beam-wrapper-stale-after-save-XXXXXX)"
+  if "$beam_script" lean-sync SaveSmoke/A.lean >"$stale_after_save_json" 2>"$stale_after_save_err"; then
+    echo "expected lean-sync on the stale importer to keep failing until refresh" >&2
+    cat "$stale_after_save_json" >&2
+    cat "$stale_after_save_err" >&2
+    rm -f "$stale_after_save_json"
+    rm -f "$stale_after_save_err"
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$(cat "$stale_after_save_json")" read_json_text_field error.data.staleDirectDeps.0.path)" != "SaveSmoke/B.lean" ]; then
+    echo "expected stale-import hint to name the direct dependency path" >&2
+    cat "$stale_after_save_json" >&2
+    cat "$stale_after_save_err" >&2
+    rm -f "$stale_after_save_json"
+    rm -f "$stale_after_save_err"
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$(cat "$stale_after_save_json")" read_json_text_field error.data.staleDirectDeps.0.needsSave)" != "false" ]; then
+    echo "expected stale-import hint to mark the saved dependency as not needing save" >&2
+    cat "$stale_after_save_json" >&2
+    cat "$stale_after_save_err" >&2
+    rm -f "$stale_after_save_json"
+    rm -f "$stale_after_save_err"
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$(cat "$stale_after_save_json")" read_json_array_len error.data.saveDeps)" != "0" ]; then
+    echo "expected stale-import hint to avoid recommending save for an already saved dependency" >&2
+    cat "$stale_after_save_json" >&2
+    cat "$stale_after_save_err" >&2
+    rm -f "$stale_after_save_json"
+    rm -f "$stale_after_save_err"
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$(cat "$stale_after_save_json")" read_json_text_field error.data.recoveryPlan.0)" != "lean-beam refresh \"SaveSmoke/A.lean\"" ]; then
+    echo "expected stale-import hint to recommend lean-refresh first after a saved dependency change" >&2
+    cat "$stale_after_save_json" >&2
+    cat "$stale_after_save_err" >&2
+    rm -f "$stale_after_save_json"
+    rm -f "$stale_after_save_err"
+    exit 1
+  fi
+  rm -f "$stale_after_save_json"
+  rm -f "$stale_after_save_err"
+  refreshed_a="$("$beam_script" lean-refresh SaveSmoke/A.lean)"
+  if [ "$(RUNAT_JSON_PAYLOAD="$refreshed_a" read_json_text_field ok)" != "true" ]; then
+    echo "expected lean-refresh to recover a stale target after saving the dependency" >&2
+    printf '%s\n' "$refreshed_a" >&2
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$refreshed_a" read_json_text_field result.saveReady)" != "true" ]; then
+    echo "expected recovered lean-refresh to report saveReady = true" >&2
+    printf '%s\n' "$refreshed_a" >&2
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$refreshed_a" read_json_text_field fileProgress.done)" != "true" ]; then
+    echo "expected recovered lean-refresh to expose completed top-level fileProgress" >&2
+    printf '%s\n' "$refreshed_a" >&2
+    exit 1
+  fi
 )
 
 (

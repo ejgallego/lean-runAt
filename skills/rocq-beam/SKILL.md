@@ -1,11 +1,13 @@
 ---
 name: rocq-beam
-description: Use this when an AI should inspect Rocq proof state from an external Rocq project through the installed `lean-beam` wrapper, giving it direct efficient access to Rocq proof state through cheap coq-lsp goal probes to avoid rebuild-heavy interaction loops, especially for Rocq-to-Lean work.
+description: Use this when an AI needs the auxiliary Rocq goal-probe surface exposed through the installed `lean-beam` wrapper, giving it cheap coq-lsp proof-state access without treating Rocq support as a separate product.
 ---
 
 # Rocq Beam
 
-Use this skill for Rocq projects when you want the AI to inspect Rocq proof state cheaply through `coq-lsp` instead of relying on slower, more manual proof interaction loops.
+Use this skill when a Rocq project needs the narrow Rocq-facing surface that `lean-beam` already exposes. This is an auxiliary mode of the `lean-beam` toolchain, not a separate product or a second full workflow stack.
+
+The goal is cheap Rocq proof-state inspection through `coq-lsp`, without turning Rocq support into a broad standalone interface.
 
 Do not use `coqtop` or any fallback executor. Only `coq-lsp` is trusted.
 This is the Rocq-only skill. It should stay focused on Rocq and should not require Lean-specific
@@ -48,15 +50,15 @@ mutation.
 Supported command families:
 
 - bootstrap the Rocq backend: `lean-beam ensure rocq`
-- inspect goals after an existing sentence: `rocq-goals-after`
+- inspect goals after an existing sentence: `lean-beam rocq-goals-after`
 - inspect goals before a sentence or after speculative sentence text within that basis:
-  `rocq-goals-prev`
+  `lean-beam rocq-goals-prev`
 - inspect tracked files and daemon state: `lean-beam open-files`, `lean-beam stats`, `lean-beam reset-stats`
 
 What to treat as the current public skill surface:
 
-- default command: `rocq-goals-after`
-- intermediate-state command: `rocq-goals-prev` with extra text when needed
+- default command: `lean-beam rocq-goals-after`
+- intermediate-state command: `lean-beam rocq-goals-prev` with extra text when needed
 - operational introspection: `lean-beam open-files`, `lean-beam stats`, `lean-beam reset-stats`
 
 Core workflow contract:
@@ -79,10 +81,6 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 - infers the target project root from the current directory or `--root`
 - keeps one Beam daemon per project root and records it in `<root>/.beam/beam-daemon.json`
   - in sandboxed or read-only project trees, set `BEAM_CONTROL_DIR` to a writable directory
-- for Lean-backed brokers, bundle builds can be redirected via `BEAM_BUNDLE_DIR` in the same way as
-  `BEAM_CONTROL_DIR` to avoid project-local cache writes
-- Lean-backed runtime resolution first tries the installed beam bundle cache and then falls
-  back to the project-local bundle cache
 - owns Beam daemon startup, shutdown, and registry handling
 - resolves `coq-lsp` from the target project's local `_opam` when available
 - starts a Rocq-capable Beam daemon with explicit startup args instead of relying on inherited editor state
@@ -95,10 +93,10 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 Default rules:
 
 - use `lean-beam`, not raw JSON and not raw LSP
-- start with `rocq-goals-after`
+- start with `lean-beam rocq-goals-after`
 - save the file before every new probe after a real edit
 - keep coordinates 0-based; do not guess editor-specific 1-based lines or columns
-- use `rocq-goals-prev` plus text when you need an intermediate state inside a sentence
+- use `lean-beam rocq-goals-prev` plus text when you need an intermediate state inside a sentence
 - do not assume any hidden proof-session state carries across requests
 
 ## Workflow
@@ -185,8 +183,8 @@ lean-beam rocq-goals-after "Demo.v" 12 4
 
 ## Policy
 
-- default to `rocq-goals-after`
-- use `rocq-goals-prev` plus text for intermediate-state probing
+- default to `lean-beam rocq-goals-after`
+- use `lean-beam rocq-goals-prev` plus text for intermediate-state probing
 - keep `ppFormat` as `Str`
 - do not treat `lean-beam` as a source editor; actual `.v` edits happen through the normal file-edit workflow
 - do not assume one goal probe mutates the basis of the next probe; each request starts from the current saved document state
@@ -203,10 +201,9 @@ lean-beam reset-stats
 ```
 
 `lean-beam open-files` shows the files currently tracked by the Beam daemon for the current project. For
-Lean-backed tracked files it also includes direct deps when available and whether the current synced
-version has been checkpointed with `lean-beam save`. For files the broker already knows about, the
-wrapper checks that status incrementally against the current on-disk text, and `open-files` also
-reports the last compact `fileProgress` observed for that tracked version.
+tracked files the broker already knows about, the wrapper checks status incrementally against the
+current on-disk text, and `open-files` also reports the last compact `fileProgress` observed for
+that tracked version.
 
 Stats are in-memory only and scoped to the current project Beam daemon.
 

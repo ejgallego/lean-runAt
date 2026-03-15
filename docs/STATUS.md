@@ -68,7 +68,9 @@ expose an equivalent public sync command in the wrapper.
 If Lean cannot reach a completed diagnostics barrier for the synced version, for example because an
 imported target is stale and rebuild failure kills the worker session, `lean-beam sync` now fails rather
 than reporting a partial success. `lean-beam save` and `lean-beam close-save` refuse to proceed past that
-incomplete barrier.
+incomplete barrier. Lean sync failures may also attach a cheap direct-import recovery hint in
+`error.data`, based on broker-tracked saved dependency boundaries, to suggest `save` / `refresh` /
+`lake build` next steps without running a full workspace dependency scan.
 
 `lean-beam sync`, `lean-beam save`, and `lean-beam close-save` should be read as a progression rather than as
 unrelated commands: `lean-beam sync` establishes the synced diagnostics-complete saved file snapshot,

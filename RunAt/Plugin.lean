@@ -622,6 +622,23 @@ private def handleSaveReadiness
     let (readiness, _, _, _) ← collectSaveReadiness doc
     pure readiness
 
+private def handleDirectImports
+    (_p : RunAt.Internal.DirectImportsParams) : RequestM (RequestTask RunAt.Internal.DirectImportsResult) := do
+  let doc ← RequestM.readDoc
+  checkRequestCancelled
+  let inputCtx := Lean.Parser.mkInputContext doc.meta.text.source doc.meta.uri
+  let (header, _, _) ← Lean.Parser.parseHeader inputCtx
+  let imports :=
+    (Lean.Server.collectImports header).foldl (init := #[]) fun acc info =>
+      if acc.contains info.module then
+        acc
+      else
+        acc.push info.module
+  return RequestTask.pure {
+    version := doc.meta.version
+    imports
+  }
+
 initialize
   registerLspRequestHandler method Params Result handleRunAt
   registerLspRequestHandler goalsAfterMethod GoalsParams ProofState (fun p => handleGoalsAt p true)
@@ -636,5 +653,9 @@ initialize
     RunAt.Internal.SaveReadinessParams
     RunAt.Internal.SaveReadinessResult
     handleSaveReadiness
+  registerLspRequestHandler RunAt.Internal.directImportsMethod
+    RunAt.Internal.DirectImportsParams
+    RunAt.Internal.DirectImportsResult
+    handleDirectImports
 
 end RunAt

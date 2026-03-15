@@ -193,6 +193,7 @@ instance : FromJson Request where
 structure Error where
   code : String
   message : String := ""
+  data? : Option Json := none
   deriving Inhabited, FromJson, ToJson
 
 structure SyncFileProgress where
@@ -304,8 +305,8 @@ def StreamMessage.mkDiagnostic
 def Response.success (result : Json) : Response :=
   { ok := true, result? := some result }
 
-def Response.error (code : String) (message : String := "") : Response :=
-  { ok := false, error? := some { code, message } }
+def Response.error (code : String) (message : String := "") (data? : Option Json := none) : Response :=
+  { ok := false, error? := some { code, message, data? } }
 
 def Response.withClientRequestId (resp : Response) (clientRequestId? : Option String) : Response :=
   { resp with clientRequestId? := clientRequestId? <|> resp.clientRequestId? }

@@ -123,6 +123,12 @@ private def parseLeanSyncArgs (args : List String) : IO Bool := do
   | ["+full"] => pure true
   | _ => throw <| IO.userError "usage: beam [--root PATH] [--socket PATH | --port N] lean-sync <path> [+full]"
 
+private def parseLeanRefreshArgs (args : List String) : IO Bool := do
+  match args with
+  | [] => pure false
+  | ["+full"] => pure true
+  | _ => throw <| IO.userError "usage: beam [--root PATH] [--socket PATH | --port N] lean-refresh <path> [+full]"
+
 private def parseLeanSaveArgs (args : List String) : IO Bool := do
   match args with
   | [] => pure false
@@ -1026,6 +1032,12 @@ private def callBroker (root : System.FilePath) (endpoint : Transport.Endpoint) 
     printResponse resp
     failOnError resp
 
+private def callBrokerQuiet (root : System.FilePath) (endpoint : Transport.Endpoint) (req : Request) : IO Unit :=
+  withBrokerErrorContext root do
+    let req ← withEnvClientRequestId req
+    let resp ← sendRequest endpoint req
+    failOnError resp
+
 private def decodeSyncFileResult? (resp : Response) : Option SyncFileResult := do
   let result ← resp.result?
   fromJson? result |>.toOption
@@ -1137,6 +1149,27 @@ private def syncWaitSpec (path : String) : BrokerWaitSpec :=
           s!"beam: sync complete for {path}"
   }
 
+private def refreshWaitSpec (path : String) : BrokerWaitSpec :=
+  {
+    startMsg := s!"beam: refreshing {path} by closing and resyncing"
+    progressMsg := fun progress => s!"beam: refresh progress for {path}{syncFileProgressSuffix (some progress)}"
+    stillWaitingMsg := fun seconds => s!"beam: still refreshing {path} ({seconds}s)"
+    completeMsg := fun resp =>
+      match decodeSyncFileResult? resp with
+      | some result =>
+          let suffix := syncFileProgressSuffix (responseFileProgress? resp)
+          let readinessSuffix :=
+            if result.saveReady then
+              ""
+            else
+              s!", saveReady=false ({result.saveReadyReason}, " ++
+                s!"stateErrorCount={result.stateErrorCount}, " ++
+                s!"stateCommandErrorCount={result.stateCommandErrorCount})"
+          s!"beam: refresh complete for {path} (version {result.version}{suffix}{readinessSuffix})"
+      | none =>
+          s!"beam: refresh complete for {path}"
+  }
+
 private def leanRunAtWaitSpec (path : String) (line character : Nat) : BrokerWaitSpec :=
   let pos := s!"{path}:{line}:{character}"
   {
@@ -1245,6 +1278,7 @@ private def usage : String :=
     "  beam [--root PATH] [--socket PATH | --port N] lean-release <path> <handle-json|->",
     "  beam [--root PATH] [--socket PATH | --port N] lean-deps <path>",
     "  beam [--root PATH] [--socket PATH | --port N] lean-sync <path> [+full]",
+    "  beam [--root PATH] [--socket PATH | --port N] lean-refresh <path> [+full]",
     "  beam [--root PATH] [--socket PATH | --port N] lean-save <path> [+full]",
     "  beam [--root PATH] [--socket PATH | --port N] lean-close <path>",
     "  beam [--root PATH] [--socket PATH | --port N] lean-close-save <path> [+full]",
@@ -1261,11 +1295,13 @@ private def usage : String :=
     "  beam experimental",
     "",
     "Lean edit loop: save the file, then run lean-sync. lean-save is lean-sync plus a",
-    "workspace-module checkpoint, and lean-close-save adds closing the tracked file afterward.",
+    "workspace-module checkpoint, lean-refresh is lean-close plus lean-sync, and lean-close-save",
+    "adds closing the tracked file afterward.",
     "Separate lean-run-at calls are independent probes on the current saved file snapshot.",
     "For exact speculative chaining, use lean-run-at-handle and then lean-run-with /",
     "lean-run-with-linear.",
-    "For lean-sync / lean-save / lean-close-save, diagnostics always stream for the current request;",
+    "For lean-sync / lean-refresh / lean-save / lean-close-save, diagnostics always stream for the",
+    "current request;",
     "default is errors only, and +full widens the stream to warnings, info, and hints.",
     "Wrapper diagnostics and progress are human-facing on stderr.",
     "For machine-readable streaming diagnostics/progress, use beam-client request-stream.",
@@ -1593,6 +1629,25 @@ private def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit :=
           fullDiagnostics? := some fullDiagnostics
         }
         (syncWaitSpec path)
+  | "lean-refresh" :: path :: extra => do
+      let root ← projectRoot opts .lean
+      let (endpoint, _) ← ensureProjectDaemon home root .lean opts
+      let fullDiagnostics ← parseLeanRefreshArgs extra
+      callBrokerQuiet root endpoint {
+        op := .close
+        backend := .lean
+        root? := some root.toString
+        path? := some path
+      }
+      callBrokerWithProgress root endpoint
+        {
+          op := .syncFile
+          backend := .lean
+          root? := some root.toString
+          path? := some path
+          fullDiagnostics? := some fullDiagnostics
+        }
+        (refreshWaitSpec path)
   | "lean-close" :: path :: [] =>
       let root ← projectRoot opts .lean
       let (endpoint, _) ← ensureProjectDaemon home root .lean opts

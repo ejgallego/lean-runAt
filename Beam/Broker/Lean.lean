@@ -50,6 +50,11 @@ def saveReadinessMethod (backend : Backend) : Except String String :=
   | .lean => .ok Backend.Lean.saveReadinessMethod
   | .rocq => Backend.Rocq.saveReadinessMethod
 
+def directImportsMethod (backend : Backend) : Except String String :=
+  match backend with
+  | .lean => .ok Backend.Lean.directImportsMethod
+  | .rocq => .error "rocq backend does not support direct import queries"
+
 def goalsMethod (backend : Backend) (mode? : Option GoalMode := none) : Except String String :=
   match backend with
   | .lean => .ok (Backend.Lean.goalsMethod mode?)

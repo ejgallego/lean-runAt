@@ -16,6 +16,7 @@ import Beam.Broker.Config
 import Beam.Broker.Protocol
 import Beam.Broker.Transport
 import Beam.Broker.Lean
+import Beam.Broker.Deps
 import Beam.Broker.LakeSave
 import Std.Sync.Mutex
 
@@ -37,8 +38,16 @@ structure DocState where
   textHash : UInt64
   textTraceHash : Lake.Hash
   textMTime : Lake.MTime
+  moduleName? : Option String := none
   savedOleanVersion? : Option Nat := none
   fileProgress? : Option SyncFileProgress := none
+  lastSyncSeq : Nat := 0
+  lastSaveSeq : Nat := 0
+
+structure ModuleHistory where
+  path : String
+  lastSyncSeq : Nat := 0
+  lastSaveSeq : Nat := 0
 
 structure PendingResult where
   result : Json
@@ -66,6 +75,8 @@ structure Session where
   stdout : IO.FS.Stream
   pending : Std.Mutex (Std.TreeMap RequestID PendingRequest)
   nextId : Nat := 1
+  nextEventSeq : Nat := 1
+  moduleHistory : Std.TreeMap String ModuleHistory := {}
   docs : Std.TreeMap String DocState := {}
 
 structure BackendState where
@@ -428,6 +439,19 @@ private def syncSaveReadinessOfResult
     saveReadyReason := result.saveReadyReason
   }
 
+private structure DirectImportsQueryResult where
+  version : Nat
+  imports : Array String := #[]
+  deriving Inhabited
+
+private structure StaleDirectDepHint where
+  module : String
+  path : String
+  needsSave : Bool
+  lastSyncSeq : Nat
+  lastSaveSeq : Nat
+  deriving Inhabited
+
 private def emitNewTrackedDiagnostics
     (root : System.FilePath)
     (seen : Std.TreeSet String compare)
@@ -714,6 +738,25 @@ def sendNotificationJson (session : Session) (method : String) (param : Json) : 
   writeLspNotification session.stdin ({ method, param : Lean.JsonRpc.Notification Json })
   pure session
 
+private def trackedModuleName? (root path : System.FilePath) (backend : Backend) : Option String := do
+  guard (backend == .lean)
+  let rootStr := root.toString
+  let pathStr := path.toString
+  let rootPrefix := rootStr ++ s!"{System.FilePath.pathSeparator}"
+  let relPath? :=
+    if pathStr.startsWith rootPrefix then
+      some <| (pathStr.drop rootPrefix.length).toString
+    else if pathStr == rootStr then
+      some "."
+    else
+      none
+  let relPath ← relPath?
+  guard (relPath.endsWith ".lean")
+  let relFile := System.FilePath.mk relPath
+  let stem ← relFile.fileStem
+  let parts := relFile.components.dropLast
+  some <| String.intercalate "." (parts ++ [stem])
+
 def syncFile (session : Session) (path : System.FilePath) : IO Session := do
   let path ← resolvePath session.root path
   let text ← IO.FS.readFile path
@@ -721,6 +764,7 @@ def syncFile (session : Session) (path : System.FilePath) : IO Session := do
   let textHash := hash text
   let textTraceHash := Lake.Hash.ofText text
   let textMTime ← Lake.getFileMTime path
+  let moduleName? := trackedModuleName? session.root path session.backend
   match session.docs.get? uri with
   | none =>
       let param := toJson ({
@@ -739,6 +783,7 @@ def syncFile (session : Session) (path : System.FilePath) : IO Session := do
           textHash
           textTraceHash
           textMTime
+          moduleName?
         }
       }
   | some docState =>
@@ -749,6 +794,7 @@ def syncFile (session : Session) (path : System.FilePath) : IO Session := do
             docState with
             textTraceHash
             textMTime
+            moduleName?
           }
         }
       else
@@ -762,10 +808,12 @@ def syncFile (session : Session) (path : System.FilePath) : IO Session := do
         pure {
           session with
           docs := session.docs.insert uri {
+            docState with
             version := newVersion
             textHash
             textTraceHash
             textMTime
+            moduleName?
             savedOleanVersion? := none
             fileProgress? := none
           }
@@ -786,13 +834,6 @@ def closeFile (session : Session) (path : System.FilePath) : IO Session := do
     let session ← sendNotificationJson session "textDocument/didClose" param
     pure { session with docs := session.docs.erase uri }
 
-def markSavedOlean (session : Session) (uri : DocumentUri) : Session :=
-  match session.docs.get? uri with
-  | some docState =>
-      { session with docs := session.docs.insert uri { docState with savedOleanVersion? := some docState.version } }
-  | none =>
-      session
-
 def recordFileProgress (session : Session) (uri : DocumentUri)
     (fileProgress? : Option SyncFileProgress) : Session :=
   match session.docs.get? uri with
@@ -808,6 +849,25 @@ private def incompleteBarrierProgress (progress? : Option SyncFileProgress := no
   match progress? with
   | some progress => { progress with done := false }
   | none => { done := false }
+
+private def syncBarrierIncompleteMessage
+    (uri : DocumentUri)
+    (version : Nat)
+    (progress? : Option SyncFileProgress) : String :=
+  let progress := incompleteBarrierProgress progress?
+  s!"Lean diagnostics barrier did not complete for {uri} at version {version}; " ++
+    s!"fileProgress={toJson progress |>.compress}. An imported target may be stale or broken, " ++
+    s!"or the Lean worker may have exited. Run `lake build` or fix the upstream module first."
+
+private def syncBarrierIncomplete?
+    (progress? : Option SyncFileProgress)
+    (diagnostics : Array Diagnostic := #[]) : Bool :=
+  if diagnosticsIndicateIncompleteBarrier diagnostics then
+    true
+  else
+    match progress? with
+    | some progress => !progress.done
+    | none => false
 
 private def effectiveSyncBarrierProgress
     (priorProgress? : Option SyncFileProgress)
@@ -847,21 +907,8 @@ private def ensureSyncBarrierComplete
     (version : Nat)
     (progress? : Option SyncFileProgress)
     (diagnostics : Array Diagnostic := #[]) : IO Unit := do
-  if diagnosticsIndicateIncompleteBarrier diagnostics then
-    let progress := incompleteBarrierProgress progress?
-    throw <| IO.userError <|
-      s!"Lean diagnostics barrier did not complete for {uri} at version {version}; " ++
-      s!"fileProgress={toJson progress |>.compress}. An imported target may be stale or broken, " ++
-      s!"or the Lean worker may have exited. Run `lake build` or fix the upstream module first."
-  match progress? with
-  | some progress =>
-      unless progress.done do
-        throw <| IO.userError <|
-          s!"Lean diagnostics barrier did not complete for {uri} at version {version}; " ++
-          s!"fileProgress={toJson progress |>.compress}. An imported target may be stale or broken, " ++
-          s!"or the Lean worker may have exited. Run `lake build` or fix the upstream module first."
-  | none =>
-      pure ()
+  if syncBarrierIncomplete? progress? diagnostics then
+    throw <| IO.userError <| syncBarrierIncompleteMessage uri version progress?
 
 def waitForDiagnostics (session : Session) (uri : DocumentUri) (version : Nat) : IO Session := do
   let params := toJson (WaitForDiagnosticsParams.mk uri version)
@@ -904,17 +951,78 @@ partial def waitForSyncBarrier (session : Session) (uri : DocumentUri) (version 
     IO (Session × Option SyncFileProgress) := do
   waitForSyncBarrierWith session uri version
 
-def workspacePath? (root : System.FilePath) (uri : DocumentUri) : Option String := do
-  let path ← System.Uri.fileUriToPath? uri
-  let rootStr := root.toString
-  let pathStr := path.toString
-  let rootPrefix := rootStr ++ s!"{System.FilePath.pathSeparator}"
-  if pathStr.startsWith rootPrefix then
-    some <| (pathStr.drop rootPrefix.length).toString
-  else if pathStr == rootStr then
-    some "."
-  else
-    none
+private def trackedPathLabel (root : System.FilePath) (uri : DocumentUri) : String :=
+  match workspacePath? root uri with
+  | some path => path
+  | none => uri
+
+private def nextEventSeq (session : Session) : Session × Nat :=
+  ({ session with nextEventSeq := session.nextEventSeq + 1 }, session.nextEventSeq)
+
+private def updateModuleHistorySync (session : Session) (moduleName path : String) (seq : Nat) : Session :=
+  let history := (session.moduleHistory.get? moduleName).getD { path }
+  { session with
+    moduleHistory := session.moduleHistory.insert moduleName {
+      history with
+      path
+      lastSyncSeq := seq
+    }
+  }
+
+private def updateModuleHistorySave (session : Session) (moduleName path : String) (seq : Nat) : Session :=
+  let history := (session.moduleHistory.get? moduleName).getD { path }
+  { session with
+    moduleHistory := session.moduleHistory.insert moduleName {
+      history with
+      path
+      lastSyncSeq := seq
+      lastSaveSeq := seq
+    }
+  }
+
+private def markDocSyncedVersion (session : Session) (uri : DocumentUri) (version : Nat) : Session :=
+  match session.docs.get? uri with
+  | some docState =>
+      if docState.version == version then
+        let (session, seq) := nextEventSeq session
+        let path := trackedPathLabel session.root uri
+        let session :=
+          match docState.moduleName? with
+          | some moduleName => updateModuleHistorySync session moduleName path seq
+          | none => session
+        { session with
+          docs := session.docs.insert uri {
+            docState with
+            lastSyncSeq := seq
+          }
+        }
+      else
+        session
+  | none =>
+      session
+
+private def markDocSavedVersion (session : Session) (uri : DocumentUri) (version : Nat) : Session :=
+  match session.docs.get? uri with
+  | some docState =>
+      if docState.version == version then
+        let (session, seq) := nextEventSeq session
+        let path := trackedPathLabel session.root uri
+        let session :=
+          match docState.moduleName? with
+          | some moduleName => updateModuleHistorySave session moduleName path seq
+          | none => session
+        { session with
+          docs := session.docs.insert uri {
+            docState with
+            savedOleanVersion? := some version
+            lastSyncSeq := seq
+            lastSaveSeq := seq
+          }
+        }
+      else
+        session
+  | none =>
+      session
 
 def moduleJson (root : System.FilePath) (module : LeanModule) : Json :=
   let path? := workspacePath? root module.uri
@@ -927,180 +1035,6 @@ def moduleJson (root : System.FilePath) (module : LeanModule) : Json :=
     match path? with
     | some path => [("path", toJson path)]
     | none => []
-
-def fallbackModuleName? (root path : System.FilePath) : Option String := do
-  let relPath ← workspacePath? root (sessionUri path)
-  if !relPath.endsWith ".lean" then
-    none
-  else
-    let parts := (System.FilePath.mk relPath).components
-    let stem ← (System.FilePath.mk relPath).fileStem
-    let init := parts.dropLast
-    some <| String.intercalate "." (init ++ [stem])
-
-def normalizeModuleForPath (root path : System.FilePath) (uri : DocumentUri) (module? : Option LeanModule) : Option LeanModule :=
-  match module? with
-  | some module =>
-      if module.name.startsWith "«external:" then
-        match fallbackModuleName? root path with
-        | some name => some { name, uri, data? := module.data? }
-        | none => some module
-      else
-        some module
-  | none =>
-      match fallbackModuleName? root path with
-      | some name => some { name, uri }
-      | none => none
-
-def importInfoToWorkspaceImport?
-    (moduleIndex : Std.TreeMap String System.FilePath)
-    (info : ImportInfo) : Option LeanImport := do
-  let path ← moduleIndex.get? info.module
-  some {
-    module := { name := info.module, uri := sessionUri path, data? := none }
-    kind := {
-      isPrivate := info.isPrivate
-      isAll := info.isAll
-      metaKind := if info.isMeta then .«meta» else .nonMeta
-    }
-  }
-
-partial def workspaceLeanFiles (root dir : System.FilePath) : IO (Array System.FilePath) := do
-  let entries := (← dir.readDir).qsort (fun a b => a.fileName < b.fileName)
-  let mut files := #[]
-  for entry in entries do
-    if ← entry.path.isDir then
-      let name := entry.fileName
-      unless name == ".git" || name == ".lake" || name == "build" || name == "_opam" || name == "_eval" || name == ".beam" do
-        files := files ++ (← workspaceLeanFiles root entry.path)
-    else if entry.fileName.endsWith ".lean" then
-      files := files.push entry.path
-  pure files
-
-def workspaceModuleIndex (root : System.FilePath) : IO (Std.TreeMap String System.FilePath) := do
-  let files ← workspaceLeanFiles root root
-  pure <| files.foldl (init := {}) fun index path =>
-    match fallbackModuleName? root path with
-    | some name => index.insert name path
-    | none => index
-
-def parseHeaderImports (path : System.FilePath) : IO (Array ImportInfo) := do
-  let text ← IO.FS.readFile path
-  let inputCtx := Lean.Parser.mkInputContext text path.toString
-  let (header, _, messages) ← Lean.Parser.parseHeader inputCtx
-  if messages.toList.any (fun msg => msg.severity == .error) then
-    throw <| IO.userError s!"failed to parse imports for {path}"
-  pure <| Lean.Server.collectImports header
-
-def directWorkspaceImports
-    (moduleIndex : Std.TreeMap String System.FilePath)
-    (path : System.FilePath) : IO (Array LeanImport) := do
-  let infos ← parseHeaderImports path
-  pure <| infos.foldl (init := #[]) fun imports info =>
-    match importInfoToWorkspaceImport? moduleIndex info with
-    | some imp =>
-        if imports.any (fun existing => existing.module.name == imp.module.name) then
-          imports
-        else
-          imports.push imp
-    | none =>
-        imports
-
-structure DepsQueryState where
-  moduleIndex : Std.TreeMap String System.FilePath
-  importsCache : IO.Ref (Std.TreeMap String (Except String (Array LeanImport)))
-  importedByCache : IO.Ref (Std.TreeMap String (Array LeanImport))
-  textCache : IO.Ref (Std.TreeMap String String)
-
-def mkDepsQueryState (root : System.FilePath) : IO DepsQueryState := do
-  pure {
-    moduleIndex := ← workspaceModuleIndex root
-    importsCache := ← IO.mkRef {}
-    importedByCache := ← IO.mkRef {}
-    textCache := ← IO.mkRef {}
-  }
-
-def moduleText (state : DepsQueryState) (moduleName : String) (path : System.FilePath) : IO String := do
-  if let some text := (← state.textCache.get).get? moduleName then
-    pure text
-  else
-    let text ← IO.FS.readFile path
-    state.textCache.modify fun cache => cache.insert moduleName text
-    pure text
-
-def cachedDirectImports (state : DepsQueryState) (moduleName : String) : IO (Except String (Array LeanImport)) := do
-  if let some cached := (← state.importsCache.get).get? moduleName then
-    pure cached
-  else
-    let result ←
-      match state.moduleIndex.get? moduleName with
-      | none =>
-          pure (.ok #[])
-      | some path =>
-          try
-            return .ok (← directWorkspaceImports state.moduleIndex path)
-          catch e =>
-            return .error e.toString
-    state.importsCache.modify fun cache => cache.insert moduleName result
-    pure result
-
-def requireDirectImports (state : DepsQueryState) (moduleName : String) : IO (Array LeanImport) := do
-  match ← cachedDirectImports state moduleName with
-  | .ok imports => pure imports
-  | .error err => throw <| IO.userError err
-
-def directImportedBy (state : DepsQueryState) (targetModule : String) : IO (Array LeanImport) := do
-  if let some cached := (← state.importedByCache.get).get? targetModule then
-    pure cached
-  else
-    let mut importers := #[]
-    for (candidateModule, candidatePath) in state.moduleIndex.toList do
-      if candidateModule != targetModule then
-        let text ← moduleText state candidateModule candidatePath
-        if text.contains targetModule then
-          match ← cachedDirectImports state candidateModule with
-          | .ok imports =>
-              if let some imp := imports.find? (·.module.name == targetModule) then
-                let importer := {
-                  module := { name := candidateModule, uri := sessionUri candidatePath, data? := none }
-                  kind := imp.kind
-                }
-                if !importers.any (fun existing => existing.module.name == importer.module.name) then
-                  importers := importers.push importer
-          | .error _ =>
-              pure ()
-    state.importedByCache.modify fun cache => cache.insert targetModule importers
-    pure importers
-
-partial def collectImportClosure
-    (state : DepsQueryState)
-    (rootModule : String)
-    (visited : Std.TreeSet String := {})
-    (acc : Std.TreeMap String LeanImport := {}) : IO (Std.TreeMap String LeanImport) := do
-  if visited.contains rootModule then
-    pure acc
-  else
-    let visited := visited.insert rootModule
-    let edges ← requireDirectImports state rootModule
-    let acc := edges.foldl (init := acc) fun acc imp =>
-      if acc.contains imp.module.name then acc else acc.insert imp.module.name imp
-    edges.foldlM (init := acc) fun acc imp =>
-      collectImportClosure state imp.module.name visited acc
-
-partial def collectImportedByClosure
-    (state : DepsQueryState)
-    (rootModule : String)
-    (visited : Std.TreeSet String := {})
-    (acc : Std.TreeMap String LeanImport := {}) : IO (Std.TreeMap String LeanImport) := do
-  if visited.contains rootModule then
-    pure acc
-  else
-    let visited := visited.insert rootModule
-    let edges ← directImportedBy state rootModule
-    let acc := edges.foldl (init := acc) fun acc imp =>
-      if acc.contains imp.module.name then acc else acc.insert imp.module.name imp
-    edges.foldlM (init := acc) fun acc imp =>
-      collectImportedByClosure state imp.module.name visited acc
 
 def leanSavePayload (spec : LeanSaveSpec) (version : Nat) (sourceHash : Lake.Hash) : Json :=
   Json.mkObj <|
@@ -1182,7 +1116,7 @@ def saveOlean
     ]
     : DidChangeWatchedFilesParams
   }))
-  pure (markSavedOlean session uri, leanSavePayload spec docState.version docState.textTraceHash, fileProgress?)
+  pure (markDocSavedVersion session uri docState.version, leanSavePayload spec docState.version docState.textTraceHash, fileProgress?)
 
 def importJson (root : System.FilePath) (imp : LeanImport) : Json :=
   Json.mkObj [
@@ -1331,8 +1265,8 @@ def wrapResultHandle (session : Session) (result : Json) : Json :=
   | .error _ =>
       result
 
-def reqError (code : String) (message : String := "") : Response :=
-  Response.error code message
+def reqError (code : String) (message : String := "") (data? : Option Json := none) : Response :=
+  Response.error code message data?
 
 def errorCodeName : JsonRpc.ErrorCode → String
   | .parseError => "parseError"
@@ -1468,7 +1402,7 @@ def handleSyncFileOp (req : Request) (session : Session) : M (Response × Bool) 
       waitForSyncBarrierWithDiagnostics session uri docState.version
         emitProgress? fullDiagnostics emitDiagnostic?
     let (session, saveReadiness) ← fetchSyncSaveReadiness session uri
-    let session := recordFileProgress session uri fileProgress?
+    let session := markDocSyncedVersion (recordFileProgress session uri fileProgress?) uri docState.version
     updateSession session
     let payload := toJson ({
       version := docState.version
@@ -1988,16 +1922,6 @@ private def handleCloseWithoutSessionIO (req : Request) : IO (Response × Bool) 
     return (reqError "internalError" s!"cannot save artifacts without a live {backendName} session for {path}", false)
   pure (Response.success (Json.mkObj [("closed", toJson true)]), false)
 
-private def markSavedOleanVersion (session : Session) (uri : DocumentUri) (version : Nat) : Session :=
-  match session.docs.get? uri with
-  | some docState =>
-      if docState.version == version then
-        { session with docs := session.docs.insert uri { docState with savedOleanVersion? := some version } }
-      else
-        session
-  | none =>
-      session
-
 private def finalizeSavedDoc
     (server : ServerRuntime)
     (session : Session)
@@ -2025,11 +1949,7 @@ private def finalizeSavedDoc
       ]
       : DidChangeWatchedFilesParams
     }))
-    let current :=
-      if closeAfter then
-        current
-      else
-        markSavedOleanVersion current uri version
+    let current := markDocSavedVersion current uri version
     let current ←
       if closeAfter && current.docs.contains uri then
         sendNotificationJson current "textDocument/didClose" (toJson ({
@@ -2071,6 +1991,87 @@ private def fetchSyncSaveReadinessIO
         updateSession current
         decodeResponseAs result
     pure (syncSaveReadinessOfResult readiness)
+
+private def fetchDirectImportsIO
+    (server : ServerRuntime)
+    (session : Session)
+    (uri : DocumentUri) : IO DirectImportsQueryResult := do
+  let method ← IO.ofExcept <| directImportsMethod session.backend
+  let params := toJson ({
+    textDocument := ({ uri := uri : TextDocumentIdentifier })
+    : RunAt.Internal.DirectImportsParams
+  })
+  let result : RunAt.Internal.DirectImportsResult ←
+    withCurrentMatchingSession server session fun current => do
+      let (current, payload) ← sendRequestJson current method params
+      updateSession current
+      decodeResponseAs payload
+  pure {
+    version := result.version
+    imports := result.imports
+  }
+
+private def staleDirectDepHintJson (hint : StaleDirectDepHint) : Json :=
+  Json.mkObj [
+    ("module", toJson hint.module),
+    ("path", toJson hint.path),
+    ("needsSave", toJson hint.needsSave),
+    ("lastSyncSeq", toJson hint.lastSyncSeq),
+    ("lastSaveSeq", toJson hint.lastSaveSeq)
+  ]
+
+private def staleSyncErrorData
+    (targetPath : String)
+    (hints : Array StaleDirectDepHint) : Json :=
+  let saveHints := hints.filter (·.needsSave)
+  let recoveryPlan :=
+    (saveHints.map fun hint => s!"lean-beam save \"{hint.path}\"") ++
+    #[s!"lean-beam refresh \"{targetPath}\"", "lake build"]
+  Json.mkObj [
+    ("targetPath", toJson targetPath),
+    ("staleDirectDeps", Json.arr <| hints.map staleDirectDepHintJson),
+    ("saveDeps", Json.arr <| saveHints.map (fun hint => toJson hint.path)),
+    ("recoveryPlan", Json.arr <| recoveryPlan.map toJson)
+  ]
+
+private def staleSyncErrorResponse
+    (message : String)
+    (targetPath : String)
+    (hints : Array StaleDirectDepHint) : Response :=
+  reqError syncBarrierIncompleteCode message (some <| staleSyncErrorData targetPath hints)
+
+private def collectStaleDirectDepHintsIO
+    (server : ServerRuntime)
+    (session : Session)
+    (uri : DocumentUri)
+    (version : Nat) : IO (Array StaleDirectDepHint) := do
+  if session.backend != .lean then
+    pure #[]
+  else
+    let importsResult ← fetchDirectImportsIO server session uri
+    if importsResult.version != version then
+      pure #[]
+    else
+      withCurrentMatchingSession server session fun current => do
+        let targetLastSyncSeq :=
+          match current.docs.get? uri with
+          | some docState => docState.lastSyncSeq
+          | none => 0
+        pure <| importsResult.imports.foldl (init := #[]) fun hints moduleName =>
+          match current.moduleHistory.get? moduleName with
+          | some history =>
+              if history.lastSaveSeq > targetLastSyncSeq then
+                hints.push {
+                  module := moduleName
+                  path := history.path
+                  needsSave := history.lastSaveSeq < history.lastSyncSeq
+                  lastSyncSeq := history.lastSyncSeq
+                  lastSaveSeq := history.lastSaveSeq
+                }
+              else
+                hints
+          | none =>
+              hints
 
 private def saveOleanIO
     (server : ServerRuntime)
@@ -2174,7 +2175,13 @@ private def handleSyncFileOpIO
     let pending ← awaitPendingResult promise
     let fileProgress? := effectiveSyncBarrierProgress priorProgress? pending.progress? pending.diagnostics
     mergeFileProgressIfCurrent server session uri fileProgress?
-    ensureSyncBarrierComplete uri version fileProgress? pending.diagnostics
+    if syncBarrierIncomplete? fileProgress? pending.diagnostics then
+      let hints ← collectStaleDirectDepHintsIO server session uri version
+      let message := syncBarrierIncompleteMessage uri version fileProgress?
+      let targetPath := trackedPathLabel session.root uri
+      return (staleSyncErrorResponse message targetPath hints, false)
+    server.withState do
+      modifyCurrentSessionIfMatching session (fun current => markDocSyncedVersion current uri version)
     let saveReadiness ← fetchSyncSaveReadinessIO server session uri
     let payload := toJson ({
       version := version

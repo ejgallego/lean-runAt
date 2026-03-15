@@ -455,6 +455,7 @@ lean-beam hover "Foo.lean" 10 2
 lean-beam goals-prev "Foo.lean" 10 2
 lean-beam goals-after "Foo.lean" 10 2
 lean-beam sync "MyPkg/Sub/Module.lean"
+lean-beam refresh "MyPkg/Sub/Module.lean"
 lean-beam deps "Foo.lean"
 lean-beam save "MyPkg/Sub/Module.lean"
 lean-beam close-save "MyPkg/Sub/Module.lean"
@@ -469,6 +470,7 @@ Read the Lean wrapper surface as this progression:
 - `lean-beam goals-prev` / `lean-beam goals-after` inspect existing proof state at one tactic position
 - `lean-beam run-at` tries one speculative Lean snippet on the current saved file snapshot
 - `lean-beam sync` is the explicit barrier after a real edit saved to disk
+- `lean-beam refresh` is `lean-beam close` plus `lean-beam sync`, useful when a tracked file needs a fresh basis after upstream changes
 - `lean-beam save` is `lean-beam sync` plus a zero-build checkpoint for one synced workspace module
 - `lean-beam save` validates only that saved module; it does not validate downstream importers
 - `lean-beam close-save` is `lean-beam save` plus closing the tracked file afterward
@@ -486,7 +488,10 @@ Important wrapper rules:
   error-free; `result.errorCount` / `result.warningCount` summarize fresh streamed diagnostics for
   this request, while `result.saveReady` plus `result.stateErrorCount` /
   `result.stateCommandErrorCount` summarize current save-readiness
-- by default `lean-beam sync`, `lean-beam save`, and `lean-beam close-save` stream only error diagnostics; `+full`
+- when `lean-beam sync` fails with `syncBarrierIncomplete`, the JSON error may also include
+  `error.data.staleDirectDeps`, `error.data.saveDeps`, and `error.data.recoveryPlan` as a cheap
+  direct-import recovery hint based on broker-tracked saved dependency boundaries
+- by default `lean-beam sync`, `lean-beam refresh`, `lean-beam save`, and `lean-beam close-save` stream only error diagnostics; `+full`
   widens that set to warnings, info, and hints
 - wrapper `stderr` is human-facing; `beam-client request-stream` is the machine-readable
   streamed surface
@@ -517,7 +522,10 @@ progress.
 If the Lean worker cannot finish the diagnostics barrier, for example because imported targets are
 stale and rebuild failure prevents a stable session, `lean-beam sync` fails instead of reporting a
 partial success response. `lean-beam save` and `lean-beam close-save` refuse to proceed past that incomplete
-barrier.
+barrier. For Lean sync failures, the JSON error may include a direct-import hint in `error.data`:
+`staleDirectDeps` names direct imports whose saved checkpoint is newer than the target file's last
+successful sync boundary, `saveDeps` narrows that to imports that still need `lean-beam save`, and
+`recoveryPlan` gives the ordered `save` / `refresh` / `lake build` fallback steps.
 
 Expert-only unstable broker escape hatches such as `lean-beam request-at` are documented separately in
 [docs/experimental.md](docs/experimental.md).

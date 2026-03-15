@@ -9,7 +9,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF' >&2
 usage:
-  lean-beam [--root PATH] [--socket PATH | --port N] ensure
+  lean-beam [--root PATH] [--socket PATH | --port N] ensure [lean|rocq]
   lean-beam [--root PATH] [--socket PATH | --port N] run-at <path> <line> <character> <text...>
   lean-beam [--root PATH] [--socket PATH | --port N] run-at-handle <path> <line> <character> <text...>
   lean-beam [--root PATH] [--socket PATH | --port N] hover <path> <line> <character>
@@ -20,11 +20,14 @@ usage:
   lean-beam [--root PATH] [--socket PATH | --port N] release <path> <handle-json|->
   lean-beam [--root PATH] [--socket PATH | --port N] deps <path>
   lean-beam [--root PATH] [--socket PATH | --port N] sync <path> [+full]
+  lean-beam [--root PATH] [--socket PATH | --port N] refresh <path> [+full]
   lean-beam [--root PATH] [--socket PATH | --port N] save <path> [+full]
   lean-beam [--root PATH] [--socket PATH | --port N] close <path>
   lean-beam [--root PATH] [--socket PATH | --port N] close-save <path> [+full]
-  lean-beam supported-toolchains
-  lean-beam [--root PATH] doctor
+  lean-beam [--root PATH] [--socket PATH | --port N] rocq-goals-after <path> <line> <character> [text...]
+  lean-beam [--root PATH] [--socket PATH | --port N] rocq-goals-prev <path> <line> <character> [text...]
+  lean-beam supported-toolchains [lean]
+  lean-beam [--root PATH] doctor [lean|rocq]
   lean-beam [--root PATH] open-files
   lean-beam [--root PATH] stats
   lean-beam [--root PATH] reset-stats
@@ -32,8 +35,8 @@ usage:
   lean-beam [--root PATH] cancel <request-id>
 
 notes:
-  - lean-beam is Lean-focused and maps these commands to beam-cli internal lean-* commands
-  - Rocq commands are also available through lean-beam (for example: `lean-beam ensure rocq`)
+  - lean-beam keeps the Lean wrapper surface primary, but also exposes Rocq goal probes and backend selection commands
+  - common Rocq entry points are `lean-beam ensure rocq`, `lean-beam doctor rocq`, `lean-beam rocq-goals-after`, and `lean-beam rocq-goals-prev`
 EOF
 }
 
@@ -156,6 +159,9 @@ case "$cmd" in
     ;;
   sync)
     mapped=("lean-sync")
+    ;;
+  refresh)
+    mapped=("lean-refresh")
     ;;
   save)
     mapped=("lean-save")

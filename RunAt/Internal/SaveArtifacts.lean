@@ -26,6 +26,14 @@ This is not part of the public `runAt` API.
 -/
 def saveReadinessMethod : String := "$/lean/runAt/saveReadiness"
 
+/--
+Internal broker-only request for parsing the current document header and
+returning its direct imports from the current tracked text snapshot.
+
+This is not part of the public `runAt` API.
+-/
+def directImportsMethod : String := "$/lean/runAt/directImports"
+
 /-- Internal request payload for artifact serialization from the current worker snapshot. -/
 structure SaveArtifactsParams where
   textDocument : Lean.Lsp.TextDocumentIdentifier
@@ -46,6 +54,14 @@ structure SaveReadinessParams where
 instance : Lean.Lsp.FileSource SaveReadinessParams where
   fileSource p := p.textDocument.uri
 
+/-- Internal request payload for direct-import queries from the current tracked text snapshot. -/
+structure DirectImportsParams where
+  textDocument : Lean.Lsp.TextDocumentIdentifier
+  deriving FromJson, ToJson
+
+instance : Lean.Lsp.FileSource DirectImportsParams where
+  fileSource p := p.textDocument.uri
+
 /-- Internal success payload for artifact serialization. -/
 structure SaveArtifactsResult where
   written : Bool := true
@@ -60,6 +76,12 @@ structure SaveReadinessResult where
   commandErrorCount : Nat := 0
   saveReady : Bool := true
   saveReadyReason : String := "ok"
+  deriving FromJson, ToJson
+
+/-- Internal success payload for direct-import queries from the current tracked text snapshot. -/
+structure DirectImportsResult where
+  version : Nat
+  imports : Array String := #[]
   deriving FromJson, ToJson
 
 end RunAt.Internal

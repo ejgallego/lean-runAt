@@ -105,6 +105,8 @@ What is not a valid checkpoint target:
 - actual source edits happen through the normal file-edit workflow
 - after every real source edit to a Lean file, save the file in the normal editor/file sense and
   then run `lean-beam sync "Foo.lean"`
+- use `lean-beam refresh "Foo.lean"` when a tracked file needs `lean-beam close` plus `lean-beam sync`
+  as one step, especially after saving an upstream dependency
 - treat `lean-beam sync` as the explicit supported boundary between real file edits and Beam daemon
   session state
 - `lean-beam sync` returns compact JSON on stdout, including final `result.errorCount` /
@@ -177,13 +179,36 @@ Interpretation:
   `result.errorCount` / `result.warningCount` for fresh streamed diagnostics in this request, and
   inspect `result.saveReady` plus `result.stateErrorCount` / `result.stateCommandErrorCount` for
   current save-readiness
-- if `lean-beam sync` fails with an incomplete diagnostics barrier, fix the stale or broken dependency
-  state before relying on `lean-beam save` or downstream probes
+- if `lean-beam sync` fails with an incomplete diagnostics barrier, inspect the JSON
+  `error.data.staleDirectDeps`, `error.data.saveDeps`, and `error.data.recoveryPlan`; those hints are
+  based on direct imports whose saved checkpoint is newer than the target file's last successful
+  sync boundary
+- follow `error.data.saveDeps` only for the listed direct deps that still need checkpointing, then
+  `lean-beam refresh` the stale target before relying on downstream probes
 - after `lean-beam run-at`, top-level `fileProgress` may exist with `done = false`; that is normal
   because the request only waited for its own target snapshot
 - use `lean-beam hover` for stable semantic inspection and `lean-beam goals-prev` / `lean-beam goals-after` for
   existing proof state; use `lean-beam run-at` only when you need speculative execution
 - if you need a real ready/fresh boundary after edits, use `lean-beam sync`, not a successful probe
+
+Recovery loop for `syncBarrierIncomplete`:
+
+```bash
+# target T failed: lean-beam sync "T.lean"
+
+# 1) if error.data.saveDeps lists direct deps that still need checkpointing, save them
+lean-beam save "U.lean"
+
+# 2) force the target tracked document to refresh its basis, then retry
+lean-beam refresh "T.lean"
+```
+
+Practical boundary:
+
+- use `lean-beam deps "T.lean"` to inspect direct imports when choosing likely upstream modules
+- this is a targeted recovery loop, not a full dependency scheduler
+- if retries keep walking additional modules, or if you need final workspace trust, stop and run
+  `lake build`
 
 ## Cost Model
 

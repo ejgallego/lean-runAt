@@ -43,17 +43,17 @@ Supported command families:
 - bootstrap the Lean backend: `lean-beam ensure`
 - inspect existing code or proof state: `lean-beam hover`, `lean-beam goals-prev`, `lean-beam goals-after`
 - inspect file, dependency, or daemon state: `lean-beam deps`, `lean-beam open-files`, `lean-beam doctor`, `lean-beam stats`,
-  `reset-stats`
+  `lean-beam reset-stats`
 - try one isolated speculative Lean snippet: `lean-beam run-at`
 - continue from one exact speculative state: `lean-beam run-at-handle`, `lean-beam run-with`,
   `lean-beam run-with-linear`, `lean-beam release`
-- checkpoint one synced workspace module: `lean-beam sync`, `lean-beam save`, `lean-beam close-save`
+- refresh or checkpoint one tracked workspace module: `lean-beam sync`, `lean-beam refresh`, `lean-beam save`, `lean-beam close-save`
 - run shell-oriented search loops over the same handle APIs: `lean-beam-search`
 
 What to treat as the default public skill surface:
 
 - default and stable enough for normal use: `lean-beam hover`, `lean-beam goals-prev`, `lean-beam goals-after`,
-  `lean-beam run-at`, `lean-beam sync`
+  `lean-beam run-at`, `lean-beam sync`, `lean-beam refresh`
 - narrower but supported wrapper surface: `lean-beam deps`, `lean-beam open-files`, `lean-beam doctor`,
   `lean-beam stats`, `lean-beam reset-stats`, `lean-beam save`, `lean-beam close-save`
 - alpha support APIs: `lean-beam run-at-handle`, `lean-beam run-with`, `lean-beam run-with-linear`,
@@ -98,6 +98,10 @@ Stop probing and change tactics when:
   the module you save, not downstream importers
 - stale-state, `contentModified`, or rebuild trouble keeps appearing; inspect with `lean-beam open-files`
   and `lean-beam doctor`
+- if `lean-beam sync` fails with `syncBarrierIncomplete`: inspect `error.data.staleDirectDeps`,
+  `error.data.saveDeps`, and `error.data.recoveryPlan`; save only the listed direct deps that still
+  need checkpointing, then `lean-beam refresh "Target.lean"` if the plan says to;
+  if this repeats across multiple dependency hops, escalate to `lake build`
 
 When those conditions hold, prefer a real edit plus `lean-beam sync`, or escalate to `lake build` when
 the task has become dependency freshness or final validation across importers rather than one-file
@@ -199,6 +203,7 @@ lean-beam run-at "Foo.lean" 10 2 "exact trivial"
 
 # after every real edit saved to disk, on that same workspace module path
 lean-beam sync "MyPkg/Sub/Module.lean"
+lean-beam refresh "MyPkg/Sub/Module.lean"
 
 # only for a synced workspace module path, after a successful sync
 lean-beam save "MyPkg/Sub/Module.lean"
@@ -207,16 +212,21 @@ lean-beam save "MyPkg/Sub/Module.lean"
 Read the save path as a progression, not as three unrelated commands:
 
 - `lean-beam sync` establishes the synced, diagnostics-complete snapshot for the current on-disk file
+- `lean-beam refresh` is `lean-beam close` plus `lean-beam sync`; use it when a tracked file needs a fresh basis after upstream changes
 - `lean-beam save` is `lean-beam sync` plus a zero-build checkpoint for that synced workspace module
 - `lean-beam save` validates only that saved module; it does not validate downstream importers
 - `lean-beam close-save` is `lean-beam save` plus closing the tracked file afterward
 
 Diagnostic defaults on that path:
 
-- `lean-beam sync`, `lean-beam save`, and `lean-beam close-save` always stream fresh diagnostics for the current request
+- `lean-beam sync`, `lean-beam refresh`, `lean-beam save`, and `lean-beam close-save` always stream fresh diagnostics for the current request
 - by default they stream only errors
 - add `+full` to widen the current request to warnings, info, and hints
 - the final JSON does not replay streamed diagnostics
+- when `lean-beam sync` fails with `syncBarrierIncomplete`, the JSON error may include
+  `error.data.staleDirectDeps`, `error.data.saveDeps`, and `error.data.recoveryPlan` as a cheap
+  recovery hint based on direct imports whose saved checkpoint is newer than the target's last
+  successful sync boundary
 - `lean-beam sync` final JSON reports fresh streamed counts in `result.errorCount` /
   `result.warningCount`, and current save-readiness in `result.saveReady` plus
   `result.stateErrorCount` / `result.stateCommandErrorCount`
