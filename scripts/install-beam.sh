@@ -219,7 +219,7 @@ replace_symlink_atomically() {
   require_path_within "$tmp_dir" "$link_dir" "$label temp dir"
   tmp_link="$tmp_dir/link"
   ln -s "$target" "$tmp_link"
-  mv -f "$tmp_link" "$link_path"
+  mv -Tf "$tmp_link" "$link_path"
   rmdir "$tmp_dir"
 }
 
