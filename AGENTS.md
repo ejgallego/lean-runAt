@@ -108,5 +108,7 @@ When working locally:
 
 Helpful repo docs:
 
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
 - [skills/lean-beam/SKILL.md](skills/lean-beam/SKILL.md)
 - [skills/rocq-beam/SKILL.md](skills/rocq-beam/SKILL.md)

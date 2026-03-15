@@ -142,3 +142,26 @@ Near-term work is mostly about hardening and simplifying:
   instead of reconstructing barrier completeness from multiple LSP channels
 - keep Beam-daemon-side conveniences useful without turning them into a large public surface too early
 - add a short comparison against Pantograph in the docs, to clarify where `runAt` fits among nearby Lean tooling
+
+## Roadmap / TODO
+
+Current release priorities:
+
+1. documentation polish for release readiness
+2. AI/human harness polish for maintainer workflows
+3. stability fixes only where they materially improve release confidence
+
+Near-term TODO:
+
+- finish the human-facing docs split so README stays human-only and maintainer or agent workflow
+  detail stays in contributor, development, and skill docs
+- decide whether the new README still needs a short architecture note, or whether `docs/STATUS.md`
+  plus `docs/DEVELOPMENT.md` are enough
+- tighten the AI-first harness story so the preferred maintainer entrypoints are obvious for both
+  humans and AI agents
+- investigate and fix the intermittent `handleProofBranchDsl` CI failure if it reappears
+- surface `syncBarrierIncomplete` recovery hints more clearly in the human-facing CLI path, not just
+  in `error.data`
+- continue validating every supported Lean toolchain in CI before expanding the allowlist further
+- replace the broker's remaining stopgap dependency and readiness logic with stronger Lake or
+  backend-facing primitives when Lean exposes them
