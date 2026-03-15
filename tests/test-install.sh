@@ -58,7 +58,8 @@ export BEAM_INSTALL_ROOT="$tmp_root/install-root"
 
 mkdir -p "$HOME" "$BEAM_INSTALL_ROOT"
 
-toolchain="$(awk 'NR==1 {print $1}' lean-toolchain)"
+mapfile -t supported_toolchains < <(grep -v '^[[:space:]]*#' supported-lean-toolchains | sed '/^[[:space:]]*$/d')
+toolchain="${supported_toolchains[0]}"
 source_checkout="$tmp_root/source-checkout"
 
 assert_file() {
@@ -117,14 +118,14 @@ assert_runtime_layout() {
 assert_manifest_metadata() {
   local manifest_path="$1"
   local expected_payload="$2"
-  local expected_toolchain="$3"
-  local expected_source_commit="$4"
-  python3 - "$manifest_path" "$expected_payload" "$expected_toolchain" "$expected_source_commit" <<'PY'
+  local expected_source_commit="$3"
+  shift 3
+  python3 - "$manifest_path" "$expected_payload" "$expected_source_commit" "$@" <<'PY'
 import json
 import os
 import sys
 
-manifest_path, expected_payload, expected_toolchain, expected_source_commit = sys.argv[1:]
+manifest_path, expected_payload, expected_source_commit, *expected_toolchains = sys.argv[1:]
 with open(manifest_path, "r", encoding="utf-8") as f:
     manifest = json.load(f)
 layout = json.loads(os.environ["BEAM_INSTALL_LAYOUT_JSON"])
@@ -133,7 +134,7 @@ if manifest.get("schemaVersion") != 2:
     raise SystemExit(f"unexpected manifest schemaVersion: {manifest.get('schemaVersion')}")
 if manifest.get("payloadHash") != expected_payload:
     raise SystemExit(f"unexpected manifest payloadHash: {manifest.get('payloadHash')}")
-if manifest.get("toolchains") != [expected_toolchain]:
+if manifest.get("toolchains") != expected_toolchains:
     raise SystemExit(f"unexpected manifest toolchains: {manifest.get('toolchains')}")
 if "toolchain" in manifest:
     raise SystemExit(f"unexpected legacy manifest toolchain field: {manifest.get('toolchain')}")
@@ -206,30 +207,42 @@ path_without_elan() {
 
 assert_bundle_layout() {
   local bundle_root="$1"
-  local metadata
-  metadata="$(find "$bundle_root" -name metadata.json | head -n 1 || true)"
-  if [ -z "$metadata" ]; then
+  shift
+  local metadata_files=()
+  local metadata=""
+  local expected_toolchain=""
+  local found=""
+  mapfile -t metadata_files < <(find "$bundle_root" -name metadata.json | sort)
+  if [ "${#metadata_files[@]}" -eq 0 ]; then
     echo "missing bundle metadata under $bundle_root" >&2
     exit 1
   fi
-  if command -v rg >/dev/null 2>&1; then
-    if ! rg -n --fixed-strings "\"toolchain\": \"$toolchain\"" "$metadata" > /dev/null; then
-      echo "bundle metadata does not mention expected toolchain $toolchain: $metadata" >&2
+  for expected_toolchain in "$@"; do
+    found=""
+    for metadata in "${metadata_files[@]}"; do
+      if command -v rg >/dev/null 2>&1; then
+        if rg -n --fixed-strings "\"toolchain\": \"$expected_toolchain\"" "$metadata" > /dev/null; then
+          found="$metadata"
+          break
+        fi
+      elif grep -F "\"toolchain\": \"$expected_toolchain\"" "$metadata" > /dev/null; then
+        found="$metadata"
+        break
+      fi
+    done
+    if [ -z "$found" ]; then
+      echo "bundle metadata does not mention expected toolchain $expected_toolchain under $bundle_root" >&2
       exit 1
     fi
-  elif ! grep -F "\"toolchain\": \"$toolchain\"" "$metadata" > /dev/null; then
-    echo "bundle metadata does not mention expected toolchain $toolchain: $metadata" >&2
-    exit 1
-  fi
-
-  local workspace
-  workspace="$(dirname "$metadata")/workspace"
-  assert_file "$workspace/Beam.lean"
-  assert_file "$workspace/Beam/Broker/Server.lean"
-  assert_file "$workspace/RunAt/Internal/SaveArtifacts.lean"
-  assert_file "$workspace/.lake/build/bin/beam-daemon"
-  assert_file "$workspace/.lake/build/bin/beam-client"
-  assert_file "$workspace/.lake/build/lib/librunAt_RunAt.so"
+    local workspace
+    workspace="$(dirname "$found")/workspace"
+    assert_file "$workspace/Beam.lean"
+    assert_file "$workspace/Beam/Broker/Server.lean"
+    assert_file "$workspace/RunAt/Internal/SaveArtifacts.lean"
+    assert_file "$workspace/.lake/build/bin/beam-daemon"
+    assert_file "$workspace/.lake/build/bin/beam-client"
+    assert_file "$workspace/.lake/build/lib/librunAt_RunAt.so"
+  done
 }
 
 rsync -a --exclude='.git' ./ "$source_checkout"/
@@ -332,11 +345,11 @@ assert_version_count "$BEAM_INSTALL_ROOT/versions" 1
 installed_version_root="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$installed_runtime_root")"
 installed_payload_id="$(basename "$installed_version_root")"
 assert_file "$installed_runtime_root/manifest.json"
-BEAM_INSTALL_LAYOUT_JSON="$install_layout_json" assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$toolchain" "$expected_source_commit"
+BEAM_INSTALL_LAYOUT_JSON="$install_layout_json" assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$expected_source_commit" "$toolchain"
 
 assert_not_exists "$CODEX_HOME"
 assert_not_exists "$CLAUDE_HOME"
-assert_bundle_layout "$BEAM_INSTALL_ROOT/state/install-bundles"
+assert_bundle_layout "$BEAM_INSTALL_ROOT/state/install-bundles" "$toolchain"
 
 (
   cd "$source_checkout"
@@ -344,8 +357,8 @@ assert_bundle_layout "$BEAM_INSTALL_ROOT/state/install-bundles"
 )
 
 assert_version_count "$BEAM_INSTALL_ROOT/versions" 1
-BEAM_INSTALL_LAYOUT_JSON="$install_layout_json" assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$toolchain" "$expected_source_commit"
-assert_bundle_layout "$BEAM_INSTALL_ROOT/state/install-bundles"
+BEAM_INSTALL_LAYOUT_JSON="$install_layout_json" assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$expected_source_commit" "$toolchain"
+assert_bundle_layout "$BEAM_INSTALL_ROOT/state/install-bundles" "${supported_toolchains[@]}"
 
 (
   cd "$source_checkout"
@@ -359,7 +372,7 @@ for skills_home in "$CODEX_HOME" "$CLAUDE_HOME"; do
   assert_no_skill_socket_guidance "$skills_home/skills/rocq-beam/SKILL.md"
 done
 assert_version_count "$BEAM_INSTALL_ROOT/versions" 1
-BEAM_INSTALL_LAYOUT_JSON="$install_layout_json" assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$toolchain" "$expected_source_commit"
+BEAM_INSTALL_LAYOUT_JSON="$install_layout_json" assert_manifest_metadata "$installed_runtime_root/manifest.json" "$installed_payload_id" "$expected_source_commit" "$toolchain"
 
 blocked_home="$tmp_root/blocked-home"
 blocked_install_root="$tmp_root/blocked-install-root"

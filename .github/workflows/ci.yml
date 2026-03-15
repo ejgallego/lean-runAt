@@ -60,6 +60,32 @@ jobs:
       - name: Broker Slow Test
         run: bash tests/test-broker-slow.sh
 
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/lean-ci-setup
+
+      - name: Install Test
+        run: bash tests/test-install.sh
+
+  toolchain-compat:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain:
+          - leanprover/lean4:v4.29.0-rc6
+          - leanprover/lean4:v4.29.0-rc5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/lean-ci-setup
+
+      - name: Validate toolchain compatibility
+        run: bash tests/test-toolchain-compat.sh '${{ matrix.toolchain }}'
+
   broker-rocq:
     runs-on: ubuntu-latest
     steps:
