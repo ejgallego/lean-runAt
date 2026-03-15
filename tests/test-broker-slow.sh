@@ -44,7 +44,6 @@ lake build \
   beam-cli \
   beam-daemon \
   beam-client \
-  beam-daemon-rocq-smoke-test \
   > /dev/null
 
 echo "[broker-slow] bundle install"
@@ -60,23 +59,3 @@ bash tests/test-install.sh > /dev/null
 echo "[broker-slow] save replay tests"
 HOME="$tmp_env_root/home" CODEX_HOME="$tmp_env_root/codex" CLAUDE_HOME="$tmp_env_root/claude" \
   BEAM_INSTALL_BUNDLE_DIR="$tmp_bundle_dir" bash tests/test-broker-save-olean.sh > /dev/null
-
-ROCQ_LSP=""
-for candidate in "_opam/bin/coq-lsp" "_opam/_opam/bin/coq-lsp"; do
-  if [ -x "$candidate" ]; then
-    ROCQ_LSP="$candidate"
-    break
-  fi
-done
-
-if [ -n "$ROCQ_LSP" ]; then
-  echo "[broker-slow] rocq wrapper tests"
-  if [ -d "_opam/_opam" ]; then
-    eval "$(opam env --switch=./_opam --set-switch)"
-  fi
-  BEAM_ROCQ_CMD="$PWD/$ROCQ_LSP" bash tests/test-beam-wrapper-rocq.sh > /dev/null
-  echo "[broker-slow] rocq smoke test"
-  BEAM_ROCQ_CMD="$PWD/$ROCQ_LSP" .lake/build/bin/beam-daemon-rocq-smoke-test > /dev/null
-else
-  echo "[broker-slow] rocq skipped: install coq-lsp with tests/setup-rocq-opam.sh." >&2
-fi

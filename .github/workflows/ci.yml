@@ -57,3 +57,21 @@ jobs:
 
       - name: Broker Slow Test
         run: bash tests/test-broker-slow.sh
+
+  broker-rocq:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/lean-ci-setup
+
+      - name: Set up OCaml / opam
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 4.14.2
+
+      - name: Install Rocq Tooling
+        run: bash tests/setup-rocq-opam.sh
+
+      - name: Broker Rocq Test
+        run: bash tests/test-broker-rocq.sh
