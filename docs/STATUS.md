@@ -1,6 +1,6 @@
 # Status
 
-`runAt` is alpha code and still mostly a personal experiment.
+Lean Beam is alpha code and still mostly a personal experiment.
 
 The repository is public for collaboration and reuse, but it is not yet a polished or stable
 general-purpose product. The main goal is still a small, type-safe, isolated execution surface for

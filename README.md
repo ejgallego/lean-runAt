@@ -1,29 +1,76 @@
-# runAt
+# Lean Beam
 
-`runAt` is an alpha Lean LSP extension with a local `lean-beam` workflow layer on top.
+Lean Beam provides a Claude/Codex skill and local workflow layer for efficient interaction with
+Lean 4. Under the hood, it combines a Lean 4 LSP server extension, the `$/lean/runAt` request for
+cheap speculative execution, and a thin local broker that exposes a more idiomatic CLI and agent
+surface over Lean's LSP and Beam-specific extensions.
 
-This repository is public because the code is useful, but it is still experimental. The central
-idea is small, typed, isolated execution for Lean, with a conservative local broker and wrapper for
-practical workflows.
+Lean Beam is aimed at agent-heavy workflows such as proof repair,
+porting from other systems to Lean, proof-search experimentation, and
+autoformalization. For agents making many edits to Lean files, Lean
+Beam can provide asymptotic savings over repeating `lake build` after
+every change; see the [cost model and workflow details](skills/lean-beam/references/workflow-details.md#cost-model).
 
-## What This Repo Is For
+Lean Beam started as a personal internal project and is now published for public use. It is not an
+official Lean FRO product, the code remains experimental, and you should use it at your own risk.
 
-- one small Lean request at the center: `$/lean/runAt`
-- a local Beam broker and CLI for Lean workflows
-- a narrow auxiliary Rocq goal-probe surface through the same `lean-beam` wrapper
-- agent-oriented local workflows built around the installed wrapper, not around raw editor state
+Feedback is welcome; feel free to open issues or let us know what you think on Zulip.
 
-Current scope, limitations, and direction live in [docs/STATUS.md](docs/STATUS.md).
+## Install
 
-## Start Here
+Run the installer from the repo root:
 
-- using the project as a human: stay in this README, then go to [skills/lean-beam/SKILL.md](skills/lean-beam/SKILL.md) for the Lean workflow contract
-- contributing as a human: read [CONTRIBUTING.md](CONTRIBUTING.md), then [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
-- working as an AI agent or reviewing agent workflow: start with [AGENTS.md](AGENTS.md), then the relevant skill doc
+```bash
+./scripts/install-beam.sh
+```
 
-## Human-Facing Surface
+That installs:
 
-For most users, the practical entry point is `lean-beam`.
+- `lean-beam` and `lean-beam-search` into `~/.local/bin`
+- an immutable runtime under `BEAM_INSTALL_ROOT`, default `~/.local/share/beam`
+- a prebuilt bundle for the repo-pinned supported Lean toolchain
+
+Use `--codex`, `--claude`, or `--all-skills` to install the bundled agent skills:
+
+```bash
+./scripts/install-beam.sh --codex
+./scripts/install-beam.sh --claude
+./scripts/install-beam.sh --all-skills
+```
+
+Use `--toolchain <toolchain>` or `--all-supported` to prebuild additional validated Lean bundles:
+
+```bash
+./scripts/install-beam.sh --toolchain leanprover/lean4:v4.29.0-rc6
+./scripts/install-beam.sh --all-supported
+```
+
+## Supported Toolchains
+
+Lean Beam only serves Lean toolchains listed in [`supported-lean-toolchains`](supported-lean-toolchains).
+Inspect the validated allowlist with:
+
+```bash
+lean-beam supported-toolchains
+```
+
+The current repo allowlist is:
+
+```text
+leanprover/lean4:v4.29.0-rc6
+leanprover/lean4:v4.29.0-rc5
+```
+
+If you are unsure which runtime bundle is active or why a toolchain is rejected, use:
+
+```bash
+lean-beam doctor
+```
+
+## Agent-Facing Surface
+
+For most agent-oriented workflows, the practical entry point is `lean-beam` together with the
+workflow guidance in [skills/lean-beam/SKILL.md](skills/lean-beam/SKILL.md).
 
 Common Lean commands:
 
@@ -51,45 +98,24 @@ cheap direct-import recovery path before falling back to `lake build`.
 Detailed Lean workflow guidance lives in [skills/lean-beam/SKILL.md](skills/lean-beam/SKILL.md).
 The narrower Rocq surface lives in [skills/rocq-beam/SKILL.md](skills/rocq-beam/SKILL.md).
 
-## Install
-
-Use the installer from the repo root:
-
-```bash
-./scripts/install-beam.sh
-```
-
-Optional flags:
-
-```bash
-./scripts/install-beam.sh --codex
-./scripts/install-beam.sh --claude
-./scripts/install-beam.sh --all-skills
-./scripts/install-beam.sh --toolchain leanprover/lean4:v4.29.0-rc6
-./scripts/install-beam.sh --all-supported
-```
-
-The installer:
-
-- puts `lean-beam` and `lean-beam-search` in `~/.local/bin`
-- stages an immutable runtime under `BEAM_INSTALL_ROOT`, default `~/.local/share/beam`
-- prebuilds supported Lean bundle(s) under `BEAM_INSTALL_ROOT/state/install-bundles`
-- installs bundled agent skills only when requested
-
-More install and runtime-resolution detail lives in [docs/STATUS.md](docs/STATUS.md) and
-[skills/lean-beam/SKILL.md](skills/lean-beam/SKILL.md).
-
 ## Which Layer To Use
 
-- Use the Lean LSP extension directly if you already own the LSP session and want the smallest typed
-  surface.
-- Use the Beam broker if you want one long-lived local process per project root.
-- Use `lean-beam` if you want the practical workflow surface today.
+- Use `lean-beam` plus the installed skills if you want the practical agent workflow that integrates with Codex or Claude out of the box
+- Use the Beam broker if you want one long-lived local process per project root while keeping a narrower local protocol than raw LSP
+- Use the Lean LSP extension directly if you already own the LSP session and want the smallest typed surface, or if you want to build custom agents doing MCTS or other advanced setups
 
 The public request and response types live in [RunAt/Protocol.lean](RunAt/Protocol.lean). The Lean
 plugin implementation lives in [RunAt/Plugin.lean](RunAt/Plugin.lean).
 
-## Build And Test
+## How The Code Is Organized
+
+- `RunAt`: Lean LSP server plugin providing the `$/lean/runAt` request for speculative execution at arbitrary document points
+- `Beam`: local broker, daemon/client pair, and CLI wrappers exposing a narrower agent-facing surface over LSP and Beam-specific extensions
+- `skills`: installed Claude/Codex workflow guidance built around `lean-beam`
+- Rocq support: a narrow auxiliary goal-probe surface through the same `lean-beam` wrapper, useful when porting from Rocq to Lean
+- `tests`: scenario-DSL coverage for LSP-level behavior, concurrent stress coverage, broker and wrapper regression suites, and install/runtime validation
+
+## Local Build And Test (for development)
 
 Build:
 
