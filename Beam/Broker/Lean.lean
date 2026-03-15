@@ -15,7 +15,7 @@ def backendCommand (config : BrokerConfig) (backend : Backend) : IO (String × A
   | .lean => Backend.Lean.command config
   | .rocq => Backend.Rocq.command config
 
-def initializeParams (backend : Backend) (root : System.FilePath) : Json :=
+def initializeParams (backend : Backend) (root : System.FilePath) : Lean.Json :=
   match backend with
   | .lean => Backend.Lean.initializeParams root
   | .rocq => Backend.Rocq.initializeParams root
