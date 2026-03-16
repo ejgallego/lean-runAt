@@ -6,6 +6,7 @@ Author: Emilio J. Gallego Arias
 
 import Lean.Server.FileWorker.RequestHandling
 import Lean.Server.Requests
+import Lean.Meta.PPGoal
 import Lean.Widget.InteractiveGoal
 import Lean.Compiler.IR
 import RunAt.ProofSnapshot
@@ -88,6 +89,111 @@ private def goalOfInteractive (goal : Lean.Widget.InteractiveGoal) : Goal :=
     target := goal.type.stripTags
     hyps := goal.hyps.map goalHypOfInteractive
   }
+
+private def safePpExprTagged (e : Expr) :
+    MetaM Lean.Widget.CodeWithInfos := do
+  if pp.raw.get (← getOptions) then
+    let e ← if getPPInstantiateMVars (← getOptions) then instantiateMVars e else pure e
+    return .text (toString e)
+  let ppCtx : PPContext := {
+    env := (← getEnv)
+    mctx := (← getMCtx)
+    lctx := (← getLCtx)
+    opts := (← getOptions)
+    currNamespace := (← getCurrNamespace)
+    openDecls := (← getOpenDecls)
+  }
+  let ⟨fmt, infos⟩ ← liftM <| Lean.ppExprWithInfos ppCtx e
+  let tt := Lean.Widget.TaggedText.prettyTagged fmt
+  let ctx : Elab.ContextInfo := {
+    env := (← getEnv)
+    mctx := (← getMCtx)
+    options := (← getOptions)
+    currNamespace := (← getCurrNamespace)
+    openDecls := (← getOpenDecls)
+    fileMap := default
+    ngen := (← getNGen)
+  }
+  Lean.Widget.tagCodeInfos ctx infos tt
+
+private def addInteractiveHypothesisBundleSafe (hyps : Array Lean.Widget.InteractiveHypothesisBundle)
+    (ids : Array (String × FVarId)) (type : Expr) (value? : Option Expr := none) (tactic := false ) :
+    MetaM (Array Lean.Widget.InteractiveHypothesisBundle) := do
+  if ids.size == 0 then
+    throwError "Can only add a nonzero number of ids as an InteractiveHypothesisBundle."
+  let fvarIds := ids.map Prod.snd
+  let names := ids.map Prod.fst
+  return hyps.push {
+    names
+    fvarIds
+    type := (← safePpExprTagged type)
+    val? := (← value?.mapM ppLetValueExprTagged)
+    isInstance? := if (← Meta.isClass? type).isSome then true else none
+    isType? := if (← instantiateMVars type).isSort then true else none
+  }
+where
+  ppLetValueExprTagged (value : Expr) : MetaM Lean.Widget.CodeWithInfos := do
+    let _ := tactic
+    safePpExprTagged value
+
+private def goalToInteractiveSafe (mvarId : MVarId) : MetaM Lean.Widget.InteractiveGoal := do
+  let ppAuxDecls := (← getOptions).getBool `pp.auxDecls false
+  let ppImplDetailHyps := (← getOptions).getBool `pp.implementationDetailHyps false
+  Lean.Widget.withGoalCtx mvarId fun lctx mvarDecl => do
+    let tactic := mvarDecl.kind.isSyntheticOpaque
+    let pushPending
+        (ids : Array (String × FVarId))
+        (type? : Option Expr)
+        (hyps : Array Lean.Widget.InteractiveHypothesisBundle) :
+        MetaM (Array Lean.Widget.InteractiveHypothesisBundle) :=
+      if ids.isEmpty then
+        pure hyps
+      else
+        match type? with
+        | none => pure hyps
+        | some type => addInteractiveHypothesisBundleSafe hyps ids type
+    let mut varNames : Array (String × FVarId) := #[]
+    let mut prevType? : Option Expr := none
+    let mut hyps : Array Lean.Widget.InteractiveHypothesisBundle := #[]
+    for localDecl in lctx do
+      if !ppAuxDecls && localDecl.isAuxDecl || !ppImplDetailHyps && localDecl.isImplementationDetail then
+        continue
+      else
+        match localDecl with
+        | LocalDecl.cdecl _index fvarId varName type ..
+        | LocalDecl.ldecl _index fvarId varName type (nondep := true) .. =>
+            let varName := toString varName
+            let type ← instantiateMVars type
+            if prevType? == none || prevType? == some type then
+              varNames := varNames.push (varName, fvarId)
+            else
+              hyps ← pushPending varNames prevType? hyps
+              varNames := #[(varName, fvarId)]
+            prevType? := some type
+        | LocalDecl.ldecl _index fvarId varName type val (nondep := false) .. => do
+            let varName := toString varName
+            hyps ← pushPending varNames prevType? hyps
+            let type ← instantiateMVars type
+            let val ← instantiateMVars val
+            hyps ← addInteractiveHypothesisBundleSafe hyps #[(varName, fvarId)] type val tactic
+            varNames := #[]
+            prevType? := none
+    hyps ← pushPending varNames prevType? hyps
+    let goalTp ← instantiateMVars mvarDecl.type
+    let goalFmt ← safePpExprTagged goalTp
+    let userName? := match mvarDecl.userName with
+      | Name.anonymous => none
+      | name => some <| toString name.eraseMacroScopes
+    let goalPrefix :=
+      if isLHSGoal? mvarDecl.type |>.isSome then "| " else "⊢ "
+    return {
+      hyps
+      type := goalFmt
+      ctx := ← WithRpcRef.mk {← Elab.CommandContextInfo.save with }
+      userName?
+      goalPrefix
+      mvarId
+    }
 
 private structure ExecutionArtifacts where
   messages : Array RunAt.Message
@@ -506,7 +612,7 @@ private def runCommandText (snap : Snapshots.Snapshot) (text : String) : Request
 
 private def proofStateOfSnapshot (snapshot : ProofSnapshot) : RequestM ProofState := do
   let (interactiveGoals, _) ← snapshot.runMetaM do
-    snapshot.tacticState.goals.mapM Lean.Widget.goalToInteractive
+    snapshot.tacticState.goals.mapM goalToInteractiveSafe
   return {
     goals := interactiveGoals.toArray.map goalOfInteractive
   }
