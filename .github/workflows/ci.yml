@@ -97,9 +97,13 @@ jobs:
         uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: 4.14.2
+          opam-repositories: |
+            default: git+https://github.com/ocaml/opam-repository.git
+            coq-released: https://coq.inria.fr/opam/released
+          opam-local-packages: tests/rocq-ci.opam
 
-      - name: Install Rocq Tooling
-        run: bash tests/setup-rocq-opam.sh
+      - name: Install Rocq CI Dependencies
+        run: opam install -y ./tests/rocq-ci.opam --deps-only
 
       - name: Broker Rocq Test
         run: bash tests/test-broker-rocq.sh

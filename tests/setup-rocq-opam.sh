@@ -26,4 +26,4 @@ fi
 
 opam update
 
-opam install -y rocq-core.9.1.1 rocq-stdlib coq-lsp.0.2.5+9.1
+opam install -y ./tests/rocq-ci.opam --deps-only
