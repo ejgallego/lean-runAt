@@ -6,7 +6,7 @@ Author: Emilio J. Gallego Arias
 
 import Lean.Server.FileWorker.RequestHandling
 import Lean.Server.Requests
-import Lean.Widget.InteractiveGoal
+import Lean.Meta.PPGoal
 import Lean.Compiler.IR
 import RunAt.ProofSnapshot
 import RunAt.Protocol
@@ -74,20 +74,93 @@ private def tracesToStrings (traces : List TraceElem) : IO (Array String) := do
   traces.toArray.mapM fun trace => do
     return (← trace.msg.toString)
 
-private def goalHypOfInteractive (hyp : Lean.Widget.InteractiveHypothesisBundle) : GoalHyp :=
-  {
-    names := hyp.names
-    type := hyp.type.stripTags
-    value? := hyp.val?.map (·.stripTags)
-  }
+private def ppExprString (e : Expr) : MetaM String := do
+  let e ← if getPPInstantiateMVars (← getOptions) then instantiateMVars e else pure e
+  return (← Meta.ppExpr e).pretty
 
-private def goalOfInteractive (goal : Lean.Widget.InteractiveGoal) : Goal :=
-  {
-    userName? := goal.userName?
-    goalPrefix := goal.goalPrefix
-    target := goal.type.stripTags
-    hyps := goal.hyps.map goalHypOfInteractive
-  }
+private def ppLetValueString? (tactic : Bool) (value : Expr) : MetaM (Option String) := do
+  if ← Lean.Meta.ppGoal.shouldShowLetValue tactic value then
+    some <$> ppExprString value
+  else
+    pure none
+
+private def withGoalCtx (goal : MVarId) (action : LocalContext → MetavarDecl → MetaM α) : MetaM α := do
+  let mctx ← getMCtx
+  let some mvarDecl := mctx.findDecl? goal
+    | throwError "unknown goal {goal.name}"
+  let lctx := mvarDecl.lctx |>.sanitizeNames.run' { options := (← getOptions) }
+  Meta.withLCtx lctx mvarDecl.localInstances (action lctx mvarDecl)
+
+private def addGoalHypBundle
+    (hyps : Array GoalHyp)
+    (names : Array String)
+    (type : Expr)
+    (value? : Option Expr := none)
+    (tactic : Bool := false) : MetaM (Array GoalHyp) := do
+  if names.isEmpty then
+    pure hyps
+  else
+    let renderedValue? ←
+      match value? with
+      | some value => ppLetValueString? tactic value
+      | none => pure none
+    return hyps.push {
+      names
+      type := ← ppExprString type
+      value? := renderedValue?
+    }
+
+private def goalOfMVarId (mvarId : MVarId) : MetaM Goal := do
+  let ppAuxDecls := (← getOptions).getBool `pp.auxDecls false
+  let ppImplDetailHyps := (← getOptions).getBool `pp.implementationDetailHyps false
+  withGoalCtx mvarId fun lctx mvarDecl => do
+    let tactic := mvarDecl.kind.isSyntheticOpaque
+    let pushPending
+        (names : Array String)
+        (type? : Option Expr)
+        (hyps : Array GoalHyp) : MetaM (Array GoalHyp) :=
+      if names.isEmpty then
+        pure hyps
+      else
+        match type? with
+        | none => pure hyps
+        | some type => addGoalHypBundle hyps names type (tactic := tactic)
+    let mut pendingNames : Array String := #[]
+    let mut prevType? : Option Expr := none
+    let mut hyps : Array GoalHyp := #[]
+    for localDecl in lctx do
+      if !ppAuxDecls && localDecl.isAuxDecl || !ppImplDetailHyps && localDecl.isImplementationDetail then
+        continue
+      else
+        match localDecl with
+        | LocalDecl.cdecl _index _fvarId varName type ..
+        | LocalDecl.ldecl _index _fvarId varName type (nondep := true) .. =>
+            let varName := toString varName
+            let type ← instantiateMVars type
+            if prevType? == none || prevType? == some type then
+              pendingNames := pendingNames.push varName
+            else
+              hyps ← pushPending pendingNames prevType? hyps
+              pendingNames := #[varName]
+            prevType? := some type
+        | LocalDecl.ldecl _index _fvarId varName type val (nondep := false) .. => do
+            let varName := toString varName
+            hyps ← pushPending pendingNames prevType? hyps
+            let type ← instantiateMVars type
+            let val ← instantiateMVars val
+            hyps ← addGoalHypBundle hyps #[varName] type (value? := some val) (tactic := tactic)
+            pendingNames := #[]
+            prevType? := none
+    hyps ← pushPending pendingNames prevType? hyps
+    let userName? := match mvarDecl.userName with
+      | Name.anonymous => none
+      | name => some <| toString name.eraseMacroScopes
+    return {
+      userName?
+      goalPrefix := Lean.Meta.getGoalPrefix mvarDecl
+      target := ← ppExprString (← instantiateMVars mvarDecl.type)
+      hyps
+    }
 
 private structure ExecutionArtifacts where
   messages : Array RunAt.Message
@@ -131,10 +204,12 @@ private def mkExecutionResult
         proofState?
       }
 
-private def proofStateOfGoals (goals : List MVarId) (ctxInfo : ContextInfo) : RequestM ProofState := do
-  let goals ← goals.mapM fun goal =>
-    return goalOfInteractive (← ctxInfo.runMetaM {} <| Lean.Widget.goalToInteractive goal)
+private def proofStateOfGoalList (goals : List MVarId) : MetaM ProofState := do
+  let goals ← goals.mapM goalOfMVarId
   return { goals := goals.toArray }
+
+private def proofStateOfGoals (goals : List MVarId) (ctxInfo : ContextInfo) : RequestM ProofState := do
+  ctxInfo.runMetaM {} <| proofStateOfGoalList goals
 
 private def mkBasisCtxInfo (result : GoalsAtResult) (useAfter : Bool := result.useAfter) : ContextInfo :=
   if useAfter then
@@ -218,10 +293,9 @@ private def singleLineText (text : String) : String :=
   String.intercalate " " parts
 
 private def formatErrorDiagnostic (diagnostic : Lean.Widget.InteractiveDiagnostic) : String :=
-  let diagnostic := Lean.Widget.InteractiveDiagnostic.toDiagnostic diagnostic
   let line := diagnostic.range.start.line + 1
   let character := diagnostic.range.start.character + 1
-  s!"{line}:{character}: {singleLineText diagnostic.message}"
+  s!"{line}:{character}: {singleLineText diagnostic.message.stripTags}"
 
 private def summarizeErrorItems (items : Array String) (maxItems : Nat := 3) : String :=
   let limit := Nat.min maxItems items.size
@@ -505,11 +579,8 @@ private def runCommandText (snap : Snapshots.Snapshot) (text : String) : Request
     return (result, nextHandle?)
 
 private def proofStateOfSnapshot (snapshot : ProofSnapshot) : RequestM ProofState := do
-  let (interactiveGoals, _) ← snapshot.runMetaM do
-    snapshot.tacticState.goals.mapM Lean.Widget.goalToInteractive
-  return {
-    goals := interactiveGoals.toArray.map goalOfInteractive
-  }
+  let (proofState, _) ← snapshot.runMetaM <| proofStateOfGoalList snapshot.tacticState.goals
+  return proofState
 
 private def runTacticText (snapshot : ProofSnapshot) (initialProofState : ProofState) (text : String) :
     RequestM (Result × Option StoredHandleState) := do
