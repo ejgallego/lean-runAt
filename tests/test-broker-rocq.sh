@@ -16,25 +16,15 @@ lake build \
   beam-daemon-rocq-smoke-test \
   > /dev/null
 
-ROCQ_LSP=""
-for candidate in "_opam/bin/coq-lsp" "_opam/_opam/bin/coq-lsp"; do
-  if [ -x "$candidate" ]; then
-    ROCQ_LSP="$candidate"
-    break
-  fi
-done
+eval "$(opam env)"
 
-if [ -z "$ROCQ_LSP" ]; then
+if ! command -v coq-lsp > /dev/null 2>&1; then
   echo "missing coq-lsp; run tests/setup-rocq-opam.sh first" >&2
   exit 1
 fi
 
-if [ -d "_opam/_opam" ]; then
-  eval "$(opam env --switch=./_opam --set-switch)"
-fi
-
 echo "[broker-rocq] wrapper tests"
-BEAM_ROCQ_CMD="$PWD/$ROCQ_LSP" bash tests/test-beam-wrapper-rocq.sh > /dev/null
+bash tests/test-beam-wrapper-rocq.sh > /dev/null
 
 echo "[broker-rocq] smoke test"
-BEAM_ROCQ_CMD="$PWD/$ROCQ_LSP" .lake/build/bin/beam-daemon-rocq-smoke-test > /dev/null
+.lake/build/bin/beam-daemon-rocq-smoke-test > /dev/null

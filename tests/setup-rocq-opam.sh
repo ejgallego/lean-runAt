@@ -8,11 +8,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if [ ! -d "_opam/_opam" ]; then
-  opam switch create ./_opam 4.14.2
+if ! command -v opam > /dev/null 2>&1; then
+  echo "missing opam; install it first or run under ocaml/setup-ocaml" >&2
+  exit 1
 fi
 
-eval "$(opam env --switch=./_opam --set-switch)"
+if ! opam switch show > /dev/null 2>&1; then
+  echo "missing active opam switch; run under ocaml/setup-ocaml or select a switch first" >&2
+  exit 1
+fi
+
+eval "$(opam env)"
 
 if ! opam repo list --short | grep -qx 'coq-released'; then
   opam repo add coq-released https://coq.inria.fr/opam/released

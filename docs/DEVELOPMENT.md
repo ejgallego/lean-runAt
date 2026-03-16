@@ -70,6 +70,7 @@ Preferred maintainer entrypoints:
 
 - broker protocol / stream / barrier changes: `bash tests/test-broker-fast.sh`
 - wrapper / install / bundle-resolution changes: `bash tests/test-broker-slow.sh`
+- Rocq broker / wrapper changes: `bash tests/test-broker-rocq.sh`
 - risky local install or wrapper validation: `bash scripts/validate-defensive.sh`
 - shell changes: `bash scripts/lint-shell.sh`
 

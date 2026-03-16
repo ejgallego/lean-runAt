@@ -17,7 +17,6 @@ lake build \
   beam-daemon-smoke-test \
   beam-daemon-save-stream-test \
   beam-daemon-request-stream-test \
-  beam-daemon-rocq-smoke-test \
   > /dev/null
 
 .lake/build/bin/beam-daemon-smoke-test > /dev/null

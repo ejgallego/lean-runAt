@@ -95,6 +95,8 @@ correctness regression, not yet a performance benchmark.
   and request-stream contract changes; this is the quickest broker signal
 - add [tests/test-broker-slow.sh](../tests/test-broker-slow.sh) when the change touches wrapper,
   install, or bundle-resolution behavior
+- use [tests/test-broker-rocq.sh](../tests/test-broker-rocq.sh) for Rocq broker and wrapper
+  coverage, including project-local `coq-lsp` discovery
 - use [tests/test-broker.sh](../tests/test-broker.sh) to execute both suites together before
   landing a broader broker-facing change
 - use [scripts/lint-shell.sh](../scripts/lint-shell.sh) when you change shell wrappers, installer,

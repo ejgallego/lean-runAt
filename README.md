@@ -135,6 +135,7 @@ Broker and wrapper suites:
 ```bash
 bash tests/test-broker-fast.sh
 bash tests/test-broker-slow.sh
+bash tests/test-broker-rocq.sh
 bash tests/test-broker.sh
 bash scripts/lint-shell.sh
 ```
