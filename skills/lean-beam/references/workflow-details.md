@@ -48,8 +48,10 @@ printf '%s\n' "$HANDLE_JSON" | lean-beam-search release "Foo.lean"
 Inspect dependency order for multi-file edits:
 
 ```bash
-lean-beam deps "Foo.lean"
+lean-beam experimental deps "Foo.lean"
 ```
+
+Treat this as experimental broker output, not as a stable dependency contract.
 
 Inspect Lean type/term information at a specific position:
 
@@ -95,7 +97,7 @@ What is not a valid checkpoint target:
 
 ## Source-File And Execution Model
 
-- `lean-beam run-at` and `lean-beam deps` do not edit `Foo.lean`
+- `lean-beam run-at` and `lean-beam experimental deps` do not edit `Foo.lean`
 - `lean-beam hover` is the stable read-only semantic inspection command for an existing position
 - `lean-beam goals-prev` and `lean-beam goals-after` are the stable read-only proof-state
   inspection commands for an existing tactic position
@@ -205,7 +207,7 @@ lean-beam refresh "T.lean"
 
 Practical boundary:
 
-- use `lean-beam deps "T.lean"` to inspect direct imports when choosing likely upstream modules
+- use `lean-beam experimental deps "T.lean"` to inspect direct imports when choosing likely upstream modules
 - this is a targeted recovery loop, not a full dependency scheduler
 - if retries keep walking additional modules, or if you need final workspace trust, stop and run
   `lake build`
@@ -239,7 +241,7 @@ itself to prove the dependency cone is fresh.
 
 ```bash
 lean-beam ensure
-lean-beam deps "B.lean"
+lean-beam experimental deps "B.lean"
 
 # make a real edit in A.lean and save the source file to disk
 lean-beam sync "A.lean"

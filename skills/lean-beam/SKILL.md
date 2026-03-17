@@ -42,7 +42,7 @@ Supported command families:
 
 - bootstrap the Lean backend: `lean-beam ensure`
 - inspect existing code or proof state: `lean-beam hover`, `lean-beam goals-prev`, `lean-beam goals-after`
-- inspect file, dependency, or daemon state: `lean-beam deps`, `lean-beam open-files`, `lean-beam doctor`, `lean-beam stats`,
+- inspect file or daemon state: `lean-beam open-files`, `lean-beam doctor`, `lean-beam stats`,
   `lean-beam reset-stats`
 - try one isolated speculative Lean snippet: `lean-beam run-at`
 - continue from one exact speculative state: `lean-beam run-at-handle`, `lean-beam run-with`,
@@ -54,10 +54,11 @@ What to treat as the default public skill surface:
 
 - default and stable enough for normal use: `lean-beam hover`, `lean-beam goals-prev`, `lean-beam goals-after`,
   `lean-beam run-at`, `lean-beam sync`, `lean-beam refresh`
-- narrower but supported wrapper surface: `lean-beam deps`, `lean-beam open-files`, `lean-beam doctor`,
+- narrower but supported wrapper surface: `lean-beam open-files`, `lean-beam doctor`,
   `lean-beam stats`, `lean-beam reset-stats`, `lean-beam save`, `lean-beam close-save`
 - alpha support APIs: `lean-beam run-at-handle`, `lean-beam run-with`, `lean-beam run-with-linear`,
   `lean-beam release`, `lean-beam-search`
+- experimental broker conveniences: `lean-beam request-at`, `lean-beam experimental deps`
 
 Core workflow contract:
 

@@ -8,7 +8,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-lake build RunAt:shared runAt-test runAt-scenario-test runAt-scenario-api-test runAt-scenario-stress-test runAt-handle-api-test runAt-handle-restart-test runAt-mcts-proof-search-test runAt-nested-handle-failure-test runAt-search-workload-report > /dev/null
+lake build RunAt:shared runAt-test runAt-scenario-test runAt-scenario-api-test runAt-scenario-stress-test runAt-handle-api-test runAt-handle-restart-test runAt-handle-lifecycle-test runAt-mcts-proof-search-test runAt-nested-handle-failure-test runAt-request-surface-test runAt-search-workload-report > /dev/null
 
 run_case() {
   local name="$1"
@@ -46,6 +46,11 @@ run_handle_api_case() {
 run_handle_restart_case() {
   echo "handle-restart"
   .lake/build/bin/runAt-handle-restart-test > /dev/null
+}
+
+run_handle_lifecycle_case() {
+  echo "handle-lifecycle"
+  .lake/build/bin/runAt-handle-lifecycle-test > /dev/null
 }
 
 run_mcts_proof_search_case() {
@@ -91,6 +96,11 @@ run_nested_handle_failure_case() {
   .lake/build/bin/runAt-nested-handle-failure-test > /dev/null
 }
 
+run_request_surface_case() {
+  echo "request-surface"
+  .lake/build/bin/runAt-request-surface-test > /dev/null
+}
+
 run_case asyncEditAwait
 run_case commandBasis
 run_case commandBlankLine
@@ -132,6 +142,8 @@ run_scenario_api_case
 run_scenario_stress_case
 run_handle_api_case
 run_handle_restart_case
+run_handle_lifecycle_case
 run_mcts_proof_search_case
+run_request_surface_case
 run_search_workload_case
 run_nested_handle_failure_case

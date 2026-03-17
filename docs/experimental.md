@@ -5,8 +5,8 @@ These commands are expert-only and explicitly unstable.
 They do not extend the stable Lean plugin `runAt` surface. They live in the local Beam daemon as
 broker-side conveniences for debugging and exploration.
 
-`lean-beam request-at` is an unstable broker escape hatch for expert debugging. It does not widen the
-stable `runAt` contract.
+`lean-beam request-at` and `lean-beam experimental deps` are unstable broker escape hatches for
+expert debugging and exploration. They do not widen the stable `runAt` contract.
 
 ## `lean-beam request-at`
 
@@ -69,3 +69,22 @@ Current limits:
 
 If usage proves real, the likely next step is not “forward everything”. The next step would be
 small typed commands for the concrete cases that users actually need.
+
+## `lean-beam experimental deps`
+
+`lean-beam experimental deps` exposes the broker's current stopgap workspace dependency scan.
+
+Current command shape:
+
+```bash
+lean-beam experimental deps <path>
+```
+
+Use it only for expert inspection. It is not currently part of the recommended Lean Beam workflow,
+and it should not be treated as a stable dependency oracle.
+
+Current limits:
+
+- implemented by the broker's own workspace scan rather than a stronger Lake-facing primitive
+- useful for debugging and exploration, not as a compatibility-stable contract
+- may change shape or move again as the dependency story is tightened

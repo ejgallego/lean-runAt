@@ -18,6 +18,7 @@ import Beam.Broker.Transport
 import Beam.Broker.Lean
 import Beam.Broker.Deps
 import Beam.Broker.LakeSave
+import Beam.Broker.SyncSaveSupport
 import Std.Sync.Mutex
 
 open Lean
@@ -116,6 +117,77 @@ structure State where
   currentClientRequestId? : Option String := none
 
 abbrev M := StateRefT State IO
+
+inductive BrokerFailureCode where
+  | invalidParams
+  | requestCancelled
+  | contentModified
+  | workerExited
+  | syncBarrierIncomplete
+  | saveTargetNotModule
+  | internalError
+  deriving Inhabited, BEq, Repr
+
+def BrokerFailureCode.name : BrokerFailureCode → String
+  | .invalidParams => "invalidParams"
+  | .requestCancelled => "requestCancelled"
+  | .contentModified => "contentModified"
+  | .workerExited => "workerExited"
+  | .syncBarrierIncomplete => syncBarrierIncompleteCode
+  | .saveTargetNotModule => saveTargetNotModuleCode
+  | .internalError => "internalError"
+
+instance : ToJson BrokerFailureCode where
+  toJson code := toJson code.name
+
+instance : FromJson BrokerFailureCode where
+  fromJson? j :=
+    match j with
+    | .str "invalidParams" => .ok .invalidParams
+    | .str "requestCancelled" => .ok .requestCancelled
+    | .str "contentModified" => .ok .contentModified
+    | .str "workerExited" => .ok .workerExited
+    | .str s =>
+        if s == syncBarrierIncompleteCode then
+          .ok .syncBarrierIncomplete
+        else if s == saveTargetNotModuleCode then
+          .ok .saveTargetNotModule
+        else if s == "internalError" then
+          .ok .internalError
+        else
+          .error s!"expected broker failure code, got {j.compress}"
+    | _ => .error s!"expected broker failure code, got {j.compress}"
+
+structure BrokerFailure where
+  code : BrokerFailureCode
+  message : String := ""
+  data? : Option Json := none
+  deriving Inhabited, FromJson, ToJson
+
+private def brokerFailurePrefix : String :=
+  "brokerfail:"
+
+def BrokerFailure.toResponse (failure : BrokerFailure) : Response :=
+  {
+    ok := false
+    error? := some {
+      code := failure.code.name
+      message := failure.message
+      data? := failure.data?
+    }
+  }
+
+def brokerFailureMessage (failure : BrokerFailure) : String :=
+  s!"{brokerFailurePrefix}{(toJson failure).compress}"
+
+def throwBrokerFailure (failure : BrokerFailure) : IO α := do
+  throw <| IO.userError (brokerFailureMessage failure)
+
+def decodeBrokerFailure? (msg : String) : Option BrokerFailure := do
+  guard <| msg.startsWith brokerFailurePrefix
+  let raw := msg.drop brokerFailurePrefix.length |>.toString
+  let json ← Json.parse raw |>.toOption
+  fromJson? json |>.toOption
 
 def mkSessionToken : IO String := do
   let pid ← IO.Process.getPID
@@ -391,67 +463,6 @@ private def diagnosticDisplayPath (root : System.FilePath) (uri : DocumentUri) :
 private def diagnosticStreamKey (diagnostic : Diagnostic) : String :=
   (toJson diagnostic).compress
 
-private def isIncompleteBarrierDiagnostic (diagnostic : Diagnostic) : Bool :=
-  diagnostic.message.contains "Failed to build module dependencies." ||
-    diagnostic.message.contains "error: target is out-of-date and needs to be rebuilt"
-
-private def effectiveSyncDiagnosticSeverity (diagnostic : Diagnostic) :
-    Option DiagnosticSeverity :=
-  if isIncompleteBarrierDiagnostic diagnostic then
-    some .error
-  else
-    diagnostic.severity?
-
-private def filterSyncDiagnostics (fullDiagnostics : Bool) (diagnostics : Array Diagnostic) :
-    Array Diagnostic :=
-  if fullDiagnostics then
-    diagnostics
-  else
-    diagnostics.filter (fun diagnostic => effectiveSyncDiagnosticSeverity diagnostic == some .error)
-
-private def syncErrorCount (diagnostics : Array Diagnostic) : Nat :=
-  diagnostics.foldl (init := 0) fun count diagnostic =>
-    if effectiveSyncDiagnosticSeverity diagnostic == some .error then
-      count + 1
-    else
-      count
-
-private def syncWarningCount (diagnostics : Array Diagnostic) : Nat :=
-  diagnostics.foldl (init := 0) fun count diagnostic =>
-    if effectiveSyncDiagnosticSeverity diagnostic == some .warning then
-      count + 1
-    else
-      count
-
-private structure SyncSaveReadiness where
-  stateErrorCount : Nat := 0
-  stateCommandErrorCount : Nat := 0
-  saveReady : Bool := true
-  saveReadyReason : String := "ok"
-  deriving Inhabited
-
-private def syncSaveReadinessOfResult
-    (result : RunAt.Internal.SaveReadinessResult) : SyncSaveReadiness :=
-  {
-    stateErrorCount := result.diagnosticErrorCount
-    stateCommandErrorCount := result.commandErrorCount
-    saveReady := result.saveReady
-    saveReadyReason := result.saveReadyReason
-  }
-
-private structure DirectImportsQueryResult where
-  version : Nat
-  imports : Array String := #[]
-  deriving Inhabited
-
-private structure StaleDirectDepHint where
-  module : String
-  path : String
-  needsSave : Bool
-  lastSyncSeq : Nat
-  lastSaveSeq : Nat
-  deriving Inhabited
-
 private def emitNewTrackedDiagnostics
     (root : System.FilePath)
     (seen : Std.TreeSet String compare)
@@ -582,7 +593,10 @@ partial def sessionReaderLoop (session : Session) : IO Unit := do
         pure ()
     sessionReaderLoop session
   catch e =>
-    failAllPendingRequests session s!"workerExited: {e.toString}"
+    failAllPendingRequests session <| brokerFailureMessage {
+      code := .workerExited
+      message := e.toString
+    }
     try
       session.proc.kill
     catch _ =>
@@ -681,6 +695,33 @@ def sendRequestJson (session : Session) (method : String) (param : Json) : IO (S
   let (session, result, _) ← sendRequestJsonTracked session method param
   pure (session, result)
 
+private partial def awaitInitializeResponse (stdout : IO.FS.Stream) : IO Unit := do
+  let msg ← stdout.readLspMessage
+  match msg with
+  | .response id _ =>
+      if id == 0 then
+        pure ()
+      else
+        throwBrokerFailure {
+          code := .internalError
+          message := s!"unexpected response id {id} before initialize completed"
+        }
+  | .responseError id _code message _ =>
+      if id == 0 then
+        throwBrokerFailure { code := .internalError, message := s!"initialize failed: {message}" }
+      else
+        throwBrokerFailure {
+          code := .internalError
+          message := s!"unexpected response error id {id} before initialize completed: {message}"
+        }
+  | .notification .. =>
+      awaitInitializeResponse stdout
+  | .request .. =>
+      throwBrokerFailure {
+        code := .internalError
+        message := "unexpected server request before initialize completed"
+      }
+
 def ensureSession (backend : Backend) : M Session := do
   let state ← get
   let config := state.config
@@ -722,7 +763,7 @@ def ensureSession (backend : Backend) : M Session := do
         pending
       }
       writeLspRequest stdin ({ id := 0, method := "initialize", param := initializeParams backend root : Lean.JsonRpc.Request Json })
-      let _ ← stdout.readLspMessage
+      awaitInitializeResponse stdout
       writeLspNotification stdin ({ method := "initialized", param := Json.mkObj [] : Lean.JsonRpc.Notification Json })
       let _ ← IO.asTask do
         try
@@ -842,46 +883,6 @@ def recordFileProgress (session : Session) (uri : DocumentUri)
   | none =>
       session
 
-private def diagnosticsIndicateIncompleteBarrier (diagnostics : Array Diagnostic) : Bool :=
-  diagnostics.any isIncompleteBarrierDiagnostic
-
-private def incompleteBarrierProgress (progress? : Option SyncFileProgress := none) : SyncFileProgress :=
-  match progress? with
-  | some progress => { progress with done := false }
-  | none => { done := false }
-
-private def syncBarrierIncompleteMessage
-    (uri : DocumentUri)
-    (version : Nat)
-    (progress? : Option SyncFileProgress) : String :=
-  let progress := incompleteBarrierProgress progress?
-  s!"Lean diagnostics barrier did not complete for {uri} at version {version}; " ++
-    s!"fileProgress={toJson progress |>.compress}. An imported target may be stale or broken, " ++
-    s!"or the Lean worker may have exited. Run `lake build` or fix the upstream module first."
-
-private def syncBarrierIncomplete?
-    (progress? : Option SyncFileProgress)
-    (diagnostics : Array Diagnostic := #[]) : Bool :=
-  if diagnosticsIndicateIncompleteBarrier diagnostics then
-    true
-  else
-    match progress? with
-    | some progress => !progress.done
-    | none => false
-
-private def effectiveSyncBarrierProgress
-    (priorProgress? : Option SyncFileProgress)
-    (progress? : Option SyncFileProgress)
-    (diagnostics : Array Diagnostic) : Option SyncFileProgress :=
-  if diagnosticsIndicateIncompleteBarrier diagnostics then
-    some <| incompleteBarrierProgress (progress?.or priorProgress?)
-  else
-    match progress? with
-    | some progress =>
-        some progress
-    | none =>
-        some <| priorProgress?.getD {}
-
 def decodeResponseAs [FromJson α] (json : Json) : IO α := do
   match fromJson? json with
   | .ok value => pure value
@@ -908,7 +909,10 @@ private def ensureSyncBarrierComplete
     (progress? : Option SyncFileProgress)
     (diagnostics : Array Diagnostic := #[]) : IO Unit := do
   if syncBarrierIncomplete? progress? diagnostics then
-    throw <| IO.userError <| syncBarrierIncompleteMessage uri version progress?
+    throwBrokerFailure {
+      code := .syncBarrierIncomplete
+      message := syncBarrierIncompleteMessage uri version progress?
+    }
 
 def waitForDiagnostics (session : Session) (uri : DocumentUri) (version : Nat) : IO Session := do
   let params := toJson (WaitForDiagnosticsParams.mk uri version)
@@ -1024,43 +1028,6 @@ private def markDocSavedVersion (session : Session) (uri : DocumentUri) (version
   | none =>
       session
 
-def moduleJson (root : System.FilePath) (module : LeanModule) : Json :=
-  let path? := workspacePath? root module.uri
-  Json.mkObj <|
-    [
-      ("name", toJson module.name),
-      ("uri", toJson module.uri),
-      ("workspace", toJson path?.isSome)
-    ] ++
-    match path? with
-    | some path => [("path", toJson path)]
-    | none => []
-
-def leanSavePayload (spec : LeanSaveSpec) (version : Nat) (sourceHash : Lake.Hash) : Json :=
-  Json.mkObj <|
-    [
-      ("path", toJson spec.relPath),
-      ("module", toJson spec.moduleName.toString),
-      ("version", toJson version),
-      ("sourceHash", toJson sourceHash),
-      ("olean", toJson spec.oleanPath.toString),
-      ("ilean", toJson spec.ileanPath.toString),
-      ("c", toJson spec.cPath.toString),
-      ("trace", toJson spec.tracePath.toString)
-    ] ++
-    (match spec.oleanServerPath? with
-    | some path => [("oleanServer", toJson path.toString)]
-    | none => []) ++
-    (match spec.oleanPrivatePath? with
-    | some path => [("oleanPrivate", toJson path.toString)]
-    | none => []) ++
-    (match spec.irPath? with
-    | some path => [("ir", toJson path.toString)]
-    | none => []) ++
-    (match spec.bcPath? with
-    | some path => [("bc", toJson path.toString)]
-    | none => [])
-
 def saveOlean
     (leanCmd? : Option String)
     (session : Session)
@@ -1117,23 +1084,6 @@ def saveOlean
     : DidChangeWatchedFilesParams
   }))
   pure (markDocSavedVersion session uri docState.version, leanSavePayload spec docState.version docState.textTraceHash, fileProgress?)
-
-def importJson (root : System.FilePath) (imp : LeanImport) : Json :=
-  Json.mkObj [
-    ("module", moduleJson root imp.module),
-    ("kind", toJson imp.kind)
-  ]
-
-def depsPayload (root : System.FilePath) (module : LeanModule)
-    (imports importedBy : Array LeanImport)
-    (importClosure importedByClosure : Std.TreeMap String LeanImport) : Json :=
-  Json.mkObj [
-    ("module", moduleJson root module),
-    ("imports", Json.arr <| imports.map (importJson root)),
-    ("importedBy", Json.arr <| importedBy.map (importJson root)),
-    ("importClosure", Json.arr <| importClosure.toList.map (fun (_, imp) => importJson root imp) |>.toArray),
-    ("importedByClosure", Json.arr <| importedByClosure.toList.map (fun (_, imp) => importJson root imp) |>.toArray)
-  ]
 
 private def docSyncStatus (path : System.FilePath) (docState : DocState) : IO String := do
   if !(← path.pathExists) then
@@ -1290,16 +1240,6 @@ def withFileProgress (resp : Response) (fileProgress? : Option SyncFileProgress)
   | some progress => { resp with fileProgress? := some progress }
   | none => resp
 
-def currentFileProgressSink? : M (Option (SyncFileProgress → IO Unit)) := do
-  let state ← get
-  pure <| state.streamSink?.map fun emit =>
-    fun progress => emit (StreamMessage.mkFileProgress state.currentClientRequestId? progress)
-
-def currentDiagnosticSink? : M (Option (StreamDiagnostic → IO Unit)) := do
-  let state ← get
-  pure <| state.streamSink?.map fun emit =>
-    fun diagnostic => emit (StreamMessage.mkDiagnostic state.currentClientRequestId? diagnostic)
-
 def updateSession (session : Session) : M Unit := do
   modify fun state =>
     let backendState := getBackendState state session.backend
@@ -1362,7 +1302,9 @@ private def isWorkerExitedMessage (msg : String) : Bool :=
   msg.startsWith "workerExited:"
 
 private def responseForExceptionMessage (msg : String) : Response :=
-  if isRequestCancelledMessage msg then
+  if let some failure := decodeBrokerFailure? msg then
+    failure.toResponse
+  else if isRequestCancelledMessage msg then
     reqError "requestCancelled" msg
   else if isContentModifiedMessage msg then
     reqError "contentModified" msg
@@ -1376,178 +1318,6 @@ private def responseForExceptionMessage (msg : String) : Response :=
     resp
   else
     reqError "internalError" msg
-
-def handleEnsureOp (req : Request) (session : Session) : M (Response × Bool) := do
-  let payload := Json.mkObj [
-    ("backend", toJson req.backend),
-    ("root", toJson session.root.toString),
-    ("epoch", toJson session.epoch),
-  ]
-  pure (sessionResult session payload, false)
-
-def handleSyncFileOp (req : Request) (session : Session) : M (Response × Bool) := do
-  try
-    let path ←
-      match req.requirePath with
-      | .ok path => pure path
-      | .error err => return (reqError "invalidParams" err, false)
-    let path ← resolvePath session.root path
-    let session ← syncFile session path
-    let uri := sessionUri path
-    let docState ← requireDocState session uri
-    let emitProgress? ← currentFileProgressSink?
-    let emitDiagnostic? ← currentDiagnosticSink?
-    let fullDiagnostics := req.fullDiagnostics?.getD false
-    let (session, fileProgress?, diagnostics) ←
-      waitForSyncBarrierWithDiagnostics session uri docState.version
-        emitProgress? fullDiagnostics emitDiagnostic?
-    let (session, saveReadiness) ← fetchSyncSaveReadiness session uri
-    let session := markDocSyncedVersion (recordFileProgress session uri fileProgress?) uri docState.version
-    updateSession session
-    let payload := toJson ({
-      version := docState.version
-      errorCount := syncErrorCount diagnostics
-      warningCount := syncWarningCount diagnostics
-      stateErrorCount := saveReadiness.stateErrorCount
-      stateCommandErrorCount := saveReadiness.stateCommandErrorCount
-      saveReady := saveReadiness.saveReady
-      saveReadyReason := saveReadiness.saveReadyReason
-      : SyncFileResult
-    })
-    pure (withFileProgress (sessionResult session payload) fileProgress?, false)
-  catch e =>
-    pure (responseForExceptionMessage e.toString, false)
-
-def handleCloseOp (req : Request) (session : Session) : M (Response × Bool) := do
-  let path ←
-    match req.requirePath with
-    | .ok path => pure path
-    | .error err => return (reqError "invalidParams" err, false)
-  let (session, savedPayload?, fileProgress?) ←
-    if req.saveArtifacts?.getD false then
-      try
-        let leanCmd? := (← get).config.leanCmd?
-        let emitProgress? ← currentFileProgressSink?
-        let emitDiagnostic? ← currentDiagnosticSink?
-        let fullDiagnostics := req.fullDiagnostics?.getD false
-        let (session, payload, fileProgress?) ←
-          saveOlean leanCmd? session path emitProgress? fullDiagnostics emitDiagnostic?
-        pure (session, some payload, fileProgress?)
-      catch e =>
-        return (responseForExceptionMessage e.toString, false)
-    else
-      pure (session, none, none)
-  let session ← closeFile session path
-  updateSession session
-  let payload := Json.mkObj <|
-    [("closed", toJson true)] ++
-    match savedPayload? with
-    | some saved => [("saved", saved)]
-    | none => []
-  pure (withFileProgress (sessionResult session payload) fileProgress?, false)
-
-def handleRunAtOp (req : Request) (session : Session) : M (Response × Bool) := do
-  let path ←
-    match req.requirePath with
-    | .ok path => pure path
-    | .error err => return (reqError "invalidParams" err, false)
-  let line ←
-    match req.requireLine with
-    | .ok line => pure line
-    | .error err => return (reqError "invalidParams" err, false)
-  let character ←
-    match req.requireCharacter with
-    | .ok character => pure character
-    | .error err => return (reqError "invalidParams" err, false)
-  let text ←
-    match req.requireText with
-    | .ok text => pure text
-    | .error err => return (reqError "invalidParams" err, false)
-  let method ←
-    match runAtMethod req.backend with
-    | .ok method => pure method
-    | .error err => return (reqError "invalidParams" err, false)
-  let session ← syncFile session path
-  let uri := sessionUri (← resolvePath session.root path)
-  let docState ← requireDocState session uri
-  let emitProgress? ← currentFileProgressSink?
-  let params := Json.mkObj <|
-    [ ("textDocument", toJson ({ uri := uri : TextDocumentIdentifier }))
-    , ("position", toJson ({ line := line, character := character : Lsp.Position }))
-    , ("text", toJson text)
-    ] ++
-    match req.storeHandle? with
-    | some b => [("storeHandle", toJson b)]
-    | none => []
-  try
-    let (session, result, fileProgress?) ←
-      sendRequestJsonTracked session method params
-        (tracked := some (uri, docState.version))
-        (emitProgress? := emitProgress?)
-    let session := recordFileProgress session uri fileProgress?
-    updateSession session
-    pure (withFileProgress (sessionResult session (wrapResultHandle session result)) fileProgress?, false)
-  catch e =>
-    let msg := e.toString
-    if let some resp := decodeJsonRpcError msg then
-      pure (resp, false)
-    else
-      pure (reqError "internalError" msg, false)
-
-def handleRequestAtOp (req : Request) (session : Session) : M (Response × Bool) := do
-  let path ←
-    match req.requirePath with
-    | .ok path => pure path
-    | .error err => return (reqError "invalidParams" err, false)
-  let line ←
-    match req.requireLine with
-    | .ok line => pure line
-    | .error err => return (reqError "invalidParams" err, false)
-  let character ←
-    match req.requireCharacter with
-    | .ok character => pure character
-    | .error err => return (reqError "invalidParams" err, false)
-  let requestedMethod ←
-    match req.requireMethod with
-    | .ok method => pure method
-    | .error err => return (reqError "invalidParams" err, false)
-  let method ←
-    match requestAtMethod req.backend requestedMethod with
-    | .ok method => pure method
-    | .error err => return (reqError "invalidParams" err, false)
-  let extraParams ←
-    match req.requireParamsObject with
-    | .ok params => pure params
-    | .error err => return (reqError "invalidParams" err, false)
-  let session ← syncFile session path
-  let uri := sessionUri (← resolvePath session.root path)
-  let docState ← requireDocState session uri
-  let emitProgress? ← currentFileProgressSink?
-  let params := Json.mergeObj extraParams <| Json.mkObj [
-    ("textDocument", toJson ({ uri := uri : TextDocumentIdentifier })),
-    ("position", toJson ({ line := line, character := character : Lsp.Position }))
-  ]
-  try
-    let tracked :=
-      if session.backend == .lean then
-        some (uri, docState.version)
-      else
-        none
-    let (session, result, fileProgress?) ←
-      sendRequestJsonTracked session method params (tracked := tracked) (emitProgress? := emitProgress?)
-    let session :=
-      if session.backend == .lean then
-        recordFileProgress session uri fileProgress?
-      else
-        session
-    updateSession session
-    pure (withFileProgress (sessionResult session result) fileProgress?, false)
-  catch e =>
-    let msg := e.toString
-    if let some resp := decodeJsonRpcError msg then
-      pure (resp, false)
-    else
-      pure (reqError "internalError" msg, false)
 
 def handleDepsOp (req : Request) : M (Response × Bool) := do
   let path ←
@@ -1566,181 +1336,6 @@ def handleDepsOp (req : Request) : M (Response × Bool) := do
     let importClosure ← collectImportClosure state module.name
     let importedByClosure ← collectImportedByClosure state module.name
     pure (Response.success (depsPayload root module imports importedBy importClosure importedByClosure), false)
-  catch e =>
-    let msg := e.toString
-    if let some resp := decodeJsonRpcError msg then
-      pure (resp, false)
-    else
-      pure (reqError "internalError" msg, false)
-
-def handleSaveOleanOp (req : Request) (session : Session) : M (Response × Bool) := do
-  let path ←
-    match req.requirePath with
-    | .ok path => pure path
-    | .error err => return (reqError "invalidParams" err, false)
-  try
-    let leanCmd? := (← get).config.leanCmd?
-    let emitProgress? ← currentFileProgressSink?
-    let emitDiagnostic? ← currentDiagnosticSink?
-    let fullDiagnostics := req.fullDiagnostics?.getD false
-    let (session, payload, fileProgress?) ←
-      saveOlean leanCmd? session path emitProgress? fullDiagnostics emitDiagnostic?
-    let uri := sessionUri (← resolvePath session.root path)
-    let session := recordFileProgress session uri fileProgress?
-    updateSession session
-    pure (withFileProgress (sessionResult session payload) fileProgress?, false)
-  catch e =>
-    pure (responseForExceptionMessage e.toString, false)
-
-def handleGoalsOp (req : Request) (session : Session) : M (Response × Bool) := do
-  let path ←
-    match req.requirePath with
-    | .ok path => pure path
-    | .error err => return (reqError "invalidParams" err, false)
-  let line ←
-    match req.requireLine with
-    | .ok line => pure line
-    | .error err => return (reqError "invalidParams" err, false)
-  let character ←
-    match req.requireCharacter with
-    | .ok character => pure character
-    | .error err => return (reqError "invalidParams" err, false)
-  let method ←
-    match goalsMethod req.backend req.mode? with
-    | .ok method => pure method
-    | .error err => return (reqError "invalidParams" err, false)
-  let session ← syncFile session path
-  let uri := sessionUri (← resolvePath session.root path)
-  let docState ← requireDocState session uri
-  if req.backend == .lean && req.text?.isSome then
-    return (reqError "invalidParams" "lean goals does not accept speculative text; use lean-run-at for execution", false)
-  let position : Lsp.Position := { line := line, character := character }
-  let params :=
-    match req.backend with
-    | .lean =>
-        Json.mkObj [
-          ("textDocument",
-            toJson ({ uri := uri : TextDocumentIdentifier })),
-          ("position", toJson position)
-        ]
-    | .rocq =>
-        let fields :=
-          [
-          ("textDocument", toJson ({ uri := uri, version? := some docState.version : VersionedTextDocumentIdentifier })),
-          ("position", toJson position),
-          ("mode", toJson (goalModeValue req.mode?)),
-          ("compact", toJson (req.compact?.getD false)),
-          ("pp_format", toJson (goalPpFormatValue req.ppFormat?))
-          ] ++
-          match req.text? with
-          | some text => [("command", toJson text)]
-          | none => []
-        Json.mkObj fields
-  try
-    let tracked :=
-      if session.backend == .lean then
-        some (uri, docState.version)
-      else
-        none
-    let emitProgress? ← currentFileProgressSink?
-    let (session, result, fileProgress?) ←
-      sendRequestJsonTracked session method params (tracked := tracked) (emitProgress? := emitProgress?)
-    let session :=
-      if session.backend == .lean then
-        recordFileProgress session uri fileProgress?
-      else
-        session
-    updateSession session
-    pure (withFileProgress (sessionResult session result) fileProgress?, false)
-  catch e =>
-    let msg := e.toString
-    if let some resp := decodeJsonRpcError msg then
-      pure (resp, false)
-    else
-      pure (reqError "internalError" msg, false)
-
-def handleRunWithOp (req : Request) (session : Session) : M (Response × Bool) := do
-  let path ←
-    match req.requirePath with
-    | .ok path => pure path
-    | .error err => return (reqError "invalidParams" err, false)
-  let handle ←
-    match req.requireHandle with
-    | .ok handle => pure handle
-    | .error err => return (reqError "invalidParams" err, false)
-  let rawHandle ←
-    match unwrapHandle session handle with
-    | .ok raw => pure raw
-    | .error err => return (reqError "contentModified" err, false)
-  let text ←
-    match req.requireText with
-    | .ok text => pure text
-    | .error err => return (reqError "invalidParams" err, false)
-  let method ←
-    match runWithMethod req.backend with
-    | .ok method => pure method
-    | .error err => return (reqError "invalidParams" err, false)
-  let session ← syncFile session path
-  let uri := sessionUri (← resolvePath session.root path)
-  let docState ← requireDocState session uri
-  let emitProgress? ← currentFileProgressSink?
-  let params := Json.mkObj <|
-    [ ("textDocument", toJson ({ uri := uri : TextDocumentIdentifier }))
-    , ("handle", rawHandle)
-    , ("text", toJson text)
-    ] ++ (match req.storeHandle? with
-    | some b => [("storeHandle", toJson b)]
-    | none => []) ++
-    (match req.linear? with
-    | some b => [("linear", toJson b)]
-    | none => [])
-  try
-    let (session, result, fileProgress?) ←
-      sendRequestJsonTracked session method params
-        (tracked := some (uri, docState.version))
-        (emitProgress? := emitProgress?)
-    let session := recordFileProgress session uri fileProgress?
-    updateSession session
-    pure (withFileProgress (sessionResult session (wrapResultHandle session result)) fileProgress?, false)
-  catch e =>
-    let msg := e.toString
-    if let some resp := decodeJsonRpcError msg then
-      pure (resp, false)
-    else
-      pure (reqError "internalError" msg, false)
-
-def handleReleaseOp (req : Request) (session : Session) : M (Response × Bool) := do
-  let path ←
-    match req.requirePath with
-    | .ok path => pure path
-    | .error err => return (reqError "invalidParams" err, false)
-  let handle ←
-    match req.requireHandle with
-    | .ok handle => pure handle
-    | .error err => return (reqError "invalidParams" err, false)
-  let rawHandle ←
-    match unwrapHandle session handle with
-    | .ok raw => pure raw
-    | .error err => return (reqError "contentModified" err, false)
-  let method ←
-    match releaseMethod req.backend with
-    | .ok method => pure method
-    | .error err => return (reqError "invalidParams" err, false)
-  let session ← syncFile session path
-  let uri := sessionUri (← resolvePath session.root path)
-  let docState ← requireDocState session uri
-  let emitProgress? ← currentFileProgressSink?
-  let params := Json.mkObj [
-    ("textDocument", toJson ({ uri := uri : TextDocumentIdentifier })),
-    ("handle", rawHandle)
-  ]
-  try
-    let (session, result, fileProgress?) ←
-      sendRequestJsonTracked session method params
-        (tracked := some (uri, docState.version))
-        (emitProgress? := emitProgress?)
-    updateSession session
-    pure (withFileProgress (sessionResult session result) fileProgress?, false)
   catch e =>
     let msg := e.toString
     if let some resp := decodeJsonRpcError msg then
@@ -1824,7 +1419,10 @@ private def ensureRequestNotCancelled
   | none => pure ()
   | some cancelRef =>
       if ← cancelRef.get then
-        throw <| IO.userError "requestCancelled: client requested cancellation"
+        throwBrokerFailure {
+          code := .requestCancelled
+          message := "client requested cancellation"
+        }
 
 private def cancelMatchingPendingRequests
     (session : Session)
@@ -1908,9 +1506,62 @@ private def withCurrentMatchingSession
         if sameSessionIdentity current session then
           k current
         else
-          throw <| IO.userError "workerExited: broker backend session changed while request was in flight"
+          throwBrokerFailure {
+            code := .workerExited
+            message := "broker backend session changed while request was in flight"
+          }
     | none =>
-        throw <| IO.userError "workerExited: broker backend session exited while request was in flight"
+        throwBrokerFailure {
+          code := .workerExited
+          message := "broker backend session exited while request was in flight"
+        }
+
+private def sendCurrentSessionRequestDecode [FromJson α]
+    (server : ServerRuntime)
+    (session : Session)
+    (method : String)
+    (params : Json) : IO α := do
+  withCurrentMatchingSession server session fun current => do
+    let (current, payload) ← sendRequestJson current method params
+    updateSession current
+    decodeResponseAs payload
+
+private structure StartedTrackedBarrier where
+  session : Session
+  uri : DocumentUri
+  version : Nat
+  priorProgress? : Option SyncFileProgress := none
+  promise : IO.Promise (Except String PendingResult)
+
+private def startTrackedDiagnosticsBarrierIO
+    (server : ServerRuntime)
+    (req : Request)
+    (path : System.FilePath)
+    (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
+    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
+    IO StartedTrackedBarrier := do
+  server.withState do
+    let session ← ensureSession req.backend
+    let session ← syncFile session path
+    let uri := sessionUri (← resolvePath session.root path)
+    let docState ← requireDocState session uri
+    let params := toJson (WaitForDiagnosticsParams.mk uri docState.version)
+    let (session, promise) ←
+      startRequestJsonTrackedDetailed session "textDocument/waitForDiagnostics" params
+        (clientRequestId? := req.clientRequestId?)
+        (tracked := some (uri, docState.version))
+        (initialProgress? := docState.fileProgress?)
+        (emitProgress? := emitProgress?)
+        (fullDiagnostics := req.fullDiagnostics?.getD false)
+        (emitDiagnostic? := emitDiagnostic?)
+    updateSession session
+    pure {
+      session
+      uri
+      version := docState.version
+      priorProgress? := docState.fileProgress?
+      promise
+    }
 
 private def handleCloseWithoutSessionIO (req : Request) : IO (Response × Bool) := do
   let path ←
@@ -1973,6 +1624,16 @@ private structure SaveOleanCompleted where
   payload : Json
   fileProgress? : Option SyncFileProgress := none
 
+private def saveCompletedResponse
+    (saved : SaveOleanCompleted)
+    (closeAfter : Bool) : Response :=
+  let payload :=
+    if closeAfter then
+      Json.mkObj [("closed", toJson true), ("saved", saved.payload)]
+    else
+      saved.payload
+  withFileProgress (sessionResult saved.session payload) saved.fileProgress?
+
 private def fetchSyncSaveReadinessIO
     (server : ServerRuntime)
     (session : Session)
@@ -1986,10 +1647,7 @@ private def fetchSyncSaveReadinessIO
       : RunAt.Internal.SaveReadinessParams
     })
     let readiness : RunAt.Internal.SaveReadinessResult ←
-      withCurrentMatchingSession server session fun current => do
-        let (current, result) ← sendRequestJson current method params
-        updateSession current
-        decodeResponseAs result
+      sendCurrentSessionRequestDecode server session method params
     pure (syncSaveReadinessOfResult readiness)
 
 private def fetchDirectImportsIO
@@ -2002,37 +1660,11 @@ private def fetchDirectImportsIO
     : RunAt.Internal.DirectImportsParams
   })
   let result : RunAt.Internal.DirectImportsResult ←
-    withCurrentMatchingSession server session fun current => do
-      let (current, payload) ← sendRequestJson current method params
-      updateSession current
-      decodeResponseAs payload
+    sendCurrentSessionRequestDecode server session method params
   pure {
     version := result.version
     imports := result.imports
   }
-
-private def staleDirectDepHintJson (hint : StaleDirectDepHint) : Json :=
-  Json.mkObj [
-    ("module", toJson hint.module),
-    ("path", toJson hint.path),
-    ("needsSave", toJson hint.needsSave),
-    ("lastSyncSeq", toJson hint.lastSyncSeq),
-    ("lastSaveSeq", toJson hint.lastSaveSeq)
-  ]
-
-private def staleSyncErrorData
-    (targetPath : String)
-    (hints : Array StaleDirectDepHint) : Json :=
-  let saveHints := hints.filter (·.needsSave)
-  let recoveryPlan :=
-    (saveHints.map fun hint => s!"lean-beam save \"{hint.path}\"") ++
-    #[s!"lean-beam refresh \"{targetPath}\"", "lake build"]
-  Json.mkObj [
-    ("targetPath", toJson targetPath),
-    ("staleDirectDeps", Json.arr <| hints.map staleDirectDepHintJson),
-    ("saveDeps", Json.arr <| saveHints.map (fun hint => toJson hint.path)),
-    ("recoveryPlan", Json.arr <| recoveryPlan.map toJson)
-  ]
 
 private def staleSyncErrorResponse
     (message : String)
@@ -2049,29 +1681,20 @@ private def collectStaleDirectDepHintsIO
     pure #[]
   else
     let importsResult ← fetchDirectImportsIO server session uri
-    if importsResult.version != version then
-      pure #[]
-    else
-      withCurrentMatchingSession server session fun current => do
-        let targetLastSyncSeq :=
-          match current.docs.get? uri with
-          | some docState => docState.lastSyncSeq
-          | none => 0
-        pure <| importsResult.imports.foldl (init := #[]) fun hints moduleName =>
-          match current.moduleHistory.get? moduleName with
-          | some history =>
-              if history.lastSaveSeq > targetLastSyncSeq then
-                hints.push {
-                  module := moduleName
-                  path := history.path
-                  needsSave := history.lastSaveSeq < history.lastSyncSeq
-                  lastSyncSeq := history.lastSyncSeq
-                  lastSaveSeq := history.lastSaveSeq
-                }
-              else
-                hints
-          | none =>
-              hints
+    withCurrentMatchingSession server session fun current => do
+      let targetLastSyncSeq :=
+        match current.docs.get? uri with
+        | some docState => docState.lastSyncSeq
+        | none => 0
+      let history :=
+        current.moduleHistory.foldl (init := {}) fun acc moduleName moduleHistory =>
+          acc.insert moduleName {
+            path := moduleHistory.path
+            lastSyncSeq := moduleHistory.lastSyncSeq
+            lastSaveSeq := moduleHistory.lastSaveSeq
+            : ModuleHistorySnapshot
+          }
+      pure <| collectStaleDirectDepHints importsResult version targetLastSyncSeq history
 
 private def saveOleanIO
     (server : ServerRuntime)
@@ -2082,43 +1705,29 @@ private def saveOleanIO
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
     IO SaveOleanCompleted := do
   ensureRequestNotCancelled cancelRef?
-  let (session, uri, version, textHash, textTraceHash, textMTime, leanCmd?, priorProgress?, barrierPromise) ←
-    server.withState do
-      let session ← ensureSession req.backend
-      let session ← syncFile session path
-      let uri := sessionUri (← resolvePath session.root path)
-      let docState ← requireDocState session uri
-      let params := toJson (WaitForDiagnosticsParams.mk uri docState.version)
-      let (session, barrierPromise) ←
-        startRequestJsonTrackedDetailed session "textDocument/waitForDiagnostics" params
-          (clientRequestId? := req.clientRequestId?)
-          (tracked := some (uri, docState.version))
-          (initialProgress? := docState.fileProgress?)
-          (emitProgress? := emitProgress?)
-          (fullDiagnostics := req.fullDiagnostics?.getD false)
-          (emitDiagnostic? := emitDiagnostic?)
-      let leanCmd? := (← get).config.leanCmd?
-      updateSession session
-      pure (session, uri, docState.version, docState.textHash, docState.textTraceHash, docState.textMTime,
-        leanCmd?, docState.fileProgress?, barrierPromise)
-  propagatePendingCancellation session req.clientRequestId? cancelRef?
-  let barrier ← awaitPendingResult barrierPromise
-  let barrierProgress? := effectiveSyncBarrierProgress priorProgress? barrier.progress? barrier.diagnostics
+  let path ← resolvePath ((← server.withState do pure (← get).config.root)) path
+  let started ← startTrackedDiagnosticsBarrierIO server req path emitProgress? emitDiagnostic?
+  let (textHash, textTraceHash, textMTime, leanCmd?) ← server.withState do
+    let docState ← requireDocState started.session started.uri
+    pure (docState.textHash, docState.textTraceHash, docState.textMTime, (← get).config.leanCmd?)
+  propagatePendingCancellation started.session req.clientRequestId? cancelRef?
+  let barrier ← awaitPendingResult started.promise
+  let barrierProgress? := effectiveSyncBarrierProgress started.priorProgress? barrier.progress? barrier.diagnostics
   let (_ : WaitForDiagnostics) ← decodeResponseAs barrier.result
-  mergeFileProgressIfCurrent server session uri barrierProgress?
-  ensureSyncBarrierComplete uri version barrierProgress? barrier.diagnostics
+  mergeFileProgressIfCurrent server started.session started.uri barrierProgress?
+  ensureSyncBarrierComplete started.uri started.version barrierProgress? barrier.diagnostics
   ensureRequestNotCancelled cancelRef?
-  let spec ← mkLeanSaveSpec session.root path { hash := textTraceHash, mtime := textMTime } leanCmd?
-  let method ← IO.ofExcept <| saveArtifactsMethod session.backend
+  let spec ← mkLeanSaveSpec started.session.root path { hash := textTraceHash, mtime := textMTime } leanCmd?
+  let method ← IO.ofExcept <| saveArtifactsMethod started.session.backend
   let params := toJson ({
-    textDocument := ({ uri := uri : TextDocumentIdentifier })
+    textDocument := ({ uri := started.uri : TextDocumentIdentifier })
     oleanFile := spec.oleanPath.toString
     ileanFile := spec.ileanPath.toString
     cFile := spec.cPath.toString
     bcFile? := spec.bcPath?.map (fun bcPath => System.FilePath.toString bcPath)
     : RunAt.Internal.SaveArtifactsParams
   })
-  let (session, savePromise) ← withCurrentMatchingSession server session fun current => do
+  let (session, savePromise) ← withCurrentMatchingSession server started.session fun current => do
     let (current, savePromise) ← startRequestJsonTrackedDetailed current method params
       (clientRequestId? := req.clientRequestId?)
     updateSession current
@@ -2126,19 +1735,19 @@ private def saveOleanIO
   propagatePendingCancellation session req.clientRequestId? cancelRef?
   let savePending ← awaitPendingResult savePromise
   let saveResult : RunAt.Internal.SaveArtifactsResult ← decodeResponseAs savePending.result
-  if saveResult.version != version then
+  if saveResult.version != started.version then
     throw <| IO.userError
-      s!"save_olean saved version {saveResult.version}, expected synced version {version}"
+      s!"save_olean saved version {saveResult.version}, expected synced version {started.version}"
   if saveResult.textHash != textHash then
     throw <| IO.userError
       s!"save_olean saved text hash {saveResult.textHash}, expected synced hash {textHash}"
   writeLeanSaveTrace spec
   pure {
     session
-    uri
-    version
+    uri := started.uri
+    version := started.version
     spec
-    payload := leanSavePayload spec version textTraceHash
+    payload := leanSavePayload spec started.version textTraceHash
     fileProgress? := barrierProgress?
   }
 
@@ -2155,36 +1764,23 @@ private def handleSyncFileOpIO
       | .ok path => pure path
       | .error err => return (reqError "invalidParams" err, false)
     ensureRequestNotCancelled cancelRef?
-    let (session, uri, version, priorProgress?, promise) ← server.withState do
-      let session ← ensureSession req.backend
-      let session ← syncFile session path
-      let uri := sessionUri (← resolvePath session.root path)
-      let docState ← requireDocState session uri
-      let params := toJson (WaitForDiagnosticsParams.mk uri docState.version)
-      let (session, promise) ←
-        startRequestJsonTrackedDetailed session "textDocument/waitForDiagnostics" params
-          (clientRequestId? := req.clientRequestId?)
-          (tracked := some (uri, docState.version))
-          (initialProgress? := docState.fileProgress?)
-          (emitProgress? := emitProgress?)
-          (fullDiagnostics := req.fullDiagnostics?.getD false)
-          (emitDiagnostic? := emitDiagnostic?)
-      updateSession session
-      pure (session, uri, docState.version, docState.fileProgress?, promise)
-    propagatePendingCancellation session req.clientRequestId? cancelRef?
-    let pending ← awaitPendingResult promise
-    let fileProgress? := effectiveSyncBarrierProgress priorProgress? pending.progress? pending.diagnostics
-    mergeFileProgressIfCurrent server session uri fileProgress?
+    let path ← resolvePath ((← server.withState do pure (← get).config.root)) path
+    let started ← startTrackedDiagnosticsBarrierIO server req path emitProgress? emitDiagnostic?
+    propagatePendingCancellation started.session req.clientRequestId? cancelRef?
+    let pending ← awaitPendingResult started.promise
+    let fileProgress? := effectiveSyncBarrierProgress started.priorProgress? pending.progress? pending.diagnostics
+    mergeFileProgressIfCurrent server started.session started.uri fileProgress?
     if syncBarrierIncomplete? fileProgress? pending.diagnostics then
-      let hints ← collectStaleDirectDepHintsIO server session uri version
-      let message := syncBarrierIncompleteMessage uri version fileProgress?
-      let targetPath := trackedPathLabel session.root uri
+      let hints ← collectStaleDirectDepHintsIO server started.session started.uri started.version
+      let message := syncBarrierIncompleteMessage started.uri started.version fileProgress?
+      let targetPath := trackedPathLabel started.session.root started.uri
       return (staleSyncErrorResponse message targetPath hints, false)
     server.withState do
-      modifyCurrentSessionIfMatching session (fun current => markDocSyncedVersion current uri version)
-    let saveReadiness ← fetchSyncSaveReadinessIO server session uri
+      modifyCurrentSessionIfMatching started.session
+        (fun current => markDocSyncedVersion current started.uri started.version)
+    let saveReadiness ← fetchSyncSaveReadinessIO server started.session started.uri
     let payload := toJson ({
-      version := version
+      version := started.version
       errorCount := syncErrorCount pending.diagnostics
       warningCount := syncWarningCount pending.diagnostics
       stateErrorCount := saveReadiness.stateErrorCount
@@ -2193,7 +1789,7 @@ private def handleSyncFileOpIO
       saveReadyReason := saveReadiness.saveReadyReason
       : SyncFileResult
     })
-    pure (withFileProgress (sessionResult session payload) fileProgress?, false)
+    pure (withFileProgress (sessionResult started.session payload) fileProgress?, false)
   catch e =>
     pure (responseForExceptionMessage e.toString, false)
 
@@ -2212,8 +1808,7 @@ private def handleCloseOpIO
     try
       let saved ← saveOleanIO server req path cancelRef? emitProgress? emitDiagnostic?
       finalizeSavedDoc server saved.session saved.uri saved.version saved.spec true
-      let payload := Json.mkObj [("closed", toJson true), ("saved", saved.payload)]
-      pure (withFileProgress (sessionResult saved.session payload) saved.fileProgress?, false)
+      pure (saveCompletedResponse saved true, false)
     catch e =>
       pure (responseForExceptionMessage e.toString, false)
   else
@@ -2358,7 +1953,7 @@ private def handleSaveOleanOpIO
   try
     let saved ← saveOleanIO server req path cancelRef? emitProgress? emitDiagnostic?
     finalizeSavedDoc server saved.session saved.uri saved.version saved.spec false
-    pure (withFileProgress (sessionResult saved.session saved.payload) saved.fileProgress?, false)
+    pure (saveCompletedResponse saved false, false)
   catch e =>
     pure (responseForExceptionMessage e.toString, false)
 
@@ -2464,7 +2059,7 @@ private def handleRunWithOpIO
       let rawHandle ←
         match unwrapHandle session handle with
         | .ok raw => pure raw
-        | .error err => throw <| IO.userError s!"contentModified: {err}"
+        | .error err => throwBrokerFailure { code := .contentModified, message := err }
       let session ← syncFile session path
       let uri := sessionUri (← resolvePath session.root path)
       let docState ← requireDocState session uri
@@ -2518,7 +2113,7 @@ private def handleReleaseOpIO
       let rawHandle ←
         match unwrapHandle session handle with
         | .ok raw => pure raw
-        | .error err => throw <| IO.userError s!"contentModified: {err}"
+        | .error err => throwBrokerFailure { code := .contentModified, message := err }
       let session ← syncFile session path
       let uri := sessionUri (← resolvePath session.root path)
       let docState ← requireDocState session uri

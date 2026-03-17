@@ -1276,7 +1276,6 @@ private def usage : String :=
     "  beam [--root PATH] [--socket PATH | --port N] lean-run-with <path> <handle-json|-> <text...>",
     "  beam [--root PATH] [--socket PATH | --port N] lean-run-with-linear <path> <handle-json|-> <text...>",
     "  beam [--root PATH] [--socket PATH | --port N] lean-release <path> <handle-json|->",
-    "  beam [--root PATH] [--socket PATH | --port N] lean-deps <path>",
     "  beam [--root PATH] [--socket PATH | --port N] lean-sync <path> [+full]",
     "  beam [--root PATH] [--socket PATH | --port N] lean-refresh <path> [+full]",
     "  beam [--root PATH] [--socket PATH | --port N] lean-save <path> [+full]",
@@ -1314,7 +1313,7 @@ private def printExperimentalInfo (home : System.FilePath) : IO Unit := do
   let doc := home / "docs" / "experimental.md"
   IO.println s!"Experimental expert commands live in {doc}"
   IO.println "This is an unstable broker escape hatch, not part of the stable runAt contract."
-  IO.println "Current experimental entry point: lean-request-at"
+  IO.println "Current experimental entry points: lean-request-at, experimental deps"
 
 private partial def parseCliOptions (opts : CliOptions) : List String → IO CliOptions
   | [] => pure opts
@@ -1449,6 +1448,10 @@ private def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit :=
       throw <| IO.userError usage
   | "experimental" :: [] =>
       printExperimentalInfo home
+  | "experimental" :: "deps" :: path :: [] =>
+      let root ← projectRoot opts .lean
+      let (endpoint, _) ← ensureProjectDaemon home root .lean opts
+      callBroker root endpoint { op := .deps, backend := .lean, root? := some root.toString, path? := some path }
   | "bundle-install" :: toolchain :: [] =>
       let cacheRoot ←
         match ← IO.getEnv "BEAM_INSTALL_BUNDLE_DIR" with

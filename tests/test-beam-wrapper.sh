@@ -623,7 +623,7 @@ EOF
 
 (
   cd "$tmp3"
-  deps_out="$("$beam_script" lean-deps SaveSmoke/A.lean)"
+  deps_out="$("$beam_script" experimental deps SaveSmoke/A.lean)"
   if [ "$(RUNAT_JSON_PAYLOAD="$deps_out" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper lean-deps to succeed despite unrelated broken files" >&2
     printf '%s\n' "$deps_out" >&2

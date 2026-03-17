@@ -96,6 +96,9 @@ When `lean-beam sync` fails with `syncBarrierIncomplete`, the JSON error may inc
 `error.data.staleDirectDeps`, `error.data.saveDeps`, and `error.data.recoveryPlan` to suggest a
 cheap direct-import recovery path before falling back to `lake build`.
 
+Experimental expert commands such as `lean-beam request-at` and `lean-beam experimental deps` live
+in [docs/experimental.md](docs/experimental.md), not in the recommended default workflow.
+
 Detailed Lean workflow guidance lives in [skills/lean-beam/SKILL.md](skills/lean-beam/SKILL.md).
 The narrower Rocq surface lives in [skills/rocq-beam/SKILL.md](skills/rocq-beam/SKILL.md).
 
