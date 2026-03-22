@@ -745,35 +745,35 @@ EOF
   cd "$tmp3"
   deps_out="$("$beam_script" lean-deps SaveSmoke/A.lean)"
   if [ "$(RUNAT_JSON_PAYLOAD="$deps_out" read_json_text_field ok)" != "true" ]; then
-    echo "expected wrapper lean-deps to succeed despite unrelated broken files" >&2
+    echo "expected hidden lean-deps compatibility alias to succeed despite unrelated broken files" >&2
     printf '%s\n' "$deps_out" >&2
     exit 1
   fi
   if ! printf '%s\n' "$deps_out" | grep -q '"name": "SaveSmoke.B"'; then
-    echo "expected lean-deps imports to include SaveSmoke.B" >&2
+    echo "expected hidden lean-deps compatibility alias imports to include SaveSmoke.B" >&2
     printf '%s\n' "$deps_out" >&2
     exit 1
   fi
   if ! printf '%s\n' "$deps_out" | grep -q '"name": "SaveSmoke"'; then
-    echo "expected lean-deps importedBy to include SaveSmoke" >&2
+    echo "expected hidden lean-deps compatibility alias importedBy to include SaveSmoke" >&2
     printf '%s\n' "$deps_out" >&2
     exit 1
   fi
   stats_out="$("$beam_script" stats)"
   if [ "$(RUNAT_JSON_PAYLOAD="$stats_out" read_json_text_field result.sessions.lean.active)" != "false" ]; then
-    echo "expected lean-deps not to start a live Lean session" >&2
+    echo "expected hidden lean-deps compatibility alias not to start a live Lean session" >&2
     printf '%s\n' "$stats_out" >&2
     exit 1
   fi
   session_starts="$(RUNAT_JSON_PAYLOAD="$stats_out" read_json_text_field result.byBackend.lean.sessionStarts)"
   if [ "${session_starts:-0}" -ne 0 ]; then
-    echo "expected lean-deps not to start any Lean sessions" >&2
+    echo "expected hidden lean-deps compatibility alias not to start any Lean sessions" >&2
     printf '%s\n' "$stats_out" >&2
     exit 1
   fi
   deps_count="$(RUNAT_JSON_PAYLOAD="$stats_out" read_json_text_field result.byBackend.lean.ops.deps.count)"
   if [ "${deps_count:-0}" -lt 1 ]; then
-    echo "expected lean-deps stats to record at least one deps request" >&2
+    echo "expected hidden lean-deps compatibility alias stats to record at least one deps request" >&2
     printf '%s\n' "$stats_out" >&2
     exit 1
   fi

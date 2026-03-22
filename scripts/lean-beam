@@ -18,7 +18,6 @@ usage:
   lean-beam [--root PATH] [--socket PATH | --port N] run-with <path> <handle-json|-|--handle-file <path>> [--stdin | --text-file <path> | -- <text...> | <text...>]
   lean-beam [--root PATH] [--socket PATH | --port N] run-with-linear <path> <handle-json|-|--handle-file <path>> [--stdin | --text-file <path> | -- <text...> | <text...>]
   lean-beam [--root PATH] [--socket PATH | --port N] release <path> <handle-json|-|--handle-file <path>>
-  lean-beam [--root PATH] [--socket PATH | --port N] deps <path>
   lean-beam [--root PATH] [--socket PATH | --port N] sync <path> [+full]
   lean-beam [--root PATH] [--socket PATH | --port N] refresh <path> [+full]
   lean-beam [--root PATH] [--socket PATH | --port N] save <path> [+full]
