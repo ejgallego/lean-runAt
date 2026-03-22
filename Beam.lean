@@ -10,6 +10,7 @@ import Beam.Broker.Deps
 import Beam.Broker.LakeSave
 import Beam.Broker.Lean
 import Beam.Broker.Protocol
+import Beam.Broker.StaleDirectDeps
 import Beam.Broker.SyncSaveSupport
 import Beam.Broker.Transport
 import Beam.Broker.UnixNative

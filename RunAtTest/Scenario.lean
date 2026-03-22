@@ -7,7 +7,8 @@ Author: Emilio J. Gallego Arias
 import Lean
 import Lean.Data.Lsp.Ipc
 import RunAt.Protocol
-import RunAt.Internal.SaveArtifacts
+import RunAt.Internal.DirectImports
+import RunAt.Internal.SaveSupport
 import RunAtTest.TestHarness
 
 open Lean

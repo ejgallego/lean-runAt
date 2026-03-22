@@ -5,7 +5,7 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Lean.Server.Requests
-import RunAt.Internal.SaveArtifacts
+import RunAt.Internal.DirectImports
 import RunAt.Lib.Handles
 import RunAt.Lib.Support
 

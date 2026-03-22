@@ -5,6 +5,8 @@ Author: Emilio J. Gallego Arias
 -/
 
 import RunAtTest.Scenario
+import RunAt.Internal.DirectImports
+import RunAt.Internal.SaveSupport
 
 open Lean
 open RunAtTest.Scenario

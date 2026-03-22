@@ -11,13 +11,15 @@ import Lean.Data.Lsp.LanguageFeatures
 import Lean.Data.Lsp.Internal
 import Lean.Parser.Module
 import RunAt.Protocol
-import RunAt.Internal.SaveArtifacts
+import RunAt.Internal.DirectImports
+import RunAt.Internal.SaveSupport
 import Beam.Broker.Config
 import Beam.Broker.Protocol
 import Beam.Broker.Transport
 import Beam.Broker.Lean
 import Beam.Broker.Deps
 import Beam.Broker.LakeSave
+import Beam.Broker.StaleDirectDeps
 import Beam.Broker.SyncSaveSupport
 import Std.Sync.Mutex
 
