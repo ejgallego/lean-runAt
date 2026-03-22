@@ -362,27 +362,27 @@ fi
   literal_newline_err="$(mktemp /tmp/beam-wrapper-literal-newline-XXXXXX)"
   literal_newline_out="$("$beam_script" lean-run-at PositionEmptyLine.lean 1 0 'def _probe_tmp : Nat := 0\n' 2>"$literal_newline_err")"
   if [ "$(RUNAT_JSON_PAYLOAD="$literal_newline_out" read_json_text_field ok)" != "true" ]; then
-    echo "expected wrapper literal-\\n probe to stay a payload failure, not a transport error" >&2
+    printf '%s\n' "expected wrapper literal-\\n probe to stay a payload failure, not a transport error" >&2
     printf '%s\n' "$literal_newline_out" >&2
     cat "$literal_newline_err" >&2
     rm -f "$literal_newline_err"
     exit 1
   fi
   if [ "$(RUNAT_JSON_PAYLOAD="$literal_newline_out" read_json_text_field result.success)" != "false" ]; then
-    echo "expected wrapper literal-\\n probe to fail in the run-at payload" >&2
+    printf '%s\n' "expected wrapper literal-\\n probe to fail in the run-at payload" >&2
     printf '%s\n' "$literal_newline_out" >&2
     cat "$literal_newline_err" >&2
     rm -f "$literal_newline_err"
     exit 1
   fi
   if ! grep -q "literal characters '\\\\n'" "$literal_newline_err"; then
-    echo "expected wrapper literal-\\n probe to print a newline hint" >&2
+    printf '%s\n' "expected wrapper literal-\\n probe to print a newline hint" >&2
     cat "$literal_newline_err" >&2
     rm -f "$literal_newline_err"
     exit 1
   fi
   if ! grep -q 'probe failed inside Lean; the request completed and returned result.success=false' "$literal_newline_err"; then
-    echo "expected wrapper literal-\\n probe to distinguish a probe failure from a request failure" >&2
+    printf '%s\n' "expected wrapper literal-\\n probe to distinguish a probe failure from a request failure" >&2
     cat "$literal_newline_err" >&2
     rm -f "$literal_newline_err"
     exit 1

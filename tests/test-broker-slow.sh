@@ -38,6 +38,9 @@ mkdir -p "$tmp_env_root/home" "$tmp_env_root/codex" "$tmp_env_root/claude"
 
 toolchain="$(awk 'NR==1 {print $1}' lean-toolchain)"
 
+echo "[broker-slow] shell lint"
+bash scripts/lint-shell.sh > /dev/null
+
 echo "[broker-slow] build"
 lake build \
   RunAt:shared \
