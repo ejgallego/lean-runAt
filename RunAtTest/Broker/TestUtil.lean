@@ -57,10 +57,19 @@ def saveWarningFileText (marker : String) : String :=
 def writeSaveWarningFile (root : System.FilePath) (marker : String) : IO Unit := do
   IO.FS.writeFile (root / "SaveSmoke" / "B.lean") (saveWarningFileText marker)
 
-private def listProcesses : IO (Array (Nat × Nat × String)) := do
+private structure ProcessInfo where
+  pid : Nat
+  ppid : Nat
+  state : String
+  cmd : String
+
+private def isZombie (proc : ProcessInfo) : Bool :=
+  proc.state.contains "Z"
+
+private def listProcesses : IO (Array ProcessInfo) := do
   let out ← IO.Process.output {
     cmd := "ps"
-    args := #["-eo", "pid=,ppid=,args="]
+    args := #["-eo", "pid=,ppid=,state=,args="]
   }
   if out.exitCode != 0 then
     throw <| IO.userError s!"failed to list processes\n{out.stderr}"
@@ -71,20 +80,25 @@ private def listProcesses : IO (Array (Nat × Nat × String)) := do
         let part := part.trimAscii.toString
         if part.isEmpty then none else some part).toList
     match parts with
-    | pidText :: ppidText :: cmdParts =>
+    | pidText :: ppidText :: stateText :: cmdParts =>
         match pidText.toNat?, ppidText.toNat? with
         | some pid, some ppid =>
-            procs := procs.push (pid, ppid, String.intercalate " " cmdParts)
+            procs := procs.push {
+              pid
+              ppid
+              state := stateText
+              cmd := String.intercalate " " cmdParts
+            }
         | _, _ =>
             pure ()
     | _ =>
         pure ()
   pure procs
 
-private def requireUniquePid (label : String) (candidates : Array (Nat × Nat × String)) : IO Nat := do
+private def requireUniquePid (label : String) (candidates : Array ProcessInfo) : IO Nat := do
   match candidates.toList with
-  | [(pid, _, _)] =>
-      pure pid
+  | [proc] =>
+      pure proc.pid
   | [] =>
       throw <| IO.userError s!"expected one {label} process, found none"
   | _ =>
@@ -94,7 +108,7 @@ private partial def waitForPidGone (pid : Nat) (tries : Nat := 40) : IO Unit := 
   if tries == 0 then
     throw <| IO.userError s!"timed out waiting for pid {pid} to exit"
   let procs ← listProcesses
-  if procs.any (fun (currentPid, _, _) => currentPid == pid) then
+  if procs.any (fun proc => proc.pid == pid && !isZombie proc) then
     IO.sleep 100
     waitForPidGone pid (tries - 1)
   else
@@ -108,12 +122,12 @@ def killLeanServerForEndpoint
     | .tcp port => pure port
     | .unix _ => throw <| IO.userError "worker-death helper only supports tcp endpoints"
   let procs ← listProcesses
-  let brokerPid ← requireUniquePid "broker daemon" <| procs.filter fun (_, _, cmd) =>
-    cmd.contains "beam-daemon" &&
-      cmd.contains s!"--port {port.toNat}" &&
-      cmd.contains s!"--root {root.toString}"
-  let serverPid ← requireUniquePid "Lean server" <| procs.filter fun (_, ppid, cmd) =>
-    ppid == brokerPid && cmd.contains "--server"
+  let brokerPid ← requireUniquePid "broker daemon" <| procs.filter fun proc =>
+    proc.cmd.contains "beam-daemon" &&
+      proc.cmd.contains s!"--port {port.toNat}" &&
+      proc.cmd.contains s!"--root {root.toString}"
+  let serverPid ← requireUniquePid "Lean server" <| procs.filter fun proc =>
+    proc.ppid == brokerPid && proc.cmd.contains "--server"
   let out ← IO.Process.output {
     cmd := "kill"
     args := #["-9", toString serverPid]
