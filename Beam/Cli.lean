@@ -1451,7 +1451,6 @@ private def usage : String :=
     "  beam [--root PATH] [--socket PATH | --port N] lean-run-with <path> <handle-json|-|--handle-file <path>> [--stdin | --text-file <path> | -- <text...> | <text...>]",
     "  beam [--root PATH] [--socket PATH | --port N] lean-run-with-linear <path> <handle-json|-|--handle-file <path>> [--stdin | --text-file <path> | -- <text...> | <text...>]",
     "  beam [--root PATH] [--socket PATH | --port N] lean-release <path> <handle-json|-|--handle-file <path>>",
-    "  beam [--root PATH] [--socket PATH | --port N] lean-deps <path>",
     "  beam [--root PATH] [--socket PATH | --port N] lean-sync <path> [+full]",
     "  beam [--root PATH] [--socket PATH | --port N] lean-refresh <path> [+full]",
     "  beam [--root PATH] [--socket PATH | --port N] lean-save <path> [+full]",
@@ -1495,6 +1494,7 @@ private def printExperimentalInfo (home : System.FilePath) : IO Unit := do
   IO.println s!"Experimental expert commands live in {doc}"
   IO.println "This is an unstable broker escape hatch, not part of the stable runAt contract."
   IO.println "Current experimental entry point: lean-request-at"
+  IO.println "Unsupported or broken compatibility aliases may still exist for tests; they are not part of the supported or experimental surface."
 
 private def runLeanRunAt
     (home : System.FilePath)
