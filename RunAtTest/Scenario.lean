@@ -7,6 +7,7 @@ Author: Emilio J. Gallego Arias
 import Lean
 import Lean.Data.Lsp.Ipc
 import RunAt.Protocol
+import RunAt.Internal.SaveArtifacts
 import RunAtTest.TestHarness
 
 open Lean
@@ -36,6 +37,19 @@ structure RunWithSpec where
   text : String
   storeHandle : Bool := false
   linear : Bool := false
+  deriving Inhabited, Repr, ToJson
+
+structure GoalsSpec where
+  line : Nat
+  character : Nat
+  useAfter : Bool := true
+  deriving Inhabited, Repr, ToJson
+
+structure SaveArtifactsSpec where
+  oleanFile : String
+  ileanFile : String
+  cFile : String
+  bcFile? : Option String := none
   deriving Inhabited, Repr, ToJson
 
 instance : FromJson ChangeSpec where
@@ -140,6 +154,19 @@ private def sendRequest (method : String) (params : Json) : ScenarioM RequestID 
   Ipc.writeRequest ⟨id, method, params⟩
   modify fun s => { s with nextRequestNo := s.nextRequestNo + 1 }
   pure id
+
+private def registerRequest (requestID : RequestID) (params : Json) : ScenarioM ReqHandle := do
+  let s ← get
+  let req : ReqHandle := { id := s.nextReqHandle }
+  set {
+    s with
+    nextReqHandle := s.nextReqHandle + 1
+    requests := s.requests.insert req.id {
+      requestID
+      params
+    }
+  }
+  pure req
 
 private partial def waitForRequestOutcome (expectedID : RequestID) : ScenarioM RequestOutcome := do
   if let some outcome ← takeQueuedResponse? expectedID then
@@ -286,17 +313,7 @@ def sendRunAt (doc : DocHandle) (spec : SendRunAtSpec) : ScenarioM ReqHandle := 
     storeHandle? := if spec.storeHandle then some true else none
   }
   let requestID ← sendRequest RunAt.method (toJson params)
-  let s ← get
-  let req : ReqHandle := { id := s.nextReqHandle }
-  set {
-    s with
-    nextReqHandle := s.nextReqHandle + 1
-    requests := s.requests.insert req.id {
-      requestID
-      params := toJson params
-    }
-  }
-  pure req
+  registerRequest requestID (toJson params)
 
 def runWithHandle (doc : DocHandle) (handle : RunAt.Handle) (spec : RunWithSpec) : ScenarioM ReqHandle := do
   let docState ← getDocState doc
@@ -308,17 +325,45 @@ def runWithHandle (doc : DocHandle) (handle : RunAt.Handle) (spec : RunWithSpec)
     linear? := if spec.linear then some true else none
   }
   let requestID ← sendRequest RunAt.runWithMethod (toJson params)
-  let s ← get
-  let req : ReqHandle := { id := s.nextReqHandle }
-  set {
-    s with
-    nextReqHandle := s.nextReqHandle + 1
-    requests := s.requests.insert req.id {
-      requestID
-      params := toJson params
-    }
+  registerRequest requestID (toJson params)
+
+def sendGoals (doc : DocHandle) (spec : GoalsSpec) : ScenarioM ReqHandle := do
+  let docState ← getDocState doc
+  let params : RunAt.GoalsParams := {
+    textDocument := { uri := docState.uri }
+    position := { line := spec.line, character := spec.character }
   }
-  pure req
+  let method := if spec.useAfter then RunAt.goalsAfterMethod else RunAt.goalsPrevMethod
+  let requestID ← sendRequest method (toJson params)
+  registerRequest requestID (toJson params)
+
+def sendSaveArtifacts (doc : DocHandle) (spec : SaveArtifactsSpec) : ScenarioM ReqHandle := do
+  let docState ← getDocState doc
+  let params : RunAt.Internal.SaveArtifactsParams := {
+    textDocument := { uri := docState.uri }
+    oleanFile := spec.oleanFile
+    ileanFile := spec.ileanFile
+    cFile := spec.cFile
+    bcFile? := spec.bcFile?
+  }
+  let requestID ← sendRequest RunAt.Internal.saveArtifactsMethod (toJson params)
+  registerRequest requestID (toJson params)
+
+def sendSaveReadiness (doc : DocHandle) : ScenarioM ReqHandle := do
+  let docState ← getDocState doc
+  let params : RunAt.Internal.SaveReadinessParams := {
+    textDocument := { uri := docState.uri }
+  }
+  let requestID ← sendRequest RunAt.Internal.saveReadinessMethod (toJson params)
+  registerRequest requestID (toJson params)
+
+def sendDirectImports (doc : DocHandle) : ScenarioM ReqHandle := do
+  let docState ← getDocState doc
+  let params : RunAt.Internal.DirectImportsParams := {
+    textDocument := { uri := docState.uri }
+  }
+  let requestID ← sendRequest RunAt.Internal.directImportsMethod (toJson params)
+  registerRequest requestID (toJson params)
 
 def releaseHandle (doc : DocHandle) (handle : RunAt.Handle) : ScenarioM Unit := do
   let docState ← getDocState doc

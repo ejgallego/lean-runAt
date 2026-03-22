@@ -17,8 +17,10 @@ lake build \
   beam-daemon-smoke-test \
   beam-daemon-save-stream-test \
   beam-daemon-request-stream-test \
+  beam-daemon-startup-handshake-test \
   > /dev/null
 
 .lake/build/bin/beam-daemon-smoke-test > /dev/null
 .lake/build/bin/beam-daemon-save-stream-test > /dev/null
 .lake/build/bin/beam-daemon-request-stream-test > /dev/null
+.lake/build/bin/beam-daemon-startup-handshake-test > /dev/null

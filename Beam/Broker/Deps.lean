@@ -58,6 +58,102 @@ def normalizeModuleForPath (root path : System.FilePath) (uri : DocumentUri) (mo
       | some name => some { name, uri }
       | none => none
 
+structure DirectImportsQueryResult where
+  version : Nat
+  imports : Array String := #[]
+  deriving Inhabited
+
+structure ModuleHistorySnapshot where
+  path : String
+  lastSyncSeq : Nat := 0
+  lastSaveSeq : Nat := 0
+  deriving Inhabited
+
+structure StaleDirectDepHint where
+  module : String
+  path : String
+  needsSave : Bool
+  lastSyncSeq : Nat
+  lastSaveSeq : Nat
+  deriving Inhabited
+
+def moduleJson (root : System.FilePath) (module : LeanModule) : Json :=
+  let path? := workspacePath? root module.uri
+  Json.mkObj <|
+    [
+      ("name", toJson module.name),
+      ("uri", toJson module.uri),
+      ("workspace", toJson path?.isSome)
+    ] ++
+    match path? with
+    | some path => [("path", toJson path)]
+    | none => []
+
+def importJson (root : System.FilePath) (imp : LeanImport) : Json :=
+  Json.mkObj [
+    ("module", moduleJson root imp.module),
+    ("kind", toJson imp.kind)
+  ]
+
+def depsPayload (root : System.FilePath) (module : LeanModule)
+    (imports importedBy : Array LeanImport)
+    (importClosure importedByClosure : Std.TreeMap String LeanImport) : Json :=
+  Json.mkObj [
+    ("module", moduleJson root module),
+    ("imports", Json.arr <| imports.map (importJson root)),
+    ("importedBy", Json.arr <| importedBy.map (importJson root)),
+    ("importClosure", Json.arr <| importClosure.toList.map (fun (_, imp) => importJson root imp) |>.toArray),
+    ("importedByClosure", Json.arr <| importedByClosure.toList.map (fun (_, imp) => importJson root imp) |>.toArray)
+  ]
+
+def staleDirectDepHintJson (hint : StaleDirectDepHint) : Json :=
+  Json.mkObj [
+    ("module", toJson hint.module),
+    ("path", toJson hint.path),
+    ("needsSave", toJson hint.needsSave),
+    ("lastSyncSeq", toJson hint.lastSyncSeq),
+    ("lastSaveSeq", toJson hint.lastSaveSeq)
+  ]
+
+def staleSyncErrorData
+    (targetPath : String)
+    (hints : Array StaleDirectDepHint) : Json :=
+  let saveHints := hints.filter (·.needsSave)
+  let recoveryPlan :=
+    (saveHints.map fun hint => s!"lean-beam save \"{hint.path}\"") ++
+    #[s!"lean-beam refresh \"{targetPath}\"", "lake build"]
+  Json.mkObj [
+    ("targetPath", toJson targetPath),
+    ("staleDirectDeps", Json.arr <| hints.map staleDirectDepHintJson),
+    ("saveDeps", Json.arr <| saveHints.map (fun hint => toJson hint.path)),
+    ("recoveryPlan", Json.arr <| recoveryPlan.map toJson)
+  ]
+
+def collectStaleDirectDepHints
+    (importsResult : DirectImportsQueryResult)
+    (version : Nat)
+    (targetLastSyncSeq : Nat)
+    (history : Std.TreeMap String ModuleHistorySnapshot)
+    : Array StaleDirectDepHint :=
+  if importsResult.version != version then
+    #[]
+  else
+    importsResult.imports.foldl (init := #[]) fun hints moduleName =>
+      match history.get? moduleName with
+      | some moduleHistory =>
+          if moduleHistory.lastSaveSeq > targetLastSyncSeq then
+            hints.push {
+              module := moduleName
+              path := moduleHistory.path
+              needsSave := moduleHistory.lastSaveSeq < moduleHistory.lastSyncSeq
+              lastSyncSeq := moduleHistory.lastSyncSeq
+              lastSaveSeq := moduleHistory.lastSaveSeq
+            }
+          else
+            hints
+      | none =>
+          hints
+
 def importInfoToWorkspaceImport?
     (moduleIndex : Std.TreeMap String System.FilePath)
     (info : ImportInfo) : Option LeanImport := do

@@ -49,11 +49,17 @@ lean_exe "runAt-handle-api-test" where
 lean_exe "runAt-handle-restart-test" where
   root := `RunAtTest.Handle.RestartTest
 
+lean_exe "runAt-handle-lifecycle-test" where
+  root := `RunAtTest.Handle.LifecycleTest
+
 lean_exe "runAt-mcts-proof-search-test" where
   root := `RunAtTest.Scenario.MctsProofSearchTest
 
 lean_exe "runAt-nested-handle-failure-test" where
   root := `RunAtTest.Handle.NestedHandleFailureTest
+
+lean_exe "runAt-request-surface-test" where
+  root := `RunAtTest.RequestSurfaceTest
 
 lean_exe "runAt-search-workload-report" where
   root := `RunAtTest.Scenario.SearchWorkloadReport
@@ -77,6 +83,9 @@ lean_exe "beam-daemon-save-stream-test" where
 
 lean_exe "beam-daemon-request-stream-test" where
   root := `RunAtTest.Broker.RequestStreamContractTestMain
+
+lean_exe "beam-daemon-startup-handshake-test" where
+  root := `RunAtTest.Broker.StartupHandshakeTestMain
 
 lean_exe "beam-daemon-rocq-smoke-test" where
   root := `RunAtTest.Broker.RocqSmokeTest
