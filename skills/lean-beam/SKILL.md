@@ -85,12 +85,10 @@ Prefer the smallest command that matches the actual task:
   truly empty line only character `0` is valid
 - use `lean-beam run-at-handle` and then `lean-beam run-with` or `lean-beam run-with-linear` only when exact
   speculative continuation matters
-- for multiline text-carrying Lean probes (`lean-beam run-at`, `lean-beam run-at-handle`,
-  `lean-beam run-with`, `lean-beam run-with-linear`), prefer `--stdin` or `--text-file <path>`;
-  use `--` before text that itself starts with `--`
-- when `lean-beam run-with` or `lean-beam run-with-linear` takes the handle as `-`, stdin is already
-  consumed by the handle json, so prefer `--handle-file <path>` or use `--text-file` for the
-  continuation text
+- for multiline speculative text, prefer `--stdin` as the normal path; use `--text-file <path>`
+  when the text already lives in a file
+- for handle-based continuation, prefer `--handle-file <path>` as the normal path; deeper shell-loop
+  variants such as stdin handle piping live in the reference docs
 - do not expect one `lean-beam run-at` call to become the basis of the next one automatically
 - use `lean-beam sync` right after every real saved edit before the next speculative probe
 - use `lean-beam save` or `lean-beam close-save` only for a synced workspace module path such as
@@ -136,8 +134,6 @@ Use the right tool for each goal:
 - for handle-based commands, `--handle-file <path>` is the easiest way to avoid inlining handle json
 - if surface syntax depends on indentation or layout: pass the exact text you want Lean to parse, or
   make a real edit in the file instead of expecting the wrapper to fill whitespace for you
-- if shell quoting is suspect, set `BEAM_DEBUG_TEXT=1` to print the exact escaped text and UTF-8
-  bytes the wrapper is sending for text-carrying Lean probes
 
 Open [references/lean-run-at-semantics.md](references/lean-run-at-semantics.md) when the task needs
 concrete examples for:
@@ -145,6 +141,13 @@ concrete examples for:
 - full-file diagnostics after a speculative probe
 - chaining speculative state across multiple calls
 - indentation-sensitive or newline-sensitive probes on blank or layout-sensitive lines
+
+Open [references/workflow-details.md](references/workflow-details.md) when the task needs the shell-oriented
+details for:
+
+- `--text-file`, `--`, or stdin-handle piping variants
+- handle-file versus stdin-handle tradeoffs
+- debugging-oriented wrapper details instead of the normal path
 
 Open [references/commit-speculative.md](references/commit-speculative.md) when the task needs the
 current workflow for turning a good speculative probe into a real saved edit.
@@ -209,6 +212,7 @@ lean-beam goals-prev "Foo.lean" 10 2
 
 # try speculative Lean text without editing the file
 lean-beam run-at "Foo.lean" 10 2 "exact trivial"
+# for multiline probes, prefer stdin
 printf 'example : True := by\n  trivial\n' | lean-beam run-at "Foo.lean" 10 2 --stdin
 
 # after every real edit saved to disk, on that same workspace module path
@@ -249,7 +253,6 @@ Surface rule:
 - wrapper `stderr` is the human-facing diagnostic surface
 - wrapper `stderr` may distinguish request-level failures from a completed request whose payload
   failed inside Lean; use stdout JSON for machine decisions
-- `BEAM_DEBUG_TEXT=1` adds escaped text and UTF-8 byte dumps for text-carrying Lean probes on stderr
 - `beam-client request-stream ...` is the machine-facing streamed surface
 - do not parse wrapper `stderr` in tooling
 

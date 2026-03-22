@@ -80,7 +80,6 @@ lean-beam ensure
 lean-beam hover "Foo.lean" 10 2
 lean-beam goals-prev "Foo.lean" 10 2
 lean-beam run-at "Foo.lean" 10 2 "exact trivial"
-printf 'example : True := by\n  trivial\n' | lean-beam run-at "Foo.lean" 10 2 --stdin
 lean-beam sync "MyPkg/Sub/Module.lean"
 lean-beam refresh "MyPkg/Sub/Module.lean"
 lean-beam save "MyPkg/Sub/Module.lean"
@@ -96,25 +95,19 @@ Read those commands like this:
 Multiline and handle-oriented wrapper ergonomics:
 
 ```bash
-# avoid shell-escape mistakes for multiline probe text
+# for multiline probe text, prefer stdin
 printf 'example : True := by\n  trivial\n' | lean-beam run-at "Foo.lean" 10 2 --stdin
-lean-beam run-at "Foo.lean" 10 2 --text-file probe.lean
 
-# continuation from an explicit stored handle
+# for exact continuation, prefer a handle file
 lean-beam run-at-handle "Foo.lean" 10 2 "constructor"
 lean-beam run-with "Foo.lean" --handle-file handle.json "exact trivial"
-
-# when quoting is suspect, inspect exactly what the wrapper is sending
-BEAM_DEBUG_TEXT=1 lean-beam run-at "Foo.lean" 10 2 "exact trivial"
 ```
 
 Read those flags like this:
 
-- `--stdin` and `--text-file <path>` avoid shell quoting fragility for text-carrying Lean probes
-- `--` forces the remaining arguments to be treated as text, even if they start with `--`
-- `--handle-file <path>` avoids inlining handle JSON for `lean-beam run-with`, `lean-beam run-with-linear`, and `lean-beam release`
-- `BEAM_DEBUG_TEXT=1` prints escaped probe text and UTF-8 bytes to wrapper stderr for human debugging
-- if `lean-beam run-with` or `lean-beam run-with-linear` takes the handle as `-`, stdin is already used for the handle JSON, so prefer `--handle-file <path>` or `--text-file <path>` for the continuation text
+- `--stdin` is the normal multiline path for speculative Lean text
+- `--handle-file <path>` is the normal handle path for exact continuation and release
+- deeper shell-oriented variants and debugging knobs live in [skills/lean-beam/SKILL.md](skills/lean-beam/SKILL.md) and the linked reference docs
 
 When `lean-beam sync` fails with `syncBarrierIncomplete`, the JSON error may include
 `error.data.staleDirectDeps`, `error.data.saveDeps`, and `error.data.recoveryPlan` to suggest a
