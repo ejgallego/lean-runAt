@@ -10,14 +10,14 @@ usage() {
   cat <<'EOF' >&2
 usage:
   lean-beam [--root PATH] [--socket PATH | --port N] ensure [lean|rocq]
-  lean-beam [--root PATH] [--socket PATH | --port N] run-at <path> <line> <character> <text...>
-  lean-beam [--root PATH] [--socket PATH | --port N] run-at-handle <path> <line> <character> <text...>
+  lean-beam [--root PATH] [--socket PATH | --port N] run-at <path> <line> <character> [--stdin | --text-file <path> | -- <text...> | <text...>]
+  lean-beam [--root PATH] [--socket PATH | --port N] run-at-handle <path> <line> <character> [--stdin | --text-file <path> | -- <text...> | <text...>]
   lean-beam [--root PATH] [--socket PATH | --port N] hover <path> <line> <character>
   lean-beam [--root PATH] [--socket PATH | --port N] goals-after <path> <line> <character>
   lean-beam [--root PATH] [--socket PATH | --port N] goals-prev <path> <line> <character>
-  lean-beam [--root PATH] [--socket PATH | --port N] run-with <path> <handle-json|-> <text...>
-  lean-beam [--root PATH] [--socket PATH | --port N] run-with-linear <path> <handle-json|-> <text...>
-  lean-beam [--root PATH] [--socket PATH | --port N] release <path> <handle-json|->
+  lean-beam [--root PATH] [--socket PATH | --port N] run-with <path> <handle-json|-|--handle-file <path>> [--stdin | --text-file <path> | -- <text...> | <text...>]
+  lean-beam [--root PATH] [--socket PATH | --port N] run-with-linear <path> <handle-json|-|--handle-file <path>> [--stdin | --text-file <path> | -- <text...> | <text...>]
+  lean-beam [--root PATH] [--socket PATH | --port N] release <path> <handle-json|-|--handle-file <path>>
   lean-beam [--root PATH] [--socket PATH | --port N] deps <path>
   lean-beam [--root PATH] [--socket PATH | --port N] sync <path> [+full]
   lean-beam [--root PATH] [--socket PATH | --port N] refresh <path> [+full]
@@ -37,6 +37,9 @@ usage:
 notes:
   - lean-beam keeps the Lean wrapper surface primary, but also exposes Rocq goal probes and backend selection commands
   - common Rocq entry points are `lean-beam ensure rocq`, `lean-beam doctor rocq`, `lean-beam rocq-goals-after`, and `lean-beam rocq-goals-prev`
+  - for multiline text-carrying Lean probes, prefer `--stdin` or `--text-file <path>`; use `--` before text that starts with `--`
+  - for handle-based commands, use `--handle-file <path>` when you do not want to inline handle json
+  - set `BEAM_DEBUG_TEXT=1` to print the exact escaped text and UTF-8 bytes sent for text-carrying Lean probes
 EOF
 }
 

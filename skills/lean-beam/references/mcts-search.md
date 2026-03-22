@@ -39,8 +39,14 @@ Rules:
 lean-beam ensure
 root="$(lean-beam run-at-handle "Proofs.lean" 42 6 "constructor")"
 
-left="$(printf '%s\n' "$root" | lean-beam run-with "Proofs.lean" - "constructor")"
-right="$(printf '%s\n' "$root" | lean-beam run-with "Proofs.lean" - "aesop")"
+# writing handles to files avoids stdin conflicts in larger shell scripts
+printf '%s\n' "$root" > root.handle.json
+left="$(lean-beam run-with "Proofs.lean" --handle-file root.handle.json "constructor")"
+right="$(lean-beam run-with "Proofs.lean" --handle-file root.handle.json "aesop")"
+
+# stdin handle flow remains supported too
+left_pipe="$(printf '%s\n' "$root" | lean-beam run-with "Proofs.lean" - "constructor")"
+right_pipe="$(printf '%s\n' "$root" | lean-beam run-with "Proofs.lean" - "aesop")"
 
 printf '%s\n' "$left" | lean-beam release "Proofs.lean" -
 printf '%s\n' "$right" | lean-beam release "Proofs.lean" -
@@ -53,9 +59,18 @@ Use this when you want to explore multiple children from the same preserved basi
 ```bash
 lean-beam ensure
 root="$(lean-beam run-at-handle "Proofs.lean" 42 6 "constructor")"
-step1="$(printf '%s\n' "$root" | lean-beam run-with-linear "Proofs.lean" - "constructor")"
-step2="$(printf '%s\n' "$step1" | lean-beam run-with-linear "Proofs.lean" - "exact trivial")"
-printf '%s\n' "$step2" | lean-beam run-with-linear "Proofs.lean" - "exact trivial"
+# file-backed handles are often easier in longer shell loops
+printf '%s\n' "$root" > root.handle.json
+step1="$(lean-beam run-with-linear "Proofs.lean" --handle-file root.handle.json "constructor")"
+printf '%s\n' "$step1" > step1.handle.json
+step2="$(lean-beam run-with-linear "Proofs.lean" --handle-file step1.handle.json "exact trivial")"
+printf '%s\n' "$step2" > step2.handle.json
+lean-beam run-with-linear "Proofs.lean" --handle-file step2.handle.json "exact trivial"
+
+# stdin handle flow remains supported when you prefer pipes
+step1_pipe="$(printf '%s\n' "$root" | lean-beam run-with-linear "Proofs.lean" - "constructor")"
+step2_pipe="$(printf '%s\n' "$step1_pipe" | lean-beam run-with-linear "Proofs.lean" - "exact trivial")"
+printf '%s\n' "$step2_pipe" | lean-beam run-with-linear "Proofs.lean" - "exact trivial"
 ```
 
 Use this when you want one evolving playout path instead of a preserved branch point.

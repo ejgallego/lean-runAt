@@ -7,6 +7,7 @@ Author: Emilio J. Gallego Arias
 import Lean
 import Beam.Broker.Client
 import Beam.Broker.Transport
+import RunAt.Protocol
 import Std.Internal.UV.Signal
 
 open Lean
@@ -73,6 +74,10 @@ private structure CliOptions where
   requestedSocket? : Option System.FilePath := none
   args : List String := []
 
+private structure ParsedTextArg where
+  text? : Option String := none
+  source : String := "argv"
+
 private def parseNatArg (name value : String) : IO Nat := do
   let some n := value.toNat?
     | throw <| IO.userError s!"invalid {name} '{value}'"
@@ -80,6 +85,35 @@ private def parseNatArg (name value : String) : IO Nat := do
 
 private def joinTextArgs (args : List String) : Option String :=
   if args.isEmpty then none else some <| String.intercalate " " args
+
+private def hasSubstring (text needle : String) : Bool :=
+  match text.splitOn needle with
+  | [_] => false
+  | _ => true
+
+private def textArgUsage (cmdHead : String) : String :=
+  s!"usage: beam [--root PATH] [--socket PATH | --port N] {cmdHead} [--stdin | --text-file <path> | -- <text...> | <text...>]"
+
+private def textArgReadsStdin (args : List String) : Bool :=
+  match args with
+  | ["--stdin"] => true
+  | _ => false
+
+private def parseTextArg (cmdHead : String) (args : List String) : IO ParsedTextArg := do
+  match args with
+  | [] => pure {}
+  | ["--stdin"] =>
+      pure { text? := some (← (← IO.getStdin).readToEnd), source := "stdin" }
+  | ["--text-file", path] =>
+      pure { text? := some (← IO.FS.readFile (System.FilePath.mk path)), source := s!"text-file:{path}" }
+  | "--" :: rest =>
+      pure { text? := joinTextArgs rest, source := "argv" }
+  | "--stdin" :: _ =>
+      throw <| IO.userError (textArgUsage cmdHead)
+  | "--text-file" :: _ =>
+      throw <| IO.userError (textArgUsage cmdHead)
+  | _ =>
+      pure { text? := joinTextArgs args, source := "argv" }
 
 private def parseJsonText (label text : String) : IO Json := do
   match Json.parse text with
@@ -94,6 +128,14 @@ private def parseJsonArg (label arg : String) : IO Json := do
       pure arg
   parseJsonText label raw
 
+private def handleArgUsage (cmdHead : String) : String :=
+  s!"usage: beam [--root PATH] [--socket PATH | --port N] {cmdHead} <handle-json|-|--handle-file <path>>"
+
+private def handleArgReadsStdin (args : List String) : Bool :=
+  match args with
+  | "-" :: _ => true
+  | _ => false
+
 private def extractHandleJson (json : Json) : Json :=
   match json.getObjVal? "handle" with
   | .ok handle => handle
@@ -105,17 +147,31 @@ private def extractHandleJson (json : Json) : Json :=
           | .error _ => json
       | .error _ => json
 
+private def parseHandleText (raw : String) : IO Handle := do
+  let json ← parseJsonText "handle json" raw
+  match fromJson? (extractHandleJson json) with
+  | .ok handle => pure handle
+  | .error err =>
+      throw <| IO.userError s!"invalid handle payload: {err}"
+
 private def parseHandleArg (arg : String) : IO Handle := do
   let raw ←
     if arg == "-" then
       (← IO.getStdin).readToEnd
     else
       pure arg
-  let json ← parseJsonText "handle json" raw
-  match fromJson? (extractHandleJson json) with
-  | .ok handle => pure handle
-  | .error err =>
-      throw <| IO.userError s!"invalid handle payload: {err}"
+  parseHandleText raw
+
+private def parseHandleInput (cmdHead : String) (args : List String) : IO (Handle × List String) := do
+  match args with
+  | [] =>
+      throw <| IO.userError (handleArgUsage cmdHead)
+  | "--handle-file" :: path :: rest =>
+      pure ((← parseHandleText (← IO.FS.readFile (System.FilePath.mk path))), rest)
+  | "--handle-file" :: _ =>
+      throw <| IO.userError (handleArgUsage cmdHead)
+  | arg :: rest =>
+      pure ((← parseHandleArg arg), rest)
 
 private def parseLeanSyncArgs (args : List String) : IO Bool := do
   match args with
@@ -281,6 +337,32 @@ private def ensureSupportedLeanToolchain (home : System.FilePath) (toolchain : S
 
 private def boolText (value : Bool) : String :=
   if value then "true" else "false"
+
+private def parseEnvFlag (raw : String) : Bool :=
+  let normalized := raw.trimAscii.toString.toLower
+  !(normalized.isEmpty || normalized == "0" || normalized == "false" || normalized == "no")
+
+private def envFlag? (name : String) : IO (Option Bool) := do
+  match ← IO.getEnv name with
+  | some raw => pure <| some (parseEnvFlag raw)
+  | none => pure none
+
+private def hexDigit (n : Nat) : Char :=
+  if n < 10 then
+    Char.ofNat (48 + n)
+  else
+    Char.ofNat (87 + n)
+
+private def hexByte (byte : UInt8) : String :=
+  let n := byte.toNat
+  String.singleton (hexDigit (n / 16)) ++ String.singleton (hexDigit (n % 16))
+
+private def utf8Hex (bytes : ByteArray) : String :=
+  String.intercalate " " <| Id.run do
+    let mut parts : Array String := #[]
+    for byte in bytes do
+      parts := parts.push (hexByte byte)
+    return parts.toList
 
 private def bundleWorkspaceFor (bundleDir : System.FilePath) : System.FilePath :=
   bundleDir / "workspace"
@@ -1019,6 +1101,62 @@ private def annotateRunatMessage (clientRequestId? : Option String) (msg : Strin
   | none =>
       msg
 
+private def debugTextEnabled : IO Bool := do
+  pure <| (← envFlag? "BEAM_DEBUG_TEXT").getD false
+
+private def maybeEmitTextDebug (clientRequestId? : Option String) (action source : String) (text? : Option String) : IO Unit := do
+  if !(← debugTextEnabled) then
+    pure ()
+  else
+    match text? with
+    | none => pure ()
+    | some text =>
+        let bytes := text.toUTF8
+        let containsLiteralBackslashN := hasSubstring text "\\n"
+        IO.eprintln <| annotateRunatMessage clientRequestId?
+          s!"beam: debug text for {action}: source={source} utf8Bytes={bytes.size} containsNewline={boolText (text.contains '\n')} containsLiteralBackslashN={boolText containsLiteralBackslashN}"
+        IO.eprintln <| annotateRunatMessage clientRequestId?
+          s!"beam: debug text escaped={(Json.str text).compress}"
+        IO.eprintln <| annotateRunatMessage clientRequestId?
+          s!"beam: debug text utf8Hex={utf8Hex bytes}"
+
+private def decodeRunAtResult? (resp : Response) : Option RunAt.Result :=
+  match resp.result? with
+  | none => none
+  | some result =>
+      match fromJson? result with
+      | .ok payload => some payload
+      | .error _ => none
+
+private def responseErrorSummary? (action failureBoundary : String) (resp : Response) : Option String :=
+  resp.error?.map fun err =>
+    s!"beam: {action} request failed {failureBoundary} ({err.code}): {err.message}"
+
+private def runAtPayloadSummary? (action noun : String) (resp : Response) : Option String :=
+  match decodeRunAtResult? resp with
+  | some result =>
+      if result.success then
+        none
+      else
+        some s!"beam: {action} {noun} failed inside Lean; the request completed and returned result.success=false"
+  | none =>
+      none
+
+private def maybeEmitLiteralBackslashNewlineHint (req : Request) (resp : Response) : IO Unit := do
+  match req.op with
+  | .runAt | .runWith =>
+      match req.text?, decodeRunAtResult? resp with
+      | some text, some result =>
+          if !result.success && hasSubstring text "\\n" && !text.contains '\n' then
+            IO.eprintln <| annotateRunatMessage req.clientRequestId?
+              "beam: hint: the probe text contains the literal characters '\\n'; if you meant a real newline, use --stdin or --text-file."
+          else
+            pure ()
+      | _, _ =>
+          pure ()
+  | _ =>
+      pure ()
+
 private def withBrokerErrorContext {α} (root : System.FilePath) (action : IO α) : IO α := do
   try
     action
@@ -1057,20 +1195,22 @@ private def syncFileProgressSuffix (progress? : Option SyncFileProgress) : Strin
       s!", fp updates={progress.updates}{doneSuffix}"
 
 private structure BrokerWaitSpec where
+  action : String
   startMsg : String
   progressMsg : SyncFileProgress → String
   stillWaitingMsg : Nat → String
   completeMsg : Response → String
+  failureBoundary : String := "before the request completed"
+  responseNote? : Response → Option String := fun _ => none
 
 private structure InterruptWatcher where
   signal : Std.Internal.UV.Signal
   task : Task (Except IO.Error Unit)
 
 private def progressEnabled : IO Bool := do
-  match ← IO.getEnv "BEAM_PROGRESS" with
-  | some raw =>
-      let normalized := raw.trimAscii.toString.toLower
-      pure <| !(normalized.isEmpty || normalized == "0" || normalized == "false" || normalized == "no")
+  match ← envFlag? "BEAM_PROGRESS" with
+  | some enabled =>
+      pure enabled
   | none =>
       (← IO.getStderr).isTty
 
@@ -1130,6 +1270,7 @@ private def awaitBrokerResponse
 
 private def syncWaitSpec (path : String) : BrokerWaitSpec :=
   {
+    action := "lean-sync"
     startMsg := s!"beam: syncing {path} and waiting for Lean diagnostics"
     progressMsg := fun progress => s!"beam: sync progress for {path}{syncFileProgressSuffix (some progress)}"
     stillWaitingMsg := fun seconds => s!"beam: still syncing {path} ({seconds}s)"
@@ -1142,15 +1283,17 @@ private def syncWaitSpec (path : String) : BrokerWaitSpec :=
               ""
             else
               s!", saveReady=false ({result.saveReadyReason}, " ++
-                s!"stateErrorCount={result.stateErrorCount}, " ++
+              s!"stateErrorCount={result.stateErrorCount}, " ++
                 s!"stateCommandErrorCount={result.stateCommandErrorCount})"
           s!"beam: sync complete for {path} (version {result.version}{suffix}{readinessSuffix})"
       | none =>
-          s!"beam: sync complete for {path}"
+        s!"beam: sync complete for {path}"
+    failureBoundary := "before a complete diagnostics barrier was available"
   }
 
 private def refreshWaitSpec (path : String) : BrokerWaitSpec :=
   {
+    action := "lean-refresh"
     startMsg := s!"beam: refreshing {path} by closing and resyncing"
     progressMsg := fun progress => s!"beam: refresh progress for {path}{syncFileProgressSuffix (some progress)}"
     stillWaitingMsg := fun seconds => s!"beam: still refreshing {path} ({seconds}s)"
@@ -1163,33 +1306,39 @@ private def refreshWaitSpec (path : String) : BrokerWaitSpec :=
               ""
             else
               s!", saveReady=false ({result.saveReadyReason}, " ++
-                s!"stateErrorCount={result.stateErrorCount}, " ++
+              s!"stateErrorCount={result.stateErrorCount}, " ++
                 s!"stateCommandErrorCount={result.stateCommandErrorCount})"
           s!"beam: refresh complete for {path} (version {result.version}{suffix}{readinessSuffix})"
       | none =>
-          s!"beam: refresh complete for {path}"
+        s!"beam: refresh complete for {path}"
+    failureBoundary := "before a complete diagnostics barrier was available"
   }
 
-private def leanRunAtWaitSpec (path : String) (line character : Nat) : BrokerWaitSpec :=
+private def leanRunAtWaitSpec (action path : String) (line character : Nat) : BrokerWaitSpec :=
   let pos := s!"{path}:{line}:{character}"
   {
-    startMsg := s!"beam: running lean-run-at on {pos} and waiting for a ready Lean snapshot"
+    action := action
+    startMsg := s!"beam: running {action} on {pos} and waiting for a ready Lean snapshot"
     progressMsg := fun progress => s!"beam: snapshot progress for {pos}{syncFileProgressSuffix (some progress)}"
     stillWaitingMsg := fun seconds =>
-      s!"beam: still waiting for a ready Lean snapshot for {pos} ({seconds}s)"
+      s!"beam: still waiting for a ready Lean snapshot for {action} on {pos} ({seconds}s)"
     completeMsg := fun resp =>
-      s!"beam: lean-run-at complete for {pos}{syncFileProgressSuffix (responseFileProgress? resp)}"
+      s!"beam: {action} complete for {pos}{syncFileProgressSuffix (responseFileProgress? resp)}"
+    failureBoundary := "before probe execution"
+    responseNote? := runAtPayloadSummary? action "probe"
   }
 
 private def leanHoverWaitSpec (path : String) (line character : Nat) : BrokerWaitSpec :=
   let pos := s!"{path}:{line}:{character}"
   {
+    action := "lean-hover"
     startMsg := s!"beam: running lean-hover on {pos} and waiting for a ready Lean snapshot"
     progressMsg := fun progress => s!"beam: hover progress for {pos}{syncFileProgressSuffix (some progress)}"
     stillWaitingMsg := fun seconds =>
       s!"beam: still waiting for lean-hover on {pos} ({seconds}s)"
     completeMsg := fun resp =>
       s!"beam: lean-hover complete for {pos}{syncFileProgressSuffix (responseFileProgress? resp)}"
+    failureBoundary := "before hover data was available"
   }
 
 private def leanGoalsWaitSpec (path : String) (line character : Nat) (mode : GoalMode) : BrokerWaitSpec :=
@@ -1199,44 +1348,53 @@ private def leanGoalsWaitSpec (path : String) (line character : Nat) (mode : Goa
     | .after => "lean-goals-after"
     | .prev => "lean-goals-prev"
   {
+    action := action
     startMsg := s!"beam: running {action} on {pos} and waiting for a ready Lean snapshot"
     progressMsg := fun progress => s!"beam: goals progress for {pos}{syncFileProgressSuffix (some progress)}"
     stillWaitingMsg := fun seconds =>
       s!"beam: still waiting for {action} on {pos} ({seconds}s)"
     completeMsg := fun resp =>
       s!"beam: {action} complete for {pos}{syncFileProgressSuffix (responseFileProgress? resp)}"
+    failureBoundary := "before goal inspection completed"
   }
 
 private def leanRequestAtWaitSpec (path : String) (line character : Nat) (method : String) : BrokerWaitSpec :=
   let pos := s!"{path}:{line}:{character}"
   {
+    action := s!"lean-request-at {method}"
     startMsg := s!"beam: forwarding experimental {method} at {pos} and waiting for a ready Lean snapshot"
     progressMsg := fun progress => s!"beam: request-at progress for {pos}{syncFileProgressSuffix (some progress)}"
     stillWaitingMsg := fun seconds =>
       s!"beam: still waiting for experimental {method} at {pos} ({seconds}s)"
     completeMsg := fun resp =>
       s!"beam: experimental {method} complete for {pos}{syncFileProgressSuffix (responseFileProgress? resp)}"
+    failureBoundary := s!"before experimental {method} completed"
   }
 
 private def leanRunWithWaitSpec (path : String) (linear : Bool := false) : BrokerWaitSpec :=
   let action := if linear then "lean-run-with-linear" else "lean-run-with"
   {
+    action := action
     startMsg := s!"beam: running {action} on {path} and waiting for a ready Lean snapshot"
     progressMsg := fun progress => s!"beam: {action} progress for {path}{syncFileProgressSuffix (some progress)}"
     stillWaitingMsg := fun seconds =>
       s!"beam: still waiting for {action} on {path} ({seconds}s)"
     completeMsg := fun resp =>
       s!"beam: {action} complete for {path}{syncFileProgressSuffix (responseFileProgress? resp)}"
+    failureBoundary := "before speculative continuation completed"
+    responseNote? := runAtPayloadSummary? action "continuation"
   }
 
 private def leanSaveWaitSpec (path : String) (closeAfter : Bool := false) : BrokerWaitSpec :=
   let action := if closeAfter then "lean-close-save" else "lean-save"
   let verb := if closeAfter then "closing and saving" else "saving"
   {
+    action := action
     startMsg := s!"beam: {verb} {path} and waiting for Lean diagnostics/artifacts"
     progressMsg := fun progress => s!"beam: {action} progress for {path}{syncFileProgressSuffix (some progress)}"
     stillWaitingMsg := fun seconds => s!"beam: still waiting for {action} on {path} ({seconds}s)"
     completeMsg := fun resp => s!"beam: {action} complete for {path}{syncFileProgressSuffix (responseFileProgress? resp)}"
+    failureBoundary := "before save artifacts were finalized"
   }
 
 private def callBrokerWithProgress
@@ -1260,6 +1418,17 @@ private def callBrokerWithProgress
         awaitBrokerResponse task endpoint req spec
       else
         sendRequestWithCallbacks endpoint req callbacks
+    match responseErrorSummary? spec.action spec.failureBoundary resp with
+    | some note =>
+        IO.eprintln <| annotateRunatMessage req.clientRequestId? note
+    | none =>
+        pure ()
+    match spec.responseNote? resp with
+    | some note =>
+        IO.eprintln <| annotateRunatMessage req.clientRequestId? note
+    | none =>
+        pure ()
+    maybeEmitLiteralBackslashNewlineHint req resp
     printResponse resp
     failOnError resp
 
@@ -1268,14 +1437,14 @@ private def usage : String :=
     "usage:",
     "  beam [--root PATH] [--socket PATH | --port N] ensure lean|rocq",
     "  beam [--root PATH] cancel <request-id>",
-    "  beam [--root PATH] [--socket PATH | --port N] lean-run-at <path> <line> <character> <text...>",
-    "  beam [--root PATH] [--socket PATH | --port N] lean-run-at-handle <path> <line> <character> <text...>",
+    "  beam [--root PATH] [--socket PATH | --port N] lean-run-at <path> <line> <character> [--stdin | --text-file <path> | -- <text...> | <text...>]",
+    "  beam [--root PATH] [--socket PATH | --port N] lean-run-at-handle <path> <line> <character> [--stdin | --text-file <path> | -- <text...> | <text...>]",
     "  beam [--root PATH] [--socket PATH | --port N] lean-hover <path> <line> <character>",
     "  beam [--root PATH] [--socket PATH | --port N] lean-goals-after <path> <line> <character>",
     "  beam [--root PATH] [--socket PATH | --port N] lean-goals-prev <path> <line> <character>",
-    "  beam [--root PATH] [--socket PATH | --port N] lean-run-with <path> <handle-json|-> <text...>",
-    "  beam [--root PATH] [--socket PATH | --port N] lean-run-with-linear <path> <handle-json|-> <text...>",
-    "  beam [--root PATH] [--socket PATH | --port N] lean-release <path> <handle-json|->",
+    "  beam [--root PATH] [--socket PATH | --port N] lean-run-with <path> <handle-json|-|--handle-file <path>> [--stdin | --text-file <path> | -- <text...> | <text...>]",
+    "  beam [--root PATH] [--socket PATH | --port N] lean-run-with-linear <path> <handle-json|-|--handle-file <path>> [--stdin | --text-file <path> | -- <text...> | <text...>]",
+    "  beam [--root PATH] [--socket PATH | --port N] lean-release <path> <handle-json|-|--handle-file <path>>",
     "  beam [--root PATH] [--socket PATH | --port N] lean-deps <path>",
     "  beam [--root PATH] [--socket PATH | --port N] lean-sync <path> [+full]",
     "  beam [--root PATH] [--socket PATH | --port N] lean-refresh <path> [+full]",
@@ -1300,10 +1469,15 @@ private def usage : String :=
     "Separate lean-run-at calls are independent probes on the current saved file snapshot.",
     "For exact speculative chaining, use lean-run-at-handle and then lean-run-with /",
     "lean-run-with-linear.",
+    "For multiline text-carrying Lean probes, prefer --stdin or --text-file <path>; use -- before",
+    "text that itself starts with --.",
+    "For handle-based commands, use --handle-file <path> when you do not want to inline handle json.",
     "For lean-sync / lean-refresh / lean-save / lean-close-save, diagnostics always stream for the",
     "current request;",
     "default is errors only, and +full widens the stream to warnings, info, and hints.",
     "Wrapper diagnostics and progress are human-facing on stderr.",
+    "Set BEAM_DEBUG_TEXT=1 to print the exact escaped text and UTF-8 bytes sent for text-carrying",
+    "Lean probe requests.",
     "For machine-readable streaming diagnostics/progress, use beam-client request-stream.",
     "",
     "Expert-only experimental commands are documented in docs/experimental.md.",
@@ -1315,6 +1489,81 @@ private def printExperimentalInfo (home : System.FilePath) : IO Unit := do
   IO.println s!"Experimental expert commands live in {doc}"
   IO.println "This is an unstable broker escape hatch, not part of the stable runAt contract."
   IO.println "Current experimental entry point: lean-request-at"
+
+private def runLeanRunAt
+    (home : System.FilePath)
+    (opts : CliOptions)
+    (action path lineText characterText : String)
+    (textArgs : List String)
+    (storeHandle : Bool := false) : IO Unit := do
+  let root ← projectRoot opts .lean
+  let (endpoint, _) ← ensureProjectDaemon home root .lean opts
+  let line ← parseNatArg "line" lineText
+  let character ← parseNatArg "character" characterText
+  let parsedText ← parseTextArg s!"{action} <path> <line> <character>" textArgs
+  let req ← withEnvClientRequestId {
+    op := .runAt
+    backend := .lean
+    root? := some root.toString
+    path? := some path
+    line? := some line
+    character? := some character
+    text? := parsedText.text?
+    storeHandle? := if storeHandle then some true else none
+  }
+  maybeEmitTextDebug req.clientRequestId? action parsedText.source parsedText.text?
+  callBrokerWithProgress root endpoint req (leanRunAtWaitSpec action path line character)
+
+private def runLeanRunWith
+    (home : System.FilePath)
+    (opts : CliOptions)
+    (action path : String)
+    (args : List String)
+    (linear : Bool := false) : IO Unit := do
+  let textArgs :=
+    match args with
+    | [] => []
+    | "--handle-file" :: _ :: rest => rest
+    | _ :: rest => rest
+  if handleArgReadsStdin args && textArgReadsStdin textArgs then
+    throw <| IO.userError <| String.intercalate "\n" [
+      textArgUsage s!"{action} <path> <handle-json|-|--handle-file <path>>",
+      "cannot read both handle json and continuation text from stdin; pass the handle inline, use --handle-file, or use --text-file for the text"
+    ]
+  let root ← projectRoot opts .lean
+  let (endpoint, _) ← ensureProjectDaemon home root .lean opts
+  let (handle, textArgs) ← parseHandleInput s!"{action} <path>" args
+  let parsedText ← parseTextArg s!"{action} <path> <handle-json|-|--handle-file <path>>" textArgs
+  let req ← withEnvClientRequestId {
+    op := .runWith
+    backend := .lean
+    root? := some root.toString
+    path? := some path
+    handle? := some handle
+    text? := parsedText.text?
+    storeHandle? := some true
+    linear? := some linear
+  }
+  maybeEmitTextDebug req.clientRequestId? action parsedText.source parsedText.text?
+  callBrokerWithProgress root endpoint req (leanRunWithWaitSpec path (linear := linear))
+
+private def runLeanRelease
+    (home : System.FilePath)
+    (opts : CliOptions)
+    (path : String)
+    (args : List String) : IO Unit := do
+  let root ← projectRoot opts .lean
+  let (endpoint, _) ← ensureProjectDaemon home root .lean opts
+  let (handle, extra) ← parseHandleInput "lean-release <path>" args
+  unless extra.isEmpty do
+    throw <| IO.userError (handleArgUsage "lean-release <path>")
+  callBroker root endpoint {
+    op := .release
+    backend := .lean
+    root? := some root.toString
+    path? := some path
+    handle? := some handle
+  }
 
 private partial def parseCliOptions (opts : CliOptions) : List String → IO CliOptions
   | [] => pure opts
@@ -1470,34 +1719,9 @@ private def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit :=
       let (endpoint, _) ← ensureProjectDaemon home root backend opts
       callBroker root endpoint { op := .ensure, backend := backend, root? := some root.toString }
   | "lean-run-at" :: path :: line :: character :: text =>
-      let root ← projectRoot opts .lean
-      let (endpoint, _) ← ensureProjectDaemon home root .lean opts
-      let line ← parseNatArg "line" line
-      let character ← parseNatArg "character" character
-      callBrokerWithProgress root endpoint {
-        op := .runAt
-        backend := .lean
-        root? := some root.toString
-        path? := some path
-        line? := some line
-        character? := some character
-        text? := joinTextArgs text
-      } (leanRunAtWaitSpec path line character)
+      runLeanRunAt home opts "lean-run-at" path line character text
   | "lean-run-at-handle" :: path :: line :: character :: text =>
-      let root ← projectRoot opts .lean
-      let (endpoint, _) ← ensureProjectDaemon home root .lean opts
-      let line ← parseNatArg "line" line
-      let character ← parseNatArg "character" character
-      callBrokerWithProgress root endpoint {
-        op := .runAt
-        backend := .lean
-        root? := some root.toString
-        path? := some path
-        line? := some line
-        character? := some character
-        text? := joinTextArgs text
-        storeHandle? := some true
-      } (leanRunAtWaitSpec path line character)
+      runLeanRunAt home opts "lean-run-at-handle" path line character text (storeHandle := true)
   | "lean-hover" :: path :: line :: character :: [] =>
       let root ← projectRoot opts .lean
       let (endpoint, _) ← ensureProjectDaemon home root .lean opts
@@ -1560,45 +1784,12 @@ private def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit :=
         method? := some method
         params? := params?
       } (leanRequestAtWaitSpec path line character method)
-  | "lean-run-with" :: path :: handleArg :: text =>
-      let root ← projectRoot opts .lean
-      let (endpoint, _) ← ensureProjectDaemon home root .lean opts
-      let handle ← parseHandleArg handleArg
-      callBrokerWithProgress root endpoint {
-        op := .runWith
-        backend := .lean
-        root? := some root.toString
-        path? := some path
-        handle? := some handle
-        text? := joinTextArgs text
-        storeHandle? := some true
-        linear? := some false
-      } (leanRunWithWaitSpec path)
-  | "lean-run-with-linear" :: path :: handleArg :: text =>
-      let root ← projectRoot opts .lean
-      let (endpoint, _) ← ensureProjectDaemon home root .lean opts
-      let handle ← parseHandleArg handleArg
-      callBrokerWithProgress root endpoint {
-        op := .runWith
-        backend := .lean
-        root? := some root.toString
-        path? := some path
-        handle? := some handle
-        text? := joinTextArgs text
-        storeHandle? := some true
-        linear? := some true
-      } (leanRunWithWaitSpec path (linear := true))
-  | "lean-release" :: path :: handleArg :: [] =>
-      let root ← projectRoot opts .lean
-      let (endpoint, _) ← ensureProjectDaemon home root .lean opts
-      let handle ← parseHandleArg handleArg
-      callBroker root endpoint {
-        op := .release
-        backend := .lean
-        root? := some root.toString
-        path? := some path
-        handle? := some handle
-      }
+  | "lean-run-with" :: path :: args =>
+      runLeanRunWith home opts "lean-run-with" path args
+  | "lean-run-with-linear" :: path :: args =>
+      runLeanRunWith home opts "lean-run-with-linear" path args (linear := true)
+  | "lean-release" :: path :: args =>
+      runLeanRelease home opts path args
   | "lean-deps" :: path :: [] =>
       let root ← projectRoot opts .lean
       let (endpoint, _) ← ensureProjectDaemon home root .lean opts

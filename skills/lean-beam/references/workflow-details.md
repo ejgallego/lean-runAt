@@ -31,6 +31,12 @@ Use this reference when the task needs more than the default loop in `SKILL.md`.
 Continue from a stored handle:
 
 ```bash
+# `--handle-file` avoids inlining handle json and frees stdin for continuation text
+lean-beam run-with "Foo.lean" --handle-file handle.json "exact trivial"
+lean-beam run-with-linear "Foo.lean" --handle-file handle.json "exact trivial"
+lean-beam release "Foo.lean" --handle-file handle.json
+
+# stdin handle flow remains supported when it fits your shell loop better
 printf '%s\n' "$HANDLE_JSON" | lean-beam run-with "Foo.lean" - "exact trivial"
 printf '%s\n' "$HANDLE_JSON" | lean-beam run-with-linear "Foo.lean" - "exact trivial"
 printf '%s\n' "$HANDLE_JSON" | lean-beam release "Foo.lean" -
@@ -135,7 +141,6 @@ What is not a valid checkpoint target:
   `contentModified` or handle invalidation instead of hidden reuse
 - `lean-beam save` / `lean-beam close-save` checkpoint the current synced Lake module only; they do not
   rebuild reverse dependencies or make downstream files fresh by themselves
-
 ## Diagnostics, Progress, And Request IDs
 
 - `lean-beam sync`, `lean-beam save`, and `lean-beam close-save` always stream fresh diagnostics for the current

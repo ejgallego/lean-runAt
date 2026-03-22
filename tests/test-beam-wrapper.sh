@@ -274,6 +274,120 @@ fi
     exit 1
   fi
   rm -f "$cmd_err"
+  multiline_stdin_out="$(printf 'def stdinProbe : Nat :=\n  42' | "$beam_script" lean-run-at PositionEmptyLine.lean 1 0 --stdin)"
+  if [ "$(RUNAT_JSON_PAYLOAD="$multiline_stdin_out" read_json_text_field ok)" != "true" ]; then
+    echo "expected wrapper lean-run-at --stdin probe to succeed" >&2
+    printf '%s\n' "$multiline_stdin_out" >&2
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$multiline_stdin_out" read_json_text_field result.success)" != "true" ]; then
+    echo "expected wrapper lean-run-at --stdin payload success" >&2
+    printf '%s\n' "$multiline_stdin_out" >&2
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$multiline_stdin_out" read_json_array_len result.messages)" != "0" ]; then
+    echo "expected wrapper lean-run-at --stdin multiline declaration to produce no messages" >&2
+    printf '%s\n' "$multiline_stdin_out" >&2
+    exit 1
+  fi
+  probe_text_file="multiline-probe.lean"
+  printf 'def fileProbe : Nat :=\n  42' > "$probe_text_file"
+  multiline_file_out="$("$beam_script" lean-run-at PositionEmptyLine.lean 1 0 --text-file "$probe_text_file")"
+  if [ "$(RUNAT_JSON_PAYLOAD="$multiline_file_out" read_json_text_field ok)" != "true" ]; then
+    echo "expected wrapper lean-run-at --text-file probe to succeed" >&2
+    printf '%s\n' "$multiline_file_out" >&2
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$multiline_file_out" read_json_text_field result.success)" != "true" ]; then
+    echo "expected wrapper lean-run-at --text-file payload success" >&2
+    printf '%s\n' "$multiline_file_out" >&2
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$multiline_file_out" read_json_array_len result.messages)" != "0" ]; then
+    echo "expected wrapper lean-run-at --text-file multiline declaration to produce no messages" >&2
+    printf '%s\n' "$multiline_file_out" >&2
+    exit 1
+  fi
+  delimiter_out="$("$beam_script" lean-run-at PositionEmptyLine.lean 1 0 -- $'--stdin\n#check answer')"
+  if [ "$(RUNAT_JSON_PAYLOAD="$delimiter_out" read_json_text_field ok)" != "true" ]; then
+    echo "expected wrapper lean-run-at -- delimiter path to treat leading --stdin as text" >&2
+    printf '%s\n' "$delimiter_out" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$delimiter_out" | grep -q 'answer : Nat'; then
+    echo "expected wrapper lean-run-at -- delimiter path to keep the leading --stdin text as a comment" >&2
+    printf '%s\n' "$delimiter_out" >&2
+    exit 1
+  fi
+  debug_text_err="$(mktemp /tmp/beam-wrapper-debug-text-XXXXXX)"
+  debug_text_out="$(printf 'def debugProbe : Nat :=\n  42' | BEAM_DEBUG_TEXT=1 "$beam_script" lean-run-at PositionEmptyLine.lean 1 0 --stdin 2>"$debug_text_err")"
+  if [ "$(RUNAT_JSON_PAYLOAD="$debug_text_out" read_json_text_field ok)" != "true" ]; then
+    echo "expected wrapper debug-text probe to succeed" >&2
+    printf '%s\n' "$debug_text_out" >&2
+    cat "$debug_text_err" >&2
+    rm -f "$debug_text_err"
+    exit 1
+  fi
+  if ! grep -q 'debug text for lean-run-at: source=stdin' "$debug_text_err"; then
+    echo "expected wrapper debug-text mode to report stdin as the text source" >&2
+    cat "$debug_text_err" >&2
+    rm -f "$debug_text_err"
+    exit 1
+  fi
+  if ! grep -q 'containsNewline=true' "$debug_text_err"; then
+    echo "expected wrapper debug-text mode to report a real newline" >&2
+    cat "$debug_text_err" >&2
+    rm -f "$debug_text_err"
+    exit 1
+  fi
+  if ! grep -q 'containsLiteralBackslashN=false' "$debug_text_err"; then
+    echo "expected wrapper debug-text mode to distinguish literal backslash-n from a real newline" >&2
+    cat "$debug_text_err" >&2
+    rm -f "$debug_text_err"
+    exit 1
+  fi
+  if ! grep -q 'escaped="def debugProbe : Nat :=\\n  42"' "$debug_text_err"; then
+    echo "expected wrapper debug-text mode to print the escaped probe text" >&2
+    cat "$debug_text_err" >&2
+    rm -f "$debug_text_err"
+    exit 1
+  fi
+  if ! grep -q 'utf8Hex=' "$debug_text_err" || ! grep -q '0a' "$debug_text_err"; then
+    echo "expected wrapper debug-text mode to print UTF-8 bytes including the newline byte" >&2
+    cat "$debug_text_err" >&2
+    rm -f "$debug_text_err"
+    exit 1
+  fi
+  rm -f "$debug_text_err"
+  literal_newline_err="$(mktemp /tmp/beam-wrapper-literal-newline-XXXXXX)"
+  literal_newline_out="$("$beam_script" lean-run-at PositionEmptyLine.lean 1 0 'def _probe_tmp : Nat := 0\n' 2>"$literal_newline_err")"
+  if [ "$(RUNAT_JSON_PAYLOAD="$literal_newline_out" read_json_text_field ok)" != "true" ]; then
+    echo "expected wrapper literal-\\n probe to stay a payload failure, not a transport error" >&2
+    printf '%s\n' "$literal_newline_out" >&2
+    cat "$literal_newline_err" >&2
+    rm -f "$literal_newline_err"
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$literal_newline_out" read_json_text_field result.success)" != "false" ]; then
+    echo "expected wrapper literal-\\n probe to fail in the run-at payload" >&2
+    printf '%s\n' "$literal_newline_out" >&2
+    cat "$literal_newline_err" >&2
+    rm -f "$literal_newline_err"
+    exit 1
+  fi
+  if ! grep -q "literal characters '\\\\n'" "$literal_newline_err"; then
+    echo "expected wrapper literal-\\n probe to print a newline hint" >&2
+    cat "$literal_newline_err" >&2
+    rm -f "$literal_newline_err"
+    exit 1
+  fi
+  if ! grep -q 'probe failed inside Lean; the request completed and returned result.success=false' "$literal_newline_err"; then
+    echo "expected wrapper literal-\\n probe to distinguish a probe failure from a request failure" >&2
+    cat "$literal_newline_err" >&2
+    rm -f "$literal_newline_err"
+    exit 1
+  fi
+  rm -f "$literal_newline_err"
   blank_ok_out="$("$beam_script" lean-run-at PositionEmptyLine.lean 1 0 "#check answer")"
   if [ "$(RUNAT_JSON_PAYLOAD="$blank_ok_out" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper blank-line probe at character 0 to succeed" >&2
@@ -294,6 +408,12 @@ fi
   fi
   if ! grep -q 'character 1 is beyond max character 0 for line 1' "$blank_err"; then
     echo "expected wrapper blank-line invalid position error message" >&2
+    cat "$blank_err" >&2
+    rm -f "$blank_err"
+    exit 1
+  fi
+  if ! grep -q 'lean-run-at request failed before probe execution (invalidParams)' "$blank_err"; then
+    echo "expected wrapper blank-line invalid position path to distinguish request failure from probe failure" >&2
     cat "$blank_err" >&2
     rm -f "$blank_err"
     exit 1
@@ -924,6 +1044,34 @@ EOF
 example : True ∧ True := by
 EOF
 
+  mint_handle_stdin="$(printf 'constructor' | "$beam_script" lean-run-at-handle HandleSmoke.lean 0 27 --stdin)"
+  if [ "$(RUNAT_JSON_PAYLOAD="$mint_handle_stdin" read_json_text_field ok)" != "true" ]; then
+    echo "expected wrapper handle mint via --stdin to succeed" >&2
+    printf '%s\n' "$mint_handle_stdin" >&2
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$mint_handle_stdin" read_json_text_field result.handle.backend)" != "lean" ]; then
+    echo "expected wrapper handle mint via --stdin to return a lean handle" >&2
+    printf '%s\n' "$mint_handle_stdin" >&2
+    exit 1
+  fi
+
+  handle_mint_file="handle-mint.txt"
+  printf 'constructor' > "$handle_mint_file"
+  mint_handle_file="$("$beam_script" lean-run-at-handle HandleSmoke.lean 0 27 --text-file "$handle_mint_file")"
+  if [ "$(RUNAT_JSON_PAYLOAD="$mint_handle_file" read_json_text_field ok)" != "true" ]; then
+    echo "expected wrapper handle mint via --text-file to succeed" >&2
+    printf '%s\n' "$mint_handle_file" >&2
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$mint_handle_file" read_json_text_field result.handle.backend)" != "lean" ]; then
+    echo "expected wrapper handle mint via --text-file to return a lean handle" >&2
+    printf '%s\n' "$mint_handle_file" >&2
+    exit 1
+  fi
+  branch_handle_file="branch-handle.json"
+  printf '%s\n' "$mint_handle_file" > "$branch_handle_file"
+
   mint_handle="$("$beam_script" lean-run-at-handle HandleSmoke.lean 0 27 "constructor")"
   if [ "$(RUNAT_JSON_PAYLOAD="$mint_handle" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper handle mint to succeed" >&2
@@ -935,6 +1083,57 @@ EOF
     printf '%s\n' "$mint_handle" >&2
     exit 1
   fi
+
+  branch_step_stdin_err="$(mktemp /tmp/beam-wrapper-run-with-stdin-XXXXXX)"
+  branch_step_stdin="$(printf 'exact trivial' | BEAM_DEBUG_TEXT=1 "$beam_script" lean-run-with HandleSmoke.lean "$mint_handle_stdin" --stdin 2>"$branch_step_stdin_err")"
+  if [ "$(RUNAT_JSON_PAYLOAD="$branch_step_stdin" read_json_text_field ok)" != "true" ]; then
+    echo "expected wrapper non-linear handle continuation via --stdin to succeed" >&2
+    printf '%s\n' "$branch_step_stdin" >&2
+    cat "$branch_step_stdin_err" >&2
+    rm -f "$branch_step_stdin_err"
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$branch_step_stdin" read_json_text_field result.handle.backend)" != "lean" ]; then
+    echo "expected wrapper non-linear handle continuation via --stdin to return a successor handle" >&2
+    printf '%s\n' "$branch_step_stdin" >&2
+    cat "$branch_step_stdin_err" >&2
+    rm -f "$branch_step_stdin_err"
+    exit 1
+  fi
+  if ! grep -q 'debug text for lean-run-with: source=stdin' "$branch_step_stdin_err"; then
+    echo "expected wrapper run-with debug-text mode to report stdin as the continuation text source" >&2
+    cat "$branch_step_stdin_err" >&2
+    rm -f "$branch_step_stdin_err"
+    exit 1
+  fi
+  rm -f "$branch_step_stdin_err"
+
+  branch_step_file="$(printf 'exact trivial' | "$beam_script" lean-run-with HandleSmoke.lean --handle-file "$branch_handle_file" --stdin)"
+  if [ "$(RUNAT_JSON_PAYLOAD="$branch_step_file" read_json_text_field ok)" != "true" ]; then
+    echo "expected wrapper non-linear handle continuation via --handle-file to succeed" >&2
+    printf '%s\n' "$branch_step_file" >&2
+    exit 1
+  fi
+  if [ "$(RUNAT_JSON_PAYLOAD="$branch_step_file" read_json_text_field result.handle.backend)" != "lean" ]; then
+    echo "expected wrapper non-linear handle continuation via --handle-file to return a successor handle" >&2
+    printf '%s\n' "$branch_step_file" >&2
+    exit 1
+  fi
+
+  stdin_conflict_err="$(mktemp /tmp/beam-wrapper-run-with-stdin-conflict-XXXXXX)"
+  if printf '%s\n' "$mint_handle" | "$beam_script" lean-run-with HandleSmoke.lean - --stdin >"$stdin_conflict_err" 2>&1; then
+    echo "expected wrapper run-with to reject reading both handle json and text from stdin" >&2
+    cat "$stdin_conflict_err" >&2
+    rm -f "$stdin_conflict_err"
+    exit 1
+  fi
+  if ! grep -q 'cannot read both handle json and continuation text from stdin' "$stdin_conflict_err"; then
+    echo "expected wrapper run-with stdin conflict to explain the single-stdin limitation" >&2
+    cat "$stdin_conflict_err" >&2
+    rm -f "$stdin_conflict_err"
+    exit 1
+  fi
+  rm -f "$stdin_conflict_err"
 
   branch_step="$(printf '%s\n' "$mint_handle" | "$beam_script" lean-run-with HandleSmoke.lean - "exact trivial")"
   if [ "$(RUNAT_JSON_PAYLOAD="$branch_step" read_json_text_field ok)" != "true" ]; then
@@ -967,14 +1166,18 @@ EOF
     exit 1
   fi
 
-  linear_step="$(printf '%s\n' "$mint_linear" | "$beam_script" lean-run-with-linear HandleSmoke.lean - "exact trivial")"
+  linear_text_file="linear-continuation.txt"
+  printf 'exact trivial' > "$linear_text_file"
+  linear_handle_file="linear-handle.json"
+  printf '%s\n' "$mint_linear" > "$linear_handle_file"
+  linear_step="$("$beam_script" lean-run-with-linear HandleSmoke.lean --handle-file "$linear_handle_file" --text-file "$linear_text_file")"
   if [ "$(RUNAT_JSON_PAYLOAD="$linear_step" read_json_text_field ok)" != "true" ]; then
-    echo "expected wrapper linear handle continuation to succeed" >&2
+    echo "expected wrapper linear handle continuation via --handle-file and --text-file to succeed" >&2
     printf '%s\n' "$linear_step" >&2
     exit 1
   fi
   if [ "$(RUNAT_JSON_PAYLOAD="$linear_step" read_json_text_field result.handle.backend)" != "lean" ]; then
-    echo "expected wrapper linear handle continuation to return a successor handle" >&2
+    echo "expected wrapper linear handle continuation via --handle-file and --text-file to return a successor handle" >&2
     printf '%s\n' "$linear_step" >&2
     exit 1
   fi
@@ -994,9 +1197,11 @@ EOF
   fi
   rm -f "$linear_reuse_err"
 
-  release_out="$(printf '%s\n' "$linear_step" | "$beam_script" lean-release HandleSmoke.lean -)"
+  release_handle_file="release-handle.json"
+  printf '%s\n' "$linear_step" > "$release_handle_file"
+  release_out="$("$beam_script" lean-release HandleSmoke.lean --handle-file "$release_handle_file")"
   if [ "$(RUNAT_JSON_PAYLOAD="$release_out" read_json_text_field ok)" != "true" ]; then
-    echo "expected wrapper handle release to succeed" >&2
+    echo "expected wrapper handle release via --handle-file to succeed" >&2
     printf '%s\n' "$release_out" >&2
     exit 1
   fi
@@ -1570,6 +1775,14 @@ fi
   fi
   if ! grep -q 'Lean diagnostics barrier did not complete' "$stale_sync_err"; then
     echo "expected stale-import lean-sync failure to explain the incomplete diagnostics barrier" >&2
+    cat "$stale_sync_json" >&2
+    cat "$stale_sync_err" >&2
+    rm -f "$stale_sync_json"
+    rm -f "$stale_sync_err"
+    exit 1
+  fi
+  if ! grep -q 'lean-sync request failed before a complete diagnostics barrier was available (syncBarrierIncomplete)' "$stale_sync_err"; then
+    echo "expected stale-import lean-sync failure to distinguish request failure from ordinary sync diagnostics" >&2
     cat "$stale_sync_json" >&2
     cat "$stale_sync_err" >&2
     rm -f "$stale_sync_json"

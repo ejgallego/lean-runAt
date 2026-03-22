@@ -98,7 +98,13 @@ If the speculative text is the version you want to keep, open
 For multi-line probes, include the actual newline characters you want Lean to parse. For example:
 
 ```bash
-# using ANSI-C shell quoting so `\n` becomes a real newline
+# piping the exact text through stdin avoids shell-escape mistakes
+printf '  first | exact h1\n  | exact h2\n' | lean-beam run-at "Foo.lean" 18 0 --stdin
+
+# or read the probe from a file
+lean-beam run-at "Foo.lean" 18 0 --text-file probe.lean
+
+# ANSI-C shell quoting also works when you do want to keep everything on one command line
 lean-beam run-at "Foo.lean" 18 0 $'  first | exact h1\n  | exact h2'
 ```
 

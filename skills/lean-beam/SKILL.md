@@ -85,6 +85,12 @@ Prefer the smallest command that matches the actual task:
   truly empty line only character `0` is valid
 - use `lean-beam run-at-handle` and then `lean-beam run-with` or `lean-beam run-with-linear` only when exact
   speculative continuation matters
+- for multiline text-carrying Lean probes (`lean-beam run-at`, `lean-beam run-at-handle`,
+  `lean-beam run-with`, `lean-beam run-with-linear`), prefer `--stdin` or `--text-file <path>`;
+  use `--` before text that itself starts with `--`
+- when `lean-beam run-with` or `lean-beam run-with-linear` takes the handle as `-`, stdin is already
+  consumed by the handle json, so prefer `--handle-file <path>` or use `--text-file` for the
+  continuation text
 - do not expect one `lean-beam run-at` call to become the basis of the next one automatically
 - use `lean-beam sync` right after every real saved edit before the next speculative probe
 - use `lean-beam save` or `lean-beam close-save` only for a synced workspace module path such as
@@ -127,8 +133,11 @@ Use the right tool for each goal:
 - if you made a real edit and want fresh file diagnostics: save the file, then use `lean-beam sync`
 - if you want exact continuation from speculative state: mint a handle with `lean-beam run-at-handle`,
   then continue with `lean-beam run-with` or `lean-beam run-with-linear`
+- for handle-based commands, `--handle-file <path>` is the easiest way to avoid inlining handle json
 - if surface syntax depends on indentation or layout: pass the exact text you want Lean to parse, or
   make a real edit in the file instead of expecting the wrapper to fill whitespace for you
+- if shell quoting is suspect, set `BEAM_DEBUG_TEXT=1` to print the exact escaped text and UTF-8
+  bytes the wrapper is sending for text-carrying Lean probes
 
 Open [references/lean-run-at-semantics.md](references/lean-run-at-semantics.md) when the task needs
 concrete examples for:
@@ -200,6 +209,7 @@ lean-beam goals-prev "Foo.lean" 10 2
 
 # try speculative Lean text without editing the file
 lean-beam run-at "Foo.lean" 10 2 "exact trivial"
+printf 'example : True := by\n  trivial\n' | lean-beam run-at "Foo.lean" 10 2 --stdin
 
 # after every real edit saved to disk, on that same workspace module path
 lean-beam sync "MyPkg/Sub/Module.lean"
@@ -237,6 +247,9 @@ Diagnostic defaults on that path:
 Surface rule:
 
 - wrapper `stderr` is the human-facing diagnostic surface
+- wrapper `stderr` may distinguish request-level failures from a completed request whose payload
+  failed inside Lean; use stdout JSON for machine decisions
+- `BEAM_DEBUG_TEXT=1` adds escaped text and UTF-8 byte dumps for text-carrying Lean probes on stderr
 - `beam-client request-stream ...` is the machine-facing streamed surface
 - do not parse wrapper `stderr` in tooling
 

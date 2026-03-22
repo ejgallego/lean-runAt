@@ -2,6 +2,8 @@
 Quick Start
   lean-beam ensure
   lean-beam run-at "Foo.lean" 10 2 "exact trivial"
+  printf 'example : True := by\n  trivial\n' | lean-beam run-at "Foo.lean" 10 2 --stdin
+  BEAM_DEBUG_TEXT=1 lean-beam run-at "Foo.lean" 10 2 "exact trivial"
 
 After Saving A Real Edit
   lean-beam sync "Foo.lean"
@@ -11,6 +13,7 @@ Exact Continuation
   Separate lean-beam run-at calls do not chain.
   For exact continuation from one speculative state:
   lean-beam run-at-handle "Foo.lean" 10 2 "constructor"
+  lean-beam run-with "Foo.lean" --handle-file handle.json "exact trivial"
 
 Diagnostics
   lean-beam sync / lean-beam save / lean-beam close-save stream errors by default
