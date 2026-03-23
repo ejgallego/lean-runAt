@@ -43,6 +43,11 @@ Beam daemon integration.
   [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh)
 - wrapper coverage for the installed `lean-beam-search` helper in
   [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh)
+- PID-isolated sandbox wrapper coverage in
+  [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh), which checks that a
+  later sandboxed wrapper invocation reuses a live daemon via its endpoint and that overlapping
+  wrapper requests on the same root do not kill each other's daemon mid-flight; this regression is
+  Linux-only because it depends on `bwrap`
 - zero-build save regression coverage in [tests/test-broker-save-olean.sh](../tests/test-broker-save-olean.sh),
   including exact-target replay, downstream importer reuse after daemon shutdown, and a timed
   race where a mid-save edit must leave the saved module stale for later `lake build`

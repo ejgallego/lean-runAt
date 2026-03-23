@@ -66,6 +66,32 @@ Preferred maintainer entrypoints:
 - keep destructive cleanup scoped to owned temp or worktree paths
 - if Lean reports stale or rebuild trouble unexpectedly, stop and surface it explicitly
 
+## Sandboxed Wrapper Path
+
+This wrapper path is easy to break accidentally, so keep the mental model simple.
+
+What was broken:
+
+- Codex-style wrapper calls run in separate PID-isolated sandboxes.
+- A later wrapper call could look at the daemon pid in the registry and think the daemon was dead,
+  even when the daemon was still alive and answering on its TCP endpoint.
+- If one wrapper call started the daemon and then exited while sibling wrapper calls were still
+  using it, that exit could tear the daemon down mid-flight.
+
+What the fix does:
+
+- if the registry endpoint still answers, treat the daemon as live even if the recorded pid looks
+  wrong in the current sandbox
+- if a wrapper call started the daemon, keep that wrapper call alive until overlapping sibling
+  wrapper calls for the same project root drain
+- the regression for this path is
+  [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)
+
+What this does not promise:
+
+- it does not promise the daemon will still be alive after all sandboxed wrapper calls have exited
+- the guarantee is narrower: overlapping wrapper requests on the same root should survive correctly
+
 ## Recommended Test Order
 
 - broker protocol / stream / barrier changes: `bash tests/test-broker-fast.sh`

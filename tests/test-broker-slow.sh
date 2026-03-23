@@ -56,6 +56,10 @@ echo "[broker-slow] wrapper tests"
 HOME="$tmp_env_root/home" CODEX_HOME="$tmp_env_root/codex" CLAUDE_HOME="$tmp_env_root/claude" \
   BEAM_INSTALL_BUNDLE_DIR="$tmp_bundle_dir" bash tests/test-beam-wrapper.sh > /dev/null
 
+echo "[broker-slow] sandbox wrapper tests"
+HOME="$tmp_env_root/home" CODEX_HOME="$tmp_env_root/codex" CLAUDE_HOME="$tmp_env_root/claude" \
+  BEAM_INSTALL_BUNDLE_DIR="$tmp_bundle_dir" bash tests/test-beam-wrapper-sandbox.sh > /dev/null
+
 echo "[broker-slow] save replay tests"
 HOME="$tmp_env_root/home" CODEX_HOME="$tmp_env_root/codex" CLAUDE_HOME="$tmp_env_root/claude" \
   BEAM_INSTALL_BUNDLE_DIR="$tmp_bundle_dir" bash tests/test-broker-save-olean.sh > /dev/null
