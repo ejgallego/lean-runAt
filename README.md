@@ -157,6 +157,9 @@ bash tests/test-broker.sh
 bash scripts/lint-shell.sh
 ```
 
+GitHub Actions currently validates the main CI job set from
+[.github/workflows/ci.yml](.github/workflows/ci.yml) on both Ubuntu and macOS.
+
 More detail on test coverage and gaps lives in [docs/TESTING.md](docs/TESTING.md).
 
 ## Documentation Map

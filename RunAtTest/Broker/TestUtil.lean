@@ -7,6 +7,7 @@ Author: Emilio J. Gallego Arias
 import Lean
 import Beam.Broker.Client
 import Beam.Broker.Protocol
+import Beam.Broker.Transport
 import RunAtTest.TestHarness
 
 open Lean
@@ -161,6 +162,18 @@ def spawnLeanBroker
     (root : System.FilePath)
     (leanCmd : String := "lean") : IO (IO.Process.Child nullBrokerStdio) := do
   spawnLeanBrokerWithPlugin endpoint root (← RunAtTest.TestHarness.pluginPath) leanCmd
+
+partial def waitForBrokerReady
+    (endpoint : Beam.Broker.Endpoint)
+    (tries : Nat := 50) : IO Unit := do
+  try
+    let conn ← Beam.Broker.Transport.connect endpoint
+    Beam.Broker.Transport.closeConnection conn
+  catch _ =>
+    if tries == 0 then
+      throw <| IO.userError s!"timed out waiting for Beam daemon at {Beam.Broker.Transport.endpointDescription endpoint}"
+    IO.sleep 100
+    waitForBrokerReady endpoint (tries - 1)
 
 def runClientWithStream
     (endpoint : Beam.Broker.Endpoint)

@@ -24,6 +24,11 @@ install_claude_skills=0
 install_all_supported=0
 requested_toolchains=()
 installed_skill_targets=()
+prepared_repo_toolchain=""
+prepared_selected_toolchains=()
+prepared_payload_id=""
+prepared_version_root=""
+prepared_source_commit=""
 style_reset=""
 style_bold=""
 style_green=""
@@ -192,7 +197,7 @@ copy_repo_path_if_present() {
   require_path_within "$dest" "$dest_root" "copy destination"
   if [ -e "$src" ]; then
     mkdir -p "$(dirname "$dest")"
-    cp -a "$src" "$dest"
+    cp -Rp "$src" "$dest"
   fi
 }
 
@@ -317,7 +322,10 @@ resolve_install_toolchains() {
     die "cannot combine --all-supported with --toolchain"
   fi
 
-  mapfile -t supported_toolchains < <(read_supported_toolchains)
+  while IFS= read -r toolchain; do
+    [ -n "$toolchain" ] || continue
+    supported_toolchains+=("$toolchain")
+  done < <(read_supported_toolchains)
   if [ "${#supported_toolchains[@]}" -eq 0 ]; then
     die "beam CLI reported no supported Lean toolchains"
   fi
@@ -329,7 +337,7 @@ resolve_install_toolchains() {
       if ! array_contains "$toolchain" "${supported_toolchains[@]}"; then
         die "unsupported Lean toolchain requested for install: $toolchain"
       fi
-      if ! array_contains "$toolchain" "${selected[@]}"; then
+      if [ "${#selected[@]}" -eq 0 ] || ! array_contains "$toolchain" "${selected[@]}"; then
         selected+=("$toolchain")
       fi
     done
@@ -428,13 +436,12 @@ write_install_manifest() {
   local dest="$1"
   local payload_id="$2"
   local source_commit="$3"
-  local toolchains_name="$4"
-  local -n toolchains_ref="$toolchains_name"
   local source_commit_arg="-"
+  shift 3
   if [ -n "$source_commit" ]; then
     source_commit_arg="$source_commit"
   fi
-  "$beam_cli" install-manifest "$payload_id" "$source_commit_arg" "${toolchains_ref[@]}" >"$dest"
+  "$beam_cli" install-manifest "$payload_id" "$source_commit_arg" "$@" >"$dest"
 }
 
 prebuild_bundle() {
@@ -466,21 +473,19 @@ install_skill_target() {
 }
 
 prepare_install_environment() {
-  local toolchain_name="$1"
-  local selected_name="$2"
-  local -n toolchain_ref="$toolchain_name"
-  local -n selected_toolchains_ref="$selected_name"
   local resolved_toolchains=""
+  local toolchain=""
   require_elan
-  toolchain_ref="$(awk 'NR==1 {print $1}' "$repo_root/lean-toolchain")"
-  require_repo_toolchain "$toolchain_ref"
+  prepared_repo_toolchain="$(awk 'NR==1 {print $1}' "$repo_root/lean-toolchain")"
+  require_repo_toolchain "$prepared_repo_toolchain"
   ensure_runtime_artifacts
-  resolved_toolchains="$(resolve_install_toolchains "$toolchain_ref")"
-  # shellcheck disable=SC2034
+  resolved_toolchains="$(resolve_install_toolchains "$prepared_repo_toolchain")"
+  prepared_selected_toolchains=()
   if [ -n "$resolved_toolchains" ]; then
-    mapfile -t selected_toolchains_ref <<< "$resolved_toolchains"
-  else
-    selected_toolchains_ref=()
+    while IFS= read -r toolchain; do
+      [ -n "$toolchain" ] || continue
+      prepared_selected_toolchains+=("$toolchain")
+    done <<< "$resolved_toolchains"
   fi
   verify_publish_targets
   mkdir -p "$bin_home" "$versions_root" "$state_root"
@@ -488,26 +493,26 @@ prepare_install_environment() {
 
 prepare_install_version() {
   local staging_root="$1"
-  local toolchains_name="$2"
-  local payload_name="$3"
-  local version_root_name="$4"
-  local source_commit_name="$5"
-  local -n toolchains_ref="$toolchains_name"
-  local -n payload_ref="$payload_name"
-  local -n version_root_ref="$version_root_name"
-  local -n source_commit_ref="$source_commit_name"
   stage_install_version "$staging_root"
-  payload_ref="$(hash_tree "$staging_root")"
-  version_root_ref="$versions_root/$payload_ref"
-  source_commit_ref="$(repo_source_commit)"
-  write_install_manifest "$staging_root/manifest.json" "$payload_ref" "$source_commit_ref" "$toolchains_name"
-  if [ ! -d "$version_root_ref" ]; then
-    move_staging_dir_into_versions "$staging_root" "$version_root_ref"
+  prepared_payload_id="$(hash_tree "$staging_root")"
+  prepared_version_root="$versions_root/$prepared_payload_id"
+  prepared_source_commit="$(repo_source_commit)"
+  write_install_manifest \
+    "$staging_root/manifest.json" \
+    "$prepared_payload_id" \
+    "$prepared_source_commit" \
+    "${prepared_selected_toolchains[@]}"
+  if [ ! -d "$prepared_version_root" ]; then
+    move_staging_dir_into_versions "$staging_root" "$prepared_version_root"
   else
     remove_owned_staging_dir "$staging_root"
   fi
-  if [ ! -f "$version_root_ref/manifest.json" ]; then
-    write_install_manifest "$version_root_ref/manifest.json" "$payload_ref" "$source_commit_ref" "$toolchains_name"
+  if [ ! -f "$prepared_version_root/manifest.json" ]; then
+    write_install_manifest \
+      "$prepared_version_root/manifest.json" \
+      "$prepared_payload_id" \
+      "$prepared_source_commit" \
+      "${prepared_selected_toolchains[@]}"
   fi
 }
 
@@ -549,16 +554,18 @@ print_install_summary() {
   if path_contains_dir "$bin_home"; then
     path_status="ready for direct \`lean-beam\` use in this shell"
   fi
-  for toolchain in "${installed_skill_targets[@]}"; do
-    case "$toolchain" in
-      Codex:*)
-        codex_status="installed at ${toolchain#Codex: }"
-        ;;
-      "Claude Code:"*)
-        claude_status="installed at ${toolchain#Claude Code: }"
-        ;;
-    esac
-  done
+  if [ -n "${installed_skill_targets[*]-}" ]; then
+    for toolchain in "${installed_skill_targets[@]}"; do
+      case "$toolchain" in
+        Codex:*)
+          codex_status="installed at ${toolchain#Codex: }"
+          ;;
+        "Claude Code:"*)
+          claude_status="installed at ${toolchain#Claude Code: }"
+          ;;
+      esac
+    done
+  fi
 
   print_section "$style_green" "Install Complete"
   print_field "lean-beam" "$bin_home/lean-beam"
@@ -603,25 +610,20 @@ print_post_install_notes() {
 
 main() {
   local staging_root=""
-  local repo_toolchain=""
-  local selected_toolchains=()
-  local payload_id=""
-  local version_root=""
-  local source_commit=""
   setup_styles
   parse_args "$@"
   validate_install_config
-  prepare_install_environment repo_toolchain selected_toolchains
+  prepare_install_environment
 
   staging_root="$(mktemp -d "$install_root/.staging-XXXXXX")"
   trap 'remove_owned_staging_dir "$staging_root"' EXIT
-  prepare_install_version "$staging_root" selected_toolchains payload_id version_root source_commit
+  prepare_install_version "$staging_root"
   trap - EXIT
 
-  prebuild_install_bundles "$version_root" "${selected_toolchains[@]}"
-  publish_runtime "$version_root"
+  prebuild_install_bundles "$prepared_version_root" "${prepared_selected_toolchains[@]}"
+  publish_runtime "$prepared_version_root"
   install_requested_skills
-  print_install_summary "$version_root" "${selected_toolchains[@]}"
+  print_install_summary "$prepared_version_root" "${prepared_selected_toolchains[@]}"
   print_post_install_notes
 }
 

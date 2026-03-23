@@ -206,4 +206,16 @@ case "$cmd" in
     ;;
 esac
 
-exec "$beam_bin" "${prefix[@]}" "${mapped[@]}" "${rest[@]}"
+if [ -n "${prefix[*]-}" ]; then
+  if [ -n "${rest[*]-}" ]; then
+    exec "$beam_bin" "${prefix[@]}" "${mapped[@]}" "${rest[@]}"
+  else
+    exec "$beam_bin" "${prefix[@]}" "${mapped[@]}"
+  fi
+else
+  if [ -n "${rest[*]-}" ]; then
+    exec "$beam_bin" "${mapped[@]}" "${rest[@]}"
+  else
+    exec "$beam_bin" "${mapped[@]}"
+  fi
+fi

@@ -45,7 +45,7 @@ def main : IO Unit := do
   let fakeServer ← writeFakeServer root
   let broker ← spawnLeanBrokerWithPlugin endpoint root (← RunAtTest.TestHarness.pluginPath) fakeServer.toString
   try
-    IO.sleep 200
+    waitForBrokerReady endpoint
     let resp ← runClient endpoint { op := .ensure, root? := some root.toString }
     if resp.ok then
       throw <| IO.userError s!"expected startup handshake failure, got success {(toJson resp).compress}"

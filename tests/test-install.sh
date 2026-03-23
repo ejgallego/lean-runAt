@@ -59,7 +59,11 @@ export BEAM_INSTALL_ROOT="$tmp_root/install-root"
 
 mkdir -p "$HOME" "$BEAM_INSTALL_ROOT"
 
-mapfile -t supported_toolchains < <(grep -v '^[[:space:]]*#' supported-lean-toolchains | sed '/^[[:space:]]*$/d')
+supported_toolchains=()
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  supported_toolchains+=("$line")
+done < <(grep -v '^[[:space:]]*#' supported-lean-toolchains | sed '/^[[:space:]]*$/d')
 toolchain="${supported_toolchains[0]}"
 source_checkout="$tmp_root/source-checkout"
 runat_plugin_shared_lib="$(beam_shared_lib_name runAt_RunAt)"
@@ -216,7 +220,10 @@ assert_bundle_layout() {
   local metadata=""
   local expected_toolchain=""
   local found=""
-  mapfile -t metadata_files < <(find "$bundle_root" -name metadata.json | sort)
+  while IFS= read -r metadata; do
+    [ -n "$metadata" ] || continue
+    metadata_files+=("$metadata")
+  done < <(find "$bundle_root" -name metadata.json | sort)
   if [ "${#metadata_files[@]}" -eq 0 ]; then
     echo "missing bundle metadata under $bundle_root" >&2
     exit 1

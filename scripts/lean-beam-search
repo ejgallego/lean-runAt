@@ -79,24 +79,40 @@ case "$subcmd" in
     line="$2"
     character="$3"
     shift 3
-    exec "$cli_script" "${prefix[@]}" run-at-handle "$path" "$line" "$character" "$@"
+    if [ -n "${prefix[*]-}" ]; then
+      exec "$cli_script" "${prefix[@]}" run-at-handle "$path" "$line" "$character" "$@"
+    else
+      exec "$cli_script" run-at-handle "$path" "$line" "$character" "$@"
+    fi
     ;;
   branch)
     [ "$#" -ge 2 ] || usage
     path="$1"
     shift
-    exec "$cli_script" "${prefix[@]}" run-with "$path" - "$@"
+    if [ -n "${prefix[*]-}" ]; then
+      exec "$cli_script" "${prefix[@]}" run-with "$path" - "$@"
+    else
+      exec "$cli_script" run-with "$path" - "$@"
+    fi
     ;;
   linear)
     [ "$#" -ge 2 ] || usage
     path="$1"
     shift
-    exec "$cli_script" "${prefix[@]}" run-with-linear "$path" - "$@"
+    if [ -n "${prefix[*]-}" ]; then
+      exec "$cli_script" "${prefix[@]}" run-with-linear "$path" - "$@"
+    else
+      exec "$cli_script" run-with-linear "$path" - "$@"
+    fi
     ;;
   release)
     [ "$#" -eq 1 ] || usage
     path="$1"
-    exec "$cli_script" "${prefix[@]}" release "$path" -
+    if [ -n "${prefix[*]-}" ]; then
+      exec "$cli_script" "${prefix[@]}" release "$path" -
+    else
+      exec "$cli_script" release "$path" -
+    fi
     ;;
   playout)
     [ "$#" -ge 2 ] || usage
@@ -104,7 +120,11 @@ case "$subcmd" in
     shift
     current="$(cat)"
     for step in "$@"; do
-      current="$(printf '%s\n' "$current" | "$cli_script" "${prefix[@]}" run-with-linear "$path" - "$step")"
+      if [ -n "${prefix[*]-}" ]; then
+        current="$(printf '%s\n' "$current" | "$cli_script" "${prefix[@]}" run-with-linear "$path" - "$step")"
+      else
+        current="$(printf '%s\n' "$current" | "$cli_script" run-with-linear "$path" - "$step")"
+      fi
     done
     printf '%s\n' "$current"
     ;;

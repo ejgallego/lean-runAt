@@ -5,6 +5,7 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Beam.Broker.Protocol
+import RunAt.Lib.NativeLib
 import RunAtTest.Broker.TestUtil
 import Lean
 
@@ -34,7 +35,7 @@ private def ensurePluginSharedBuilt (root : System.FilePath) : IO Unit := do
 private def pluginPath : IO System.FilePath := do
   let root ← repoRoot
   ensurePluginSharedBuilt root
-  IO.FS.realPath <| root / ".lake" / "build" / "lib" / "librunAt_RunAt.so"
+  IO.FS.realPath <| RunAt.Lib.pluginSharedLibPath (root / ".lake" / "build" / "lib")
 
 private def expectModuleNames (payload : Json) (field : String) (expected : List String) : IO Unit := do
   let arr ← IO.ofExcept <| payload.getObjVal? field
@@ -558,7 +559,7 @@ def smokeMain : IO Unit := do
   let otherRoot ← IO.FS.realPath <| root / "tests" / "save_olean_project"
   let broker ← spawnLeanBrokerWithPlugin endpoint root (← pluginPath) (← leanCmd)
   try
-    IO.sleep 200
+    waitForBrokerReady endpoint
     discard <| expectOk (← runClient endpoint { op := .ensure, root? := some root.toString })
     let rootMismatch ← runClient endpoint { op := .ensure, root? := some otherRoot.toString }
     expectErrCode rootMismatch "invalidParams"

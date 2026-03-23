@@ -25,6 +25,10 @@ Beam daemon integration.
   [RunAt/NestedHandleFailureTest.lean](../RunAt/NestedHandleFailureTest.lean)
 - fast Beam daemon smoke coverage in [tests/test-broker-fast.sh](../tests/test-broker-fast.sh),
   including completed barrier progress vs partial request progress expectations
+- GitHub Actions main coverage in [.github/workflows/ci.yml](../.github/workflows/ci.yml), whose
+  Linux job set now also runs on `macos-latest`
+- GitHub Actions broker smoke coverage on both Ubuntu and macOS through the matrixed
+  `broker-fast` job in [.github/workflows/ci.yml](../.github/workflows/ci.yml)
 - slower wrapper/install coverage in [tests/test-broker-slow.sh](../tests/test-broker-slow.sh)
 - experimental Lean broker `request_at` coverage through
   [RunAtTest/Broker/SmokeTest.lean](../RunAtTest/Broker/SmokeTest.lean) and

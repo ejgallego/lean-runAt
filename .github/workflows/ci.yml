@@ -10,25 +10,48 @@ on:
       - main
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   shell-lint:
-    runs-on: ubuntu-latest
+    name: shell-lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install shellcheck
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          else
+            brew install shellcheck
+          fi
 
       - name: Shell Lint
         run: bash scripts/lint-shell.sh
 
   build-and-test:
-    runs-on: ubuntu-latest
+    name: build-and-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -41,7 +64,14 @@ jobs:
         run: bash tests/test.sh
 
   broker-fast:
-    runs-on: ubuntu-latest
+    name: broker-fast (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -51,17 +81,44 @@ jobs:
         run: bash tests/test-broker-fast.sh
 
   broker-slow:
-    runs-on: ubuntu-latest
+    name: broker-slow (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/lean-ci-setup
 
+      - name: Install shellcheck
+        shell: bash
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            exit 0
+          fi
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          else
+            brew install shellcheck
+          fi
+
       - name: Broker Slow Test
         run: bash tests/test-broker-slow.sh
 
   install:
-    runs-on: ubuntu-latest
+    name: install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -71,10 +128,14 @@ jobs:
         run: bash tests/test-install.sh
 
   toolchain-compat:
-    runs-on: ubuntu-latest
+    name: toolchain-compat (${{ matrix.os }}, ${{ matrix.toolchain }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
         toolchain:
           - leanprover/lean4:v4.29.0-rc6
           - leanprover/lean4:v4.29.0-rc5
@@ -87,7 +148,14 @@ jobs:
         run: bash tests/test-toolchain-compat.sh '${{ matrix.toolchain }}'
 
   broker-rocq:
-    runs-on: ubuntu-latest
+    name: broker-rocq (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
     steps:
       - uses: actions/checkout@v4
 

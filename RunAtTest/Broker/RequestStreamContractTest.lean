@@ -85,7 +85,7 @@ def main : IO Unit := do
   copySaveProjectFixture root
   let broker ← spawnLeanBroker endpoint root
   try
-    IO.sleep 200
+    waitForBrokerReady endpoint
     discard <| expectOk (← runClient endpoint { op := .ensure, root? := some root.toString })
 
     writeSaveWarningFile root "-- request-stream sync"

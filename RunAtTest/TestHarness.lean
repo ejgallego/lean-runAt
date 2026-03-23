@@ -6,6 +6,7 @@ Author: Emilio J. Gallego Arias
 
 import Lean
 import Lean.Data.Lsp.Ipc
+import RunAt.Lib.NativeLib
 
 open Lean
 open Lean.Lsp
@@ -21,7 +22,7 @@ structure RequestOutcome where
   deriving Inhabited
 
 def pluginPath : IO System.FilePath := do
-  IO.FS.realPath <| System.FilePath.mk ".lake/build/lib/librunAt_RunAt.so"
+  IO.FS.realPath <| RunAt.Lib.pluginSharedLibPath (System.FilePath.mk ".lake/build/lib")
 
 def errorCodeName : ErrorCode → String
   | .parseError => "parseError"
