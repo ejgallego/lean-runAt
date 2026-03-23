@@ -7,6 +7,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+. "$repo_root/scripts/shared-lib.sh"
 codex_skills_home="${CODEX_HOME:-$HOME/.codex}/skills"
 claude_skills_home="${CLAUDE_HOME:-$HOME/.claude}/skills"
 bin_home="${HOME}/.local/bin"
@@ -29,6 +30,7 @@ style_green=""
 style_blue=""
 style_yellow=""
 style_dim=""
+runat_plugin_shared_lib="$(beam_shared_lib_name runAt_RunAt)"
 
 runtime_payload_spec=(
   "copy|rootFiles|RunAt.lean|RunAt.lean"
@@ -44,7 +46,7 @@ runtime_payload_spec=(
   "copy|runtimePaths|.lake/build/bin/beam-cli|libexec/beam-cli"
   "copy|runtimePaths|.lake/build/bin/beam-daemon|libexec/beam-daemon"
   "copy|runtimePaths|.lake/build/bin/beam-client|libexec/beam-client"
-  "copy|runtimePaths|.lake/build/lib/librunAt_RunAt.so|libexec/librunAt_RunAt.so"
+  "copy|runtimePaths|.lake/build/lib/$runat_plugin_shared_lib|libexec/$runat_plugin_shared_lib"
   "copy|runtimePaths|.lake/packages|.lake/packages"
   "copy|wrapperPaths|scripts/lean-beam|bin/lean-beam"
   "copy|wrapperPaths|scripts/lean-beam-search|bin/lean-beam-search"
@@ -219,7 +221,8 @@ replace_symlink_atomically() {
   require_path_within "$tmp_dir" "$link_dir" "$label temp dir"
   tmp_link="$tmp_dir/link"
   ln -s "$target" "$tmp_link"
-  mv -Tf "$tmp_link" "$link_path"
+  rm -f -- "$link_path"
+  mv "$tmp_link" "$link_path"
   rmdir "$tmp_dir"
 }
 
@@ -365,7 +368,7 @@ ensure_runtime_artifacts() {
   if [ -x "$beam_cli" ] \
     && [ -x "$repo_root/.lake/build/bin/beam-daemon" ] \
     && [ -x "$repo_root/.lake/build/bin/beam-client" ] \
-    && [ -f "$repo_root/.lake/build/lib/librunAt_RunAt.so" ]; then
+    && [ -f "$repo_root/.lake/build/lib/$runat_plugin_shared_lib" ]; then
     return 0
   fi
   echo "building beam runtime artifacts" >&2

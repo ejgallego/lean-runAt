@@ -7,6 +7,7 @@ Author: Emilio J. Gallego Arias
 import Lean
 import Beam.Broker.Client
 import Beam.Broker.Transport
+import RunAt.Lib.NativeLib
 import RunAt.Protocol
 import Std.Internal.UV.Signal
 
@@ -213,10 +214,25 @@ private def readCmdTrim (cmd : String) (args : Array String := #[]) (cwd? : Opti
     throw <| IO.userError s!"command failed: {cmd} {String.intercalate " " args.toList}\n{out.stderr}"
   pure <| trimLine out.stdout
 
-private def commandAvailable (cmd : String) : IO Bool := do
+private def commandAvailable (cmd : String) (args : Array String := #["--help"]) : IO Bool := do
   try
-    let out ← IO.Process.output { cmd := "sh", args := #["-c", s!"command -v {shellQuote cmd} >/dev/null 2>&1"] }
-    pure (out.exitCode == 0)
+    let child ← IO.Process.spawn {
+      cmd := cmd
+      args := args
+      stdin := .null
+      stdout := .null
+      stderr := .null
+    }
+    if (← child.tryWait).isNone then
+      try
+        child.kill
+      catch _ =>
+        pure ()
+      try
+        discard <| child.wait
+      catch _ =>
+        pure ()
+    pure true
   catch _ =>
     pure false
 
@@ -236,10 +252,10 @@ private def runAtHome : IO System.FilePath := do
 private def defaultBundlePaths (home : System.FilePath) : IO BundlePaths := do
   let installedDaemon := home / "libexec" / "beam-daemon"
   let installedClient := home / "libexec" / "beam-client"
-  let installedPlugin := home / "libexec" / "librunAt_RunAt.so"
+  let installedPlugin := RunAt.Lib.pluginSharedLibPath (home / "libexec")
   let checkoutDaemon := home / ".lake" / "build" / "bin" / "beam-daemon"
   let checkoutClient := home / ".lake" / "build" / "bin" / "beam-client"
-  let checkoutPlugin := home / ".lake" / "build" / "lib" / "librunAt_RunAt.so"
+  let checkoutPlugin := RunAt.Lib.pluginSharedLibPath (home / ".lake" / "build" / "lib")
   let installedReady :=
     (← installedDaemon.pathExists) &&
     (← installedClient.pathExists) &&
@@ -371,7 +387,7 @@ private def bundlePathsFor (workspace : System.FilePath) : BundlePaths :=
   {
     daemon := workspace / ".lake" / "build" / "bin" / "beam-daemon"
     client := workspace / ".lake" / "build" / "bin" / "beam-client"
-    plugin := workspace / ".lake" / "build" / "lib" / "librunAt_RunAt.so"
+    plugin := RunAt.Lib.pluginSharedLibPath (workspace / ".lake" / "build" / "lib")
   }
 
 private def bundleArtifactsReady (workspace : System.FilePath) : IO Bool := do
@@ -407,7 +423,7 @@ private def bundleSourceHashInputLabels : List String :=
 
 private def installRuntimePaths : List String :=
   ["libexec/beam-cli", "libexec/beam-daemon", "libexec/beam-client",
-    "libexec/librunAt_RunAt.so", ".lake/packages"]
+    s!"libexec/{RunAt.Lib.pluginSharedLibName}", ".lake/packages"]
 
 private def installWrapperPaths : List String :=
   ["bin/lean-beam", "bin/lean-beam-search"]
@@ -543,11 +559,18 @@ private def fallbackBuildFailureMessage (toolchain : String) (cacheRoot bundleDi
     stderr
   ]
 
+private def killCommand : IO String := do
+  let candidates := [System.FilePath.mk "/bin/kill", System.FilePath.mk "/usr/bin/kill"]
+  for candidate in candidates do
+    if ← candidate.pathExists then
+      return candidate.toString
+  if ← commandAvailable "kill" #["-l"] then
+    pure "kill"
+  else
+    throw <| IO.userError "could not find kill command"
+
 private def pidAlive (pid : Nat) : IO Bool := do
-  let out ← IO.Process.output {
-    cmd := "sh"
-    args := #["-c", s!"kill -0 {pid} >/dev/null 2>&1"]
-  }
+  let out ← IO.Process.output { cmd := (← killCommand), args := #["-0", toString pid] }
   pure (out.exitCode == 0)
 
 private partial def acquireLock (lockDir : System.FilePath) : IO Unit := do
@@ -718,19 +741,17 @@ private def leanBin (root : System.FilePath) : IO String := do
 private def rocqCandidates (root : System.FilePath) : List System.FilePath :=
   [root / "_opam" / "bin" / "coq-lsp", root / "_opam" / "_opam" / "bin" / "coq-lsp"]
 
-private def pathCmd? (cmd : String) : IO (Option String) := do
-  try
-    return some (← readCmdTrim "sh" #["-c", s!"command -v {shellQuote cmd}"])
-  catch _ =>
-    return none
-
 private def maybeRocqCmd (root : System.FilePath) : IO (Option String) := do
   for candidate in rocqCandidates root do
     if ← candidate.pathExists then
       return some candidate.toString
   match ← IO.getEnv "BEAM_ROCQ_CMD" with
   | some cmd => pure (some cmd)
-  | none => pathCmd? "coq-lsp"
+  | none =>
+      if ← commandAvailable "coq-lsp" then
+        pure (some "coq-lsp")
+      else
+        pure none
 
 private def rocqCmd (root : System.FilePath) : IO String := do
   match ← maybeRocqCmd root with
@@ -804,11 +825,11 @@ private def daemonResponds (endpoint : Transport.Endpoint) : IO Bool := do
     pure false
 
 private def killPid (pid : Nat) : IO Unit := do
-  let _ ← IO.Process.output {
-    cmd := "sh"
-    args := #["-c", s!"kill {pid} >/dev/null 2>&1 || true"]
-  }
-  pure ()
+  try
+    let _ ← IO.Process.output { cmd := (← killCommand), args := #[toString pid] }
+    pure ()
+  catch _ =>
+    pure ()
 
 private partial def waitForPidGone (pid : Nat) (tries : Nat := 20) : IO Unit := do
   if tries == 0 then
@@ -918,16 +939,16 @@ private def startDaemon (desired : DesiredConfig) (endpoint : Transport.Endpoint
     IO.FS.createDirAll parent
   IO.FS.writeFile logPath ""
   let cmd := String.intercalate " " ((desired.daemonBin.toString :: args).map shellQuote)
-  let shell := s!"cd {shellQuote desired.root.toString} && {cmd} >{shellQuote logPath.toString} 2>&1 < /dev/null & echo $!"
-  let out ← IO.Process.output {
+  let shell := s!"exec {cmd} >{shellQuote logPath.toString} 2>&1 < /dev/null"
+  let child ← IO.Process.spawn {
     cmd := "sh"
     args := #["-c", shell]
+    cwd := some desired.root
+    stdin := .null
+    stdout := .null
+    stderr := .null
   }
-  if out.exitCode != 0 then
-    throw <| IO.userError s!"failed to start Beam daemon for {desired.root}\n{out.stderr}"
-  let pidText := trimLine out.stdout
-  let some pid := pidText.toNat?
-    | throw <| IO.userError s!"failed to capture Beam daemon pid for {desired.root}"
+  let pid := child.pid.toNat
   pure pid
 
 private partial def waitForDaemon (pid : Nat) (endpoint : Transport.Endpoint) (logPath : System.FilePath)

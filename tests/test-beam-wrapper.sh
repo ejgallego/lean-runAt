@@ -74,6 +74,15 @@ else:
 PY
 }
 
+sed_in_place_portable() {
+  local expr="$1"
+  local path="$2"
+  local tmp
+  tmp="$(mktemp "${path}.sed-XXXXXX")"
+  sed "$expr" "$path" >"$tmp"
+  mv "$tmp" "$path"
+}
+
 read_json_array_len() {
   python3 - "$1" <<'PY'
 import json, os, sys
@@ -834,7 +843,7 @@ EOF
     exit 1
   fi
 
-  sed -i 's/1/2/' SaveSmoke/B.lean
+  sed_in_place_portable 's/1/2/' SaveSmoke/B.lean
   sync_out="$("$beam_script" lean-sync SaveSmoke/B.lean)"
   if [ "$(RUNAT_JSON_PAYLOAD="$sync_out" read_json_text_field ok)" != "true" ]; then
     echo "expected lean-sync after first edit to succeed" >&2
@@ -923,7 +932,7 @@ EOF
     exit 1
   fi
 
-  sed -i 's/2/3/' SaveSmoke/B.lean
+  sed_in_place_portable 's/2/3/' SaveSmoke/B.lean
   open_files_dirty="$("$beam_script" open-files)"
   if [ "$(RUNAT_JSON_PAYLOAD="$open_files_dirty" read_json_text_field result.sessions.lean.files.0.status)" != "notSaved" ]; then
     echo "expected open-files to detect an on-disk edit for an already known file incrementally" >&2
@@ -1722,7 +1731,7 @@ sleep 1
     printf '%s\n' "$doctor_out" >&2
     exit 1
   fi
-  sed -i 's/1/2/' SaveSmoke/B.lean
+  sed_in_place_portable 's/1/2/' SaveSmoke/B.lean
   sync_out="$("$beam_script" --port "$busy_port" lean-sync SaveSmoke/B.lean)"
   if [ "$(RUNAT_JSON_PAYLOAD="$sync_out" read_json_text_field ok)" != "true" ]; then
     echo "expected lean-sync with a busy requested port to reuse the live Beam daemon" >&2

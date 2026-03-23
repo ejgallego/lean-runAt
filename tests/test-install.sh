@@ -7,6 +7,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+. scripts/shared-lib.sh
 
 tmp_root="$(mktemp -d /tmp/runat-install-XXXXXX)"
 
@@ -61,6 +62,7 @@ mkdir -p "$HOME" "$BEAM_INSTALL_ROOT"
 mapfile -t supported_toolchains < <(grep -v '^[[:space:]]*#' supported-lean-toolchains | sed '/^[[:space:]]*$/d')
 toolchain="${supported_toolchains[0]}"
 source_checkout="$tmp_root/source-checkout"
+runat_plugin_shared_lib="$(beam_shared_lib_name runAt_RunAt)"
 
 assert_file() {
   local path="$1"
@@ -80,7 +82,7 @@ assert_not_exists() {
 
 assert_no_skill_socket_guidance() {
   local skill_doc="$1"
-  if rg -n -- '--socket|Unix domain socket|unix domain socket' "$skill_doc" > /dev/null; then
+  if grep -E -- '--socket|Unix domain socket|unix domain socket' "$skill_doc" > /dev/null; then
     echo "unexpected socket guidance in installed skill: $skill_doc" >&2
     exit 1
   fi
@@ -109,7 +111,7 @@ assert_runtime_layout() {
   assert_file "$runtime_root/libexec/beam-cli"
   assert_file "$runtime_root/libexec/beam-daemon"
   assert_file "$runtime_root/libexec/beam-client"
-  assert_file "$runtime_root/libexec/librunAt_RunAt.so"
+  assert_file "$runtime_root/libexec/$runat_plugin_shared_lib"
   assert_not_exists "$runtime_root/.lake/build"
   assert_file "$runtime_root/bin/lean-beam"
   assert_file "$runtime_root/bin/lean-beam-search"
@@ -222,12 +224,7 @@ assert_bundle_layout() {
   for expected_toolchain in "$@"; do
     found=""
     for metadata in "${metadata_files[@]}"; do
-      if command -v rg >/dev/null 2>&1; then
-        if rg -n --fixed-strings "\"toolchain\": \"$expected_toolchain\"" "$metadata" > /dev/null; then
-          found="$metadata"
-          break
-        fi
-      elif grep -F "\"toolchain\": \"$expected_toolchain\"" "$metadata" > /dev/null; then
+      if grep -F "\"toolchain\": \"$expected_toolchain\"" "$metadata" > /dev/null; then
         found="$metadata"
         break
       fi
@@ -245,7 +242,7 @@ assert_bundle_layout() {
     assert_file "$workspace/RunAt/Internal/DirectImports.lean"
     assert_file "$workspace/.lake/build/bin/beam-daemon"
     assert_file "$workspace/.lake/build/bin/beam-client"
-    assert_file "$workspace/.lake/build/lib/librunAt_RunAt.so"
+    assert_file "$workspace/.lake/build/lib/$runat_plugin_shared_lib"
   done
 }
 
