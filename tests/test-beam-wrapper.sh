@@ -145,7 +145,7 @@ remove_tmp_tree_within() {
 wait_for_exit() {
   local pid="$1"
   local label="$2"
-  local tries="${3:-40}"
+  local tries="${3:-60}"
   local delay="${4:-0.5}"
   local remaining="$tries"
   while [ "$remaining" -gt 0 ]; do
@@ -605,12 +605,11 @@ with open(out_path, "wb") as out, open(err_path, "wb") as err:
     time.sleep(1.0)
     proc.send_signal(signal.SIGINT)
     try:
-        rc = proc.wait(timeout=15.0)
+        rc = proc.wait(timeout=30.0)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
-        print("timeout")
-        raise SystemExit(2)
+        rc = "timeout"
 
 print(rc)
 PY
