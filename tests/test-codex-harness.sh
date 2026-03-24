@@ -16,6 +16,11 @@ export RUNAT_CODEX_WORKTREE_ROOT="$tmp_root/worktrees"
 task_id="test-codex-harness-$$"
 task_slug="${task_id}"
 worktree_path="$RUNAT_CODEX_WORKTREE_ROOT/$task_slug"
+default_home="$tmp_root/default-home"
+default_root="$default_home/.codex/worktrees/lean-beam"
+default_task_id="test-codex-harness-default-$$"
+default_task_slug="${default_task_id}"
+default_worktree_path="$default_root/$default_task_slug"
 
 expect_owned_tmp_dir() {
   case "$1" in
@@ -41,6 +46,12 @@ cleanup() {
   if git show-ref --verify --quiet "refs/heads/codex/$task_slug"; then
     git branch -D "codex/$task_slug" >/dev/null 2>&1 || true
   fi
+  if [ -d "$default_worktree_path" ]; then
+    git worktree remove "$default_worktree_path" >/dev/null 2>&1 || true
+  fi
+  if git show-ref --verify --quiet "refs/heads/codex/$default_task_slug"; then
+    git branch -D "codex/$default_task_slug" >/dev/null 2>&1 || true
+  fi
   remove_owned_tmp_tree "$tmp_root"
 }
 trap cleanup EXIT
@@ -54,6 +65,19 @@ fi
 
 if [ ! -d "$worktree_path/.git" ] && [ ! -f "$worktree_path/.git" ]; then
   echo "expected dedicated worktree to be created at $worktree_path" >&2
+  exit 1
+fi
+
+mkdir -p "$default_home"
+default_session_out="$(env -u RUNAT_CODEX_WORKTREE_ROOT HOME="$default_home" ./scripts/codex-harness.sh session start "$default_task_id")"
+if ! printf '%s\n' "$default_session_out" | grep -q "$default_worktree_path"; then
+  echo "expected session start without RUNAT_CODEX_WORKTREE_ROOT to use the persistent home-scoped default" >&2
+  printf '%s\n' "$default_session_out" >&2
+  exit 1
+fi
+
+if [ ! -d "$default_worktree_path/.git" ] && [ ! -f "$default_worktree_path/.git" ]; then
+  echo "expected default dedicated worktree to be created at $default_worktree_path" >&2
   exit 1
 fi
 

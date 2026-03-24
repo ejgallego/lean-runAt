@@ -11,7 +11,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-WORKTREE_ROOT="${RUNAT_CODEX_WORKTREE_ROOT:-/tmp/runat-codex-worktrees}"
+
+default_worktree_root() {
+  if [[ -n "${HOME:-}" ]]; then
+    printf '%s\n' "${HOME}/.codex/worktrees/lean-beam"
+  else
+    printf '%s\n' "/var/tmp/runat-codex-worktrees"
+  fi
+}
+
+WORKTREE_ROOT="${RUNAT_CODEX_WORKTREE_ROOT:-$(default_worktree_root)}"
 
 die() {
   echo "error: $*" >&2
@@ -32,6 +41,7 @@ Environment:
 
 Note:
   This is maintainer workflow tooling for this repo. It is not part of the public runAt CLI.
+  By default, worktrees live under ~/.codex/worktrees/lean-beam so they survive reboots.
   Destructive cleanup must stay scoped to harness-owned worktrees under RUNAT_CODEX_WORKTREE_ROOT.
   Do not use broad rm/rm -rf against repo-local or user-local state from normal maintainer flows.
 EOF

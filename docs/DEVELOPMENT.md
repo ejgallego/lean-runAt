@@ -36,6 +36,8 @@ Start from the repo root and prefer dedicated worktrees for new tasks:
 ```
 
 That keeps new work off the primary checkout and matches the repository's default Codex workflow.
+By default, the harness uses `~/.codex/worktrees/lean-beam` rather than `/tmp` so task
+worktrees survive reboots.
 
 Important local scripts:
 

@@ -93,6 +93,8 @@ When working locally:
 
 - start new Codex tasks from `./scripts/codex-harness.sh session start <task-id>` so the task runs
   in a dedicated git worktree instead of the primary checkout
+- let the harness keep its default persistent worktree root under `~/.codex/worktrees/lean-beam`;
+  do not place long-lived task worktrees under `/tmp`
 - keep destructive shell cleanup scoped to owned temp/worktree paths; do not use broad `rm` or
   `rm -rf` against repo-local `.beam`, install caches, or user homes as part of normal workflows
 - for broker protocol / stream / barrier changes, run `bash tests/test-broker-fast.sh` first
