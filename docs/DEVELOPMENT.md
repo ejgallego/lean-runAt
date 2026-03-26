@@ -104,6 +104,18 @@ What this does not promise:
 
 Use `bash tests/test-broker.sh` when you want the aggregate broker signal.
 
+## Lean 4.28 Compatibility Shims
+
+Current validated support includes Lean `v4.28.0`, which requires two local compatibility shims.
+When support for `v4.28.0` is eventually dropped, re-check and likely simplify these spots:
+
+- `RunAt/Protocol.lean`, `RunAt/Internal/SaveSupport.lean`, and `RunAt/Internal/DirectImports.lean`:
+  `FileSource` instances route through `Lean.Lsp.fileSource p.textDocument` so the same code works
+  across the older `FileIdent` return type in `v4.28.0` and the newer `DocumentUri` API.
+- `Beam/Broker/LakeSave.lean`: `hashOfHashable` / `addHashablePureTrace` exist because Lake
+  `v4.28.0` lacks the newer generic `ComputeHash [Hashable α]` instance that makes plain
+  `addPureTrace mod.name` and `addPureTrace mod.pkg.id?` work upstream in newer Lean versions.
+
 ## Process
 
 For commit, PR, and author identity guidance, see [CONTRIBUTING.md](../CONTRIBUTING.md).
