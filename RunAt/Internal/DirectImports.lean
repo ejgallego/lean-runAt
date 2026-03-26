@@ -24,8 +24,8 @@
    textDocument : Lean.Lsp.TextDocumentIdentifier
    deriving FromJson, ToJson
 
- instance : Lean.Lsp.FileSource DirectImportsParams where
-   fileSource p := p.textDocument.uri
+instance : Lean.Lsp.FileSource DirectImportsParams where
+   fileSource p := Lean.Lsp.fileSource p.textDocument
 
  /-- Internal success payload for direct-import queries from the current tracked text snapshot. -/
  structure DirectImportsResult where

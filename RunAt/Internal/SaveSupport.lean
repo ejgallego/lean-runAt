@@ -37,16 +37,16 @@
    bcFile? : Option String := none
    deriving FromJson, ToJson
 
- instance : Lean.Lsp.FileSource SaveArtifactsParams where
-   fileSource p := p.textDocument.uri
+instance : Lean.Lsp.FileSource SaveArtifactsParams where
+   fileSource p := Lean.Lsp.fileSource p.textDocument
 
  /-- Internal request payload for save-readiness checks from the current worker snapshot. -/
  structure SaveReadinessParams where
    textDocument : Lean.Lsp.TextDocumentIdentifier
    deriving FromJson, ToJson
 
- instance : Lean.Lsp.FileSource SaveReadinessParams where
-   fileSource p := p.textDocument.uri
+instance : Lean.Lsp.FileSource SaveReadinessParams where
+   fileSource p := Lean.Lsp.fileSource p.textDocument
 
  /-- Internal success payload for artifact serialization. -/
  structure SaveArtifactsResult where

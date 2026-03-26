@@ -56,7 +56,7 @@ structure Params where
   deriving FromJson, ToJson
 
 instance : Lean.Lsp.FileSource Params where
-  fileSource p := p.textDocument.uri
+  fileSource p := Lean.Lsp.fileSource p.textDocument
 
 /-- Request payload for read-only goal inspection at a file position. -/
 structure GoalsParams where
@@ -65,7 +65,7 @@ structure GoalsParams where
   deriving FromJson, ToJson
 
 instance : Lean.Lsp.FileSource GoalsParams where
-  fileSource p := p.textDocument.uri
+  fileSource p := Lean.Lsp.fileSource p.textDocument
 
 /-- Request payload for `$/lean/runWith`. -/
 structure RunWithParams where
@@ -77,7 +77,7 @@ structure RunWithParams where
   deriving FromJson, ToJson
 
 instance : Lean.Lsp.FileSource RunWithParams where
-  fileSource p := p.textDocument.uri
+  fileSource p := Lean.Lsp.fileSource p.textDocument
 
 /-- Request payload for `$/lean/releaseHandle`. -/
 structure ReleaseHandleParams where
@@ -86,7 +86,7 @@ structure ReleaseHandleParams where
   deriving FromJson, ToJson
 
 instance : Lean.Lsp.FileSource ReleaseHandleParams where
-  fileSource p := p.textDocument.uri
+  fileSource p := Lean.Lsp.fileSource p.textDocument
 
 /-- A user-visible message emitted by isolated execution. -/
 structure Message where
