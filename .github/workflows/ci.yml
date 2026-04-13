@@ -137,9 +137,7 @@ jobs:
           - ubuntu-latest
           - macos-latest
         toolchain:
-          - leanprover/lean4:v4.29.0-rc6
-          - leanprover/lean4:v4.29.0-rc7
-          - leanprover/lean4:v4.29.0-rc5
+          - leanprover/lean4:v4.29.0
           - leanprover/lean4:v4.28.0
     steps:
       - uses: actions/checkout@v4
