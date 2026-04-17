@@ -33,9 +33,18 @@ private def expectTwoTrueGoals (payload : Json) : IO Unit := do
       throw <| IO.userError s!"expected goal type True, got {ty}"
 
 private def expectNonemptyError (payload : Json) : IO Unit := do
-  let err ← IO.ofExcept <| payload.getObjValAs? String "error"
-  if err.trimAscii.isEmpty then
-    throw <| IO.userError s!"expected non-empty error field, got {payload.compress}"
+  let err ← IO.ofExcept <| payload.getObjVal? "error"
+  match err with
+  | .str text =>
+      if text.trimAscii.isEmpty then
+        throw <| IO.userError s!"expected non-empty error field, got {payload.compress}"
+  | .arr items =>
+      if items.isEmpty then
+        throw <| IO.userError s!"expected non-empty structured error field, got {payload.compress}"
+  | .null =>
+      throw <| IO.userError s!"expected non-empty error field, got {payload.compress}"
+  | _ =>
+      pure ()
 
 private def expectSurfacedError (resp : Beam.Broker.Response) : IO Unit := do
   if resp.ok then

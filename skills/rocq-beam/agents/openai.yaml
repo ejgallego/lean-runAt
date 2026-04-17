@@ -5,7 +5,7 @@
 interface:
   display_name: "Rocq Beam Aux"
   short_description: "Auxiliary Rocq goal probes"
-  default_prompt: "Use $rocq-beam when an external Rocq project needs the auxiliary Rocq goal-probe surface exposed through lean-beam; save before probing, use lean-beam rocq-goals-after / rocq-goals-prev, and do not assume hidden cross-request proof state or unsaved-buffer access."
+  default_prompt: "Use $rocq-beam when an external Rocq project needs the auxiliary Rocq goal-probe surface exposed through lean-beam; save before probing, use lean-beam rocq-goals-after / rocq-goals-prev, and do not assume hidden cross-request proof state, handles, unsaved-buffer access, or a Rocq run-at command."
 
 policy:
   allow_implicit_invocation: true

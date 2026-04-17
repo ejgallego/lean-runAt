@@ -71,6 +71,7 @@ Core workflow contract:
   character `0` is valid
 - there is no Rocq `sync` command in the current wrapper
 - there is no Rocq handle or continuation surface in the current wrapper
+- there is no Rocq `run-at` command in the current wrapper; use the goal probes instead
 - do not assume hidden mutable proof-session state carries across requests
 - do not use `coqtop` or a fallback executor; only `coq-lsp` is trusted
 
@@ -96,6 +97,7 @@ Default rules:
 - start with `lean-beam rocq-goals-after`
 - save the file before every new probe after a real edit
 - keep coordinates 0-based; do not guess editor-specific 1-based lines or columns
+- if you think you want a Rocq `run-at`, use `lean-beam rocq-goals-prev` with extra text or `rocq-goals-after` instead
 - use `lean-beam rocq-goals-prev` plus text when you need an intermediate state inside a sentence
 - do not assume any hidden proof-session state carries across requests
 

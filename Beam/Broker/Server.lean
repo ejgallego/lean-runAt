@@ -530,6 +530,32 @@ private def resolvePendingError
   catch _ =>
     pure ()
 
+private def resolvePendingErrorJson
+    (pending : PendingRequest)
+    (errJson : Json) : IO Unit := do
+  try
+    pending.promise.resolve (.error s!"jsonrpcerr:{errJson.compress}")
+  catch _ =>
+    pure ()
+
+private def embeddedJsonRpcErrorWithId? (msg : String) : Option (RequestID × Json) :=
+  if msg.startsWith "Cannot read LSP message: JSON '" then
+    let raw := (msg.drop 31).toString
+    match (raw.splitOn "' did not have the format of a JSON-RPC message.").head? with
+    | some embedded =>
+        match Json.parse embedded with
+        | .ok json =>
+            match json.getObjVal? "id", json.getObjVal? "error" with
+            | .ok idJson, .ok errJson =>
+                match fromJson? idJson with
+                | .ok (id : RequestID) => some (id, errJson)
+                | .error _ => none
+            | _, _ => none
+        | .error _ => none
+    | none => none
+  else
+    none
+
 private def failAllPendingRequests (session : Session) (message : String) : IO Unit := do
   let pending ← session.pending.atomically do
     let pending := (← get).toList.map Prod.snd |>.toArray
@@ -595,18 +621,24 @@ partial def sessionReaderLoop (session : Session) : IO Unit := do
         pure ()
     sessionReaderLoop session
   catch e =>
-    failAllPendingRequests session <| brokerFailureMessage {
-      code := .workerExited
-      message := e.toString
-    }
-    try
-      session.proc.kill
-    catch _ =>
-      pure ()
-    try
-      discard <| session.proc.tryWait
-    catch _ =>
-      pure ()
+    match embeddedJsonRpcErrorWithId? e.toString with
+    | some (id, errJson) =>
+        if let some pending ← removePendingRequest session id then
+          resolvePendingErrorJson pending errJson
+        sessionReaderLoop session
+    | none =>
+        failAllPendingRequests session <| brokerFailureMessage {
+          code := .workerExited
+          message := e.toString
+        }
+        try
+          session.proc.kill
+        catch _ =>
+          pure ()
+        try
+          discard <| session.proc.tryWait
+        catch _ =>
+          pure ()
 
 private def awaitPendingResult
     (promise : IO.Promise (Except String PendingResult)) : IO PendingResult := do
