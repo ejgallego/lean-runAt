@@ -8,7 +8,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "[broker-rocq] build"
+echo "[beam-rocq] build"
 lake build \
   beam-cli \
   beam-daemon \
@@ -23,8 +23,8 @@ if ! command -v coq-lsp > /dev/null 2>&1; then
   exit 1
 fi
 
-echo "[broker-rocq] wrapper tests"
+echo "[beam-rocq] wrapper tests"
 bash tests/test-beam-wrapper-rocq.sh > /dev/null
 
-echo "[broker-rocq] smoke test"
+echo "[beam-rocq] smoke test"
 .lake/build/bin/beam-daemon-rocq-smoke-test > /dev/null

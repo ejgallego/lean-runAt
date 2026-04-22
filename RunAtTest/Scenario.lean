@@ -23,6 +23,8 @@ open RunAtTest.TestHarness
 structure ChangeSpec where
   line : Nat
   character : Nat
+  endLine? : Option Nat := none
+  endCharacter? : Option Nat := none
   delete : String := ""
   insert : String := ""
   deriving Inhabited, Repr, ToJson
@@ -57,6 +59,14 @@ instance : FromJson ChangeSpec where
   fromJson? j := do
     let line ← j.getObjValAs? Nat "line"
     let character ← j.getObjValAs? Nat "character"
+    let endLine? :=
+      match j.getObjValAs? Nat "endLine" with
+      | .ok n => some n
+      | .error _ => none
+    let endCharacter? :=
+      match j.getObjValAs? Nat "endCharacter" with
+      | .ok n => some n
+      | .error _ => none
     let delete :=
       match j.getObjValAs? String "delete" with
       | .ok s => s
@@ -65,7 +75,7 @@ instance : FromJson ChangeSpec where
       match j.getObjValAs? String "insert" with
       | .ok s => s
       | .error _ => ""
-    pure { line, character, delete, insert }
+    pure { line, character, endLine?, endCharacter?, delete, insert }
 
 instance : FromJson SendRunAtSpec where
   fromJson? j := do
@@ -229,6 +239,51 @@ private partial def waitForDiagnostics (expectedID : RequestID)
   | .request .. =>
       waitForDiagnostics expectedID lastDiag?
 
+private partial def waitForRequestOutcomeCollectDiagnostics
+    (expectedID : RequestID)
+    (lastDiag? : Option PublishDiagnosticsParams := none) :
+    ScenarioM (RequestOutcome × Option PublishDiagnosticsParams) := do
+  if let some outcome ← takeQueuedResponse? expectedID then
+    return (outcome, lastDiag?)
+  let msg ← Ipc.readMessage
+  match msg with
+  | .response id result =>
+      let outcome := { result? := some result : RequestOutcome }
+      if id == expectedID then
+        pure (outcome, lastDiag?)
+      else
+        queueResponse id outcome
+        waitForRequestOutcomeCollectDiagnostics expectedID lastDiag?
+  | .responseError id code message _ =>
+      let outcome := {
+        errorCode? := some (errorCodeName code)
+        errorMessage := message
+        : RequestOutcome
+      }
+      if id == expectedID then
+        pure (outcome, lastDiag?)
+      else
+        queueResponse id outcome
+        waitForRequestOutcomeCollectDiagnostics expectedID lastDiag?
+  | .notification "textDocument/publishDiagnostics" (some param) =>
+      let diagnosticParam ← decodePublishDiagnostics (toJson param)
+      waitForRequestOutcomeCollectDiagnostics expectedID (some diagnosticParam)
+  | .notification .. =>
+      waitForRequestOutcomeCollectDiagnostics expectedID lastDiag?
+  | .request .. =>
+      waitForRequestOutcomeCollectDiagnostics expectedID lastDiag?
+
+private def mkRangeChange (spec : ChangeSpec) : TextDocumentContentChangeEvent :=
+  let endLine := spec.endLine?.getD spec.line
+  let endCharacter := spec.endCharacter?.getD (spec.character + spec.delete.length)
+  TextDocumentContentChangeEvent.rangeChange {
+    start := { line := spec.line, character := spec.character }
+    «end» := {
+      line := endLine
+      character := endCharacter
+    }
+  } spec.insert
+
 partial def jsonContains (actual expected : Json) : Bool :=
   match actual, expected with
   | .obj actual, .obj expected =>
@@ -266,28 +321,49 @@ def openDoc (path : System.FilePath) : ScenarioM DocHandle := do
   }
   pure doc
 
-def changeDoc (doc : DocHandle) (spec : ChangeSpec) : ScenarioM Unit := do
+def changeDocBatch (doc : DocHandle) (specs : Array ChangeSpec) : ScenarioM Unit := do
   let docState ← getDocState doc
   let params : DidChangeTextDocumentParams := {
     textDocument := { uri := docState.uri, version? := docState.versionNo }
-    contentChanges := #[
-      TextDocumentContentChangeEvent.rangeChange {
-        start := { line := spec.line, character := spec.character }
-        «end» := {
-          line := spec.line
-          character := spec.character + spec.delete.length
-        }
-      } spec.insert
-    ]
+    contentChanges := specs.map mkRangeChange
   }
   Ipc.writeNotification ⟨"textDocument/didChange", params⟩
   setDocState doc { docState with versionNo := docState.versionNo + 1 }
 
-def syncDoc (doc : DocHandle) : ScenarioM Unit := do
+def changeDoc (doc : DocHandle) (spec : ChangeSpec) : ScenarioM Unit :=
+  changeDocBatch doc #[spec]
+
+def collectDiagnostics? (doc : DocHandle) : ScenarioM (Option PublishDiagnosticsParams) := do
   let docState ← getDocState doc
   let requestID ← sendRequest "textDocument/waitForDiagnostics" <|
     toJson <| WaitForDiagnosticsParams.mk docState.uri (docState.versionNo - 1)
-  discard <| waitForDiagnostics requestID
+  waitForDiagnostics requestID
+
+def collectDiagnostics (doc : DocHandle) : ScenarioM PublishDiagnosticsParams := do
+  let some diagnostics ← collectDiagnostics? doc
+    | throw <| IO.userError s!"expected publishDiagnostics notification for document handle {doc.id}"
+  pure diagnostics
+
+def waitForILeansDiagnostics? (doc : DocHandle) : ScenarioM (Option PublishDiagnosticsParams) := do
+  let docState ← getDocState doc
+  let requestID ← sendRequest "$/lean/waitForILeans" <|
+    toJson { uri? := some docState.uri, version? := some (docState.versionNo - 1) : WaitForILeansParams }
+  let (outcome, diagnostics?) ← waitForRequestOutcomeCollectDiagnostics requestID
+  if outcome.errorCode?.isSome then
+    let code := outcome.errorCode?.getD "unknown"
+    throw <| IO.userError s!"waiting for ILeans failed with {code}: {outcome.errorMessage}"
+  pure diagnostics?
+
+def waitForILeansDiagnostics (doc : DocHandle) : ScenarioM PublishDiagnosticsParams := do
+  let some diagnostics ← waitForILeansDiagnostics? doc
+    | throw <| IO.userError s!"expected publishDiagnostics notification while waiting for ILeans on document handle {doc.id}"
+  pure diagnostics
+
+def waitForILeans (doc : DocHandle) : ScenarioM Unit := do
+  discard <| waitForILeansDiagnostics? doc
+
+def syncDoc (doc : DocHandle) : ScenarioM Unit := do
+  discard <| collectDiagnostics? doc
 
 def closeDoc (doc : DocHandle) : ScenarioM Unit := do
   let docState ← getDocState doc

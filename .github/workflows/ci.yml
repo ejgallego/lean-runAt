@@ -43,8 +43,8 @@ jobs:
       - name: Shell Lint
         run: bash scripts/lint-shell.sh
 
-  build-and-test:
-    name: build-and-test (${{ matrix.os }})
+  lsp:
+    name: lsp (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -61,10 +61,10 @@ jobs:
         run: lake build
 
       - name: Test
-        run: bash tests/test.sh
+        run: bash tests/test-lsp.sh
 
-  broker-fast:
-    name: broker-fast (${{ matrix.os }})
+  beam-fast:
+    name: beam-fast (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -77,11 +77,11 @@ jobs:
 
       - uses: ./.github/actions/lean-ci-setup
 
-      - name: Broker Fast Test
-        run: bash tests/test-broker-fast.sh
+      - name: Beam Fast Test
+        run: bash tests/test-beam-fast.sh
 
-  broker-slow:
-    name: broker-slow (${{ matrix.os }})
+  beam-slow:
+    name: beam-slow (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -107,11 +107,11 @@ jobs:
             brew install shellcheck
           fi
 
-      - name: Broker Slow Test
-        run: bash tests/test-broker-slow.sh
+      - name: Beam Slow Test
+        run: bash tests/test-beam-slow.sh
 
-  install:
-    name: install (${{ matrix.os }})
+  beam-install:
+    name: beam-install (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -124,11 +124,11 @@ jobs:
 
       - uses: ./.github/actions/lean-ci-setup
 
-      - name: Install Test
-        run: bash tests/test-install.sh
+      - name: Beam Install Test
+        run: bash tests/test-beam-install.sh
 
-  toolchain-compat:
-    name: toolchain-compat (${{ matrix.os }}, ${{ matrix.toolchain }})
+  beam-toolchain-compat:
+    name: beam-toolchain-compat (${{ matrix.os }}, ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -145,10 +145,10 @@ jobs:
       - uses: ./.github/actions/lean-ci-setup
 
       - name: Validate toolchain compatibility
-        run: bash tests/test-toolchain-compat.sh '${{ matrix.toolchain }}'
+        run: bash tests/test-beam-toolchain-compat.sh '${{ matrix.toolchain }}'
 
-  broker-rocq:
-    name: broker-rocq (${{ matrix.os }})
+  beam-rocq:
+    name: beam-rocq (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -174,5 +174,5 @@ jobs:
       - name: Install Rocq CI Dependencies
         run: opam install -y ./tests/rocq-ci.opam --deps-only
 
-      - name: Broker Rocq Test
-        run: bash tests/test-broker-rocq.sh
+      - name: Beam Rocq Test
+        run: bash tests/test-beam-rocq.sh

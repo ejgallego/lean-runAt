@@ -15,4 +15,4 @@ files=(
   tests/*.sh
 )
 
-shellcheck "${files[@]}"
+shellcheck -x "${files[@]}"

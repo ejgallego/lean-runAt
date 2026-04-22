@@ -24,8 +24,8 @@ Usage:
 
 Default validation command sequence:
   1. lake build beam-cli
-  2. bash tests/test-install.sh
-  3. bash tests/test-broker-slow.sh
+  2. bash tests/test-beam-install.sh
+  3. bash tests/test-beam-slow.sh
 
 This script is a maintainer safety wrapper. It clones the current checkout into /tmp,
 overlays the working tree state, sets fake HOME/CODEX_HOME/CLAUDE_HOME/TMPDIR, and
@@ -302,8 +302,8 @@ if [ "${#custom_command[@]}" -gt 0 ]; then
   run_step "running custom command" "${custom_command[@]}"
 else
   run_step "lake build beam-cli" lake build beam-cli
-  run_step "bash tests/test-install.sh" bash tests/test-install.sh
-  run_step "bash tests/test-broker-slow.sh" bash tests/test-broker-slow.sh
+  run_step "bash tests/test-beam-install.sh" bash tests/test-beam-install.sh
+  run_step "bash tests/test-beam-slow.sh" bash tests/test-beam-slow.sh
 fi
 
 log "validation completed"

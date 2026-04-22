@@ -96,13 +96,17 @@ What this does not promise:
 
 ## Recommended Test Order
 
-- broker protocol / stream / barrier changes: `bash tests/test-broker-fast.sh`
-- wrapper / install / bundle-resolution changes: `bash tests/test-broker-slow.sh`
-- Rocq broker / wrapper changes: `bash tests/test-broker-rocq.sh`
+- LSP request / handle / scenario changes: `bash tests/test-lsp.sh`
+- Beam broker protocol / stream / barrier changes: `bash tests/test-beam-fast.sh`
+- Beam wrapper / save replay / bundle-resolution changes: `bash tests/test-beam-slow.sh`
+- Beam install / runtime layout changes: `bash tests/test-beam-install.sh`
+- supported Lean toolchain changes: `bash tests/test-beam-toolchain-compat.sh <toolchain>`
+- Rocq broker / wrapper changes: `bash tests/test-beam-rocq.sh`
+- maintainer harness / validation wrapper changes: `bash tests/test-maintainer.sh`
 - risky local install or wrapper validation: `bash scripts/validate-defensive.sh`
 - shell changes: `bash scripts/lint-shell.sh`
 
-Use `bash tests/test-broker.sh` when you want the aggregate broker signal.
+Use `bash tests/test-beam.sh` when you want the aggregate default Beam signal.
 
 ## Lean 4.28 Compatibility Shims
 

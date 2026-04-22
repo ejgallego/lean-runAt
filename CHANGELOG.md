@@ -22,4 +22,4 @@ Current milestone summary:
 - add in-memory broker stats with per-backend/per-op counts and latency summaries
 - add a small evaluation helper script and document additional upstream Rocq petanque capabilities such as notation analysis
 - document conservative multi-file Lean rebuild discipline until stale-dependency integration improves
-- add CI running `lake build` and `bash tests/test.sh`
+- add CI running `lake build` and the LSP test surface

@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 
 toolchain="${1:-}"
 if [ -z "$toolchain" ]; then
-  echo "usage: bash tests/test-toolchain-compat.sh <toolchain>" >&2
+  echo "usage: bash tests/test-beam-toolchain-compat.sh <toolchain>" >&2
   exit 1
 fi
 
@@ -37,10 +37,10 @@ trap cleanup EXIT
 
 mkdir -p "$tmp_env_root/home" "$tmp_env_root/codex" "$tmp_env_root/claude"
 
-echo "[toolchain-compat] build"
+echo "[beam-toolchain-compat] build"
 lake build beam-cli > /dev/null
 
-echo "[toolchain-compat] bundle install $toolchain"
+echo "[beam-toolchain-compat] bundle install $toolchain"
 env -u BEAM_HOME -u BEAM_INSTALL_BUNDLE_DIR -u BEAM_CONTROL_DIR \
   HOME="$tmp_env_root/home" \
   CODEX_HOME="$tmp_env_root/codex" \

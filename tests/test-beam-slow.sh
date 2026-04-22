@@ -38,10 +38,10 @@ mkdir -p "$tmp_env_root/home" "$tmp_env_root/codex" "$tmp_env_root/claude"
 
 toolchain="$(awk 'NR==1 {print $1}' lean-toolchain)"
 
-echo "[broker-slow] shell lint"
+echo "[beam-slow] shell lint"
 bash scripts/lint-shell.sh > /dev/null
 
-echo "[broker-slow] build"
+echo "[beam-slow] build"
 lake build \
   RunAt:shared \
   beam-cli \
@@ -49,19 +49,19 @@ lake build \
   beam-client \
   > /dev/null
 
-echo "[broker-slow] bundle install"
+echo "[beam-slow] bundle install"
 BEAM_INSTALL_BUNDLE_DIR="$tmp_bundle_dir" ./.lake/build/bin/beam-cli bundle-install "$toolchain" > /dev/null
 
-echo "[broker-slow] wrapper tests"
+echo "[beam-slow] wrapper tests"
 HOME="$tmp_env_root/home" CODEX_HOME="$tmp_env_root/codex" CLAUDE_HOME="$tmp_env_root/claude" \
   BEAM_INSTALL_BUNDLE_DIR="$tmp_bundle_dir" bash tests/test-beam-wrapper.sh > /dev/null
 
 if [ "$(uname -s)" = "Linux" ]; then
-  echo "[broker-slow] sandbox wrapper tests"
+  echo "[beam-slow] sandbox wrapper tests"
   HOME="$tmp_env_root/home" CODEX_HOME="$tmp_env_root/codex" CLAUDE_HOME="$tmp_env_root/claude" \
     BEAM_INSTALL_BUNDLE_DIR="$tmp_bundle_dir" bash tests/test-beam-wrapper-sandbox.sh > /dev/null
 fi
 
-echo "[broker-slow] save replay tests"
+echo "[beam-slow] save replay tests"
 HOME="$tmp_env_root/home" CODEX_HOME="$tmp_env_root/codex" CLAUDE_HOME="$tmp_env_root/claude" \
   BEAM_INSTALL_BUNDLE_DIR="$tmp_bundle_dir" bash tests/test-broker-save-olean.sh > /dev/null

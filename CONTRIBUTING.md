@@ -82,10 +82,14 @@ Keep author and committer identity consistent for normal local commits.
 
 Use the smallest relevant suite first:
 
-- `bash tests/test.sh`: core Lean test path
-- `bash tests/test-broker-fast.sh`: broker-stream and barrier changes
-- `bash tests/test-broker-slow.sh`: wrapper, install, and bundle-resolution changes
-- `bash tests/test-broker.sh`: aggregate broker suite
+- `bash tests/test-lsp.sh`: the full LSP/plugin surface, including all registered LSP methods
+- `bash tests/test-beam-fast.sh`: Beam broker stream, barrier, and request-contract changes
+- `bash tests/test-beam-slow.sh`: Beam wrapper, save replay, and bundle-resolution changes
+- `bash tests/test-beam-install.sh`: installer, runtime layout, and `doctor` / `supported-toolchains`
+- `bash tests/test-beam-toolchain-compat.sh <toolchain>`: supported-toolchain bundle validation
+- `bash tests/test-beam-rocq.sh`: Rocq broker and wrapper changes
+- `bash tests/test-beam.sh`: aggregate default Beam surface
+- `bash tests/test-maintainer.sh`: maintainer harness and defensive-validation helpers
 - `bash scripts/lint-shell.sh`: shell wrappers, installer, and shell tests
 
 More detail lives in [docs/TESTING.md](docs/TESTING.md).

@@ -55,6 +55,9 @@ lean_exe "runAt-handle-lifecycle-test" where
 lean_exe "runAt-mcts-proof-search-test" where
   root := `RunAtTest.Scenario.MctsProofSearchTest
 
+lean_exe "runAt-parallel-grind-batch-test" where
+  root := `RunAtTest.Scenario.ParallelGrindBatchTest
+
 lean_exe "runAt-nested-handle-failure-test" where
   root := `RunAtTest.Handle.NestedHandleFailureTest
 

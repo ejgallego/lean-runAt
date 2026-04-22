@@ -8,7 +8,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-lake build RunAt:shared runAt-test runAt-scenario-test runAt-scenario-api-test runAt-scenario-stress-test runAt-handle-api-test runAt-handle-restart-test runAt-handle-lifecycle-test runAt-mcts-proof-search-test runAt-nested-handle-failure-test runAt-request-surface-test runAt-search-workload-report > /dev/null
+lake build RunAt:shared > /dev/null
 
 run_case() {
   local name="$1"
@@ -16,7 +16,7 @@ run_case() {
   echo "interactive: $name"
   actual="$(mktemp)"
   trap 'rm -f "$actual"' RETURN
-  .lake/build/bin/runAt-test "tests/interactive/${name}.lean" > /dev/null 2> "$actual"
+  lake env lean --run RunAtTest/TestRunner.lean "tests/interactive/${name}.lean" > /dev/null 2> "$actual"
   diff -u "tests/interactive/expected/${name}.out" "$actual"
   rm -f "$actual"
   trap - RETURN
@@ -25,37 +25,64 @@ run_case() {
 run_scenario_case() {
   local name="$1"
   echo "scenario: $name"
-  .lake/build/bin/runAt-scenario-test "tests/scenario/${name}.scn" > /dev/null
+  lake env lean --run RunAtTest/ScenarioRunner.lean "tests/scenario/${name}.scn" > /dev/null
 }
 
 run_scenario_api_case() {
   echo "scenario-api"
-  .lake/build/bin/runAt-scenario-api-test > /dev/null
+  lake env lean --run RunAtTest/Scenario/ApiTest.lean > /dev/null
 }
 
 run_scenario_stress_case() {
   echo "scenario-stress"
-  .lake/build/bin/runAt-scenario-stress-test > /dev/null
+  lake env lean --run RunAtTest/Scenario/StressTest.lean > /dev/null
 }
 
 run_handle_api_case() {
   echo "handle-api"
-  .lake/build/bin/runAt-handle-api-test > /dev/null
+  lake env lean --run RunAtTest/Handle/ApiTest.lean > /dev/null
 }
 
 run_handle_restart_case() {
   echo "handle-restart"
-  .lake/build/bin/runAt-handle-restart-test > /dev/null
+  lake env lean --run RunAtTest/Handle/RestartTest.lean > /dev/null
 }
 
 run_handle_lifecycle_case() {
   echo "handle-lifecycle"
-  .lake/build/bin/runAt-handle-lifecycle-test > /dev/null
+  lake env lean --run RunAtTest/Handle/LifecycleTest.lean > /dev/null
 }
 
 run_mcts_proof_search_case() {
   echo "mcts-proof-search"
-  .lake/build/bin/runAt-mcts-proof-search-test > /dev/null
+  lake env lean --run RunAtTest/Scenario/MctsProofSearchTest.lean > /dev/null
+}
+
+run_parallel_grind_batch_case() {
+  local report
+  echo "parallel-grind-batch"
+  report="$(mktemp)"
+  trap 'rm -f "$report"' RETURN
+  lake env lean --run RunAtTest/Scenario/ParallelGrindBatchTest.lean > "$report"
+  python3 - "$report" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+
+assert data["kind"] == "parallelGrindBatchReport", data
+assert data["fixture"] == "tests/scenario/docs/ParallelGrind10.lean", data
+assert data["scannedSorryCount"] == 100, data
+assert data["declarationSorryDiagnosticCount"] == 10, data
+assert data["remainingSorryDiagnosticCount"] == 0, data
+assert data["runAtBatchWallTimeUs"] > 0, data
+assert data["changeBatchILeansWallTimeUs"] > 0, data
+assert data["saveReady"] is True, data
+assert data["saveReadyReason"] == "ok", data
+assert data["diagnosticErrorCount"] == 0, data
+assert data["commandErrorCount"] == 0, data
+PY
+  rm -f "$report"
+  trap - RETURN
 }
 
 run_search_workload_case() {
@@ -63,7 +90,7 @@ run_search_workload_case() {
   echo "search-workload"
   report="$(mktemp)"
   trap 'rm -f "$report"' RETURN
-  .lake/build/bin/runAt-search-workload-report 48 20260321 > "$report"
+  lake env lean --run RunAtTest/Scenario/SearchWorkloadReport.lean 48 20260321 > "$report"
   python3 - "$report" <<'PY'
 import json, sys
 with open(sys.argv[1]) as f:
@@ -93,12 +120,12 @@ PY
 
 run_nested_handle_failure_case() {
   echo "nested-handle-failure"
-  .lake/build/bin/runAt-nested-handle-failure-test > /dev/null
+  lake env lean --run RunAtTest/Handle/NestedHandleFailureTest.lean > /dev/null
 }
 
 run_request_surface_case() {
   echo "request-surface"
-  .lake/build/bin/runAt-request-surface-test > /dev/null
+  lake env lean --run RunAtTest/RequestSurfaceTest.lean > /dev/null
 }
 
 run_case asyncEditAwait
@@ -144,6 +171,7 @@ run_handle_api_case
 run_handle_restart_case
 run_handle_lifecycle_case
 run_mcts_proof_search_case
+run_parallel_grind_batch_case
 run_request_surface_case
 run_search_workload_case
 run_nested_handle_failure_case

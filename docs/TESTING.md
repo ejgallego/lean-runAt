@@ -1,127 +1,212 @@
 # Testing
 
-The current test story is good for an alpha repository, but it is recent and mostly end-to-end.
+The repository now treats testing as three distinct surfaces:
 
-Most of the harness was built over March 10-11, 2026. Coverage is strongest around externally
-visible behavior: request semantics, stale-state handling, cancellation, handle invalidation, and
-Beam daemon integration.
+- `LSP`: every method registered by the Lean plugin in [RunAt/Plugin.lean](../RunAt/Plugin.lean)
+- `Beam`: broker, daemon/client protocol, CLI wrapper, install/runtime packaging, toolchain support,
+  and Rocq support
+- `Maintainer`: local workflow helpers and defensive validation wrappers that are not part of the
+  product surface
 
-## Current Coverage
+This split is organizational. It is also now the only supported top-level test layout.
 
-- interactive file-anchored regressions through [tests/test.sh](../tests/test.sh)
-- multi-document and async behavior through the scenario DSL in [tests/scenario](../tests/scenario)
-- programmable scenario coverage through [RunAt/Scenario.lean](../RunAt/Scenario.lean)
-- shuffled concurrent workload coverage through [RunAt/ScenarioStressTest.lean](../RunAt/ScenarioStressTest.lean)
-- follow-up handle coverage through [tests/scenario/handleDsl.scn](../tests/scenario/handleDsl.scn),
-  [tests/scenario/handleLinearDsl.scn](../tests/scenario/handleLinearDsl.scn),
-  [tests/scenario/handleNestedBranchDsl.scn](../tests/scenario/handleNestedBranchDsl.scn),
-  [tests/scenario/handleProofBranchDsl.scn](../tests/scenario/handleProofBranchDsl.scn),
-  [tests/scenario/handleSearchCancelDsl.scn](../tests/scenario/handleSearchCancelDsl.scn),
-  [tests/scenario/handleCancelDsl.scn](../tests/scenario/handleCancelDsl.scn), and
-  [tests/scenario/handleInvalidationDsl.scn](../tests/scenario/handleInvalidationDsl.scn)
-- handle-specific API assertions in [RunAt/HandleApiTest.lean](../RunAt/HandleApiTest.lean) and
-  [RunAt/HandleRestartTest.lean](../RunAt/HandleRestartTest.lean)
-- nested handle failure-shape assertions in
-  [RunAt/NestedHandleFailureTest.lean](../RunAt/NestedHandleFailureTest.lean)
-- fast Beam daemon smoke coverage in [tests/test-broker-fast.sh](../tests/test-broker-fast.sh),
-  including completed barrier progress vs partial request progress expectations
-- GitHub Actions main coverage in [.github/workflows/ci.yml](../.github/workflows/ci.yml), whose
-  Linux job set now also runs on `macos-latest`
-- GitHub Actions broker smoke coverage on both Ubuntu and macOS through the matrixed
-  `broker-fast` job in [.github/workflows/ci.yml](../.github/workflows/ci.yml)
-- slower wrapper/install coverage in [tests/test-broker-slow.sh](../tests/test-broker-slow.sh)
-- experimental Lean broker `request_at` coverage through
-  [RunAtTest/Broker/SmokeTest.lean](../RunAtTest/Broker/SmokeTest.lean) and
-  [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh), including whitelisted request
-  success, stdin JSON extras, stats accounting, and rejection of user-supplied `textDocument` /
-  `position` overrides
-- explicit `lean-beam sync` regression coverage for diagnostics-wait behavior and compact
-  `fileProgress.done` reporting in [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh),
-  including stale-import cases where the diagnostics barrier must fail instead of reporting a
-  partial success
-- wrapper coverage for alpha Lean handle mint / continue / linear-continue / release flows in
-  [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh)
-- wrapper coverage for the installed `lean-beam-search` helper in
-  [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh)
-- PID-isolated sandbox wrapper coverage in
-  [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh), which checks that a
-  later sandboxed wrapper invocation reuses a live daemon via its endpoint and that overlapping
-  wrapper requests on the same root do not kill each other's daemon mid-flight; this regression is
-  Linux-only because it depends on `bwrap`
-- zero-build save regression coverage in [tests/test-broker-save-olean.sh](../tests/test-broker-save-olean.sh),
-  including exact-target replay, downstream importer reuse after daemon shutdown, and a timed
-  race where a mid-save edit must leave the saved module stale for later `lake build`
-- repo-local Codex worktree discipline coverage in [tests/test-codex-harness.sh](../tests/test-codex-harness.sh),
-  which checks maintainer workflow helpers that start new tasks in dedicated worktrees and reject
-  the primary checkout unless explicitly overridden
+## LSP Surface
+
+The LSP surface is everything registered in [RunAt/Plugin.lean](../RunAt/Plugin.lean), including:
+
+- `$/lean/runAt`
+- goals-before / goals-after requests
+- follow-up handle mint / continue / release requests
+- Beam-facing internal LSP helpers such as `saveArtifacts`, `saveReadiness`, and `directImports`
+
+Primary entrypoint:
+
+- [tests/test-lsp.sh](../tests/test-lsp.sh)
+
+Current LSP coverage includes:
+
+- interactive file-anchored regressions through [tests/interactive](../tests/interactive) and
+  [RunAtTest/TestRunner.lean](../RunAtTest/TestRunner.lean)
+- multi-document and async scenario coverage through [tests/scenario](../tests/scenario) and
+  [RunAtTest/ScenarioRunner.lean](../RunAtTest/ScenarioRunner.lean)
+- programmable scenario API coverage in [RunAtTest/Scenario/ApiTest.lean](../RunAtTest/Scenario/ApiTest.lean)
+- shuffled concurrent workload coverage in
+  [RunAtTest/Scenario/StressTest.lean](../RunAtTest/Scenario/StressTest.lean)
+- handle API, restart, lifecycle, and nested-failure coverage in
+  [RunAtTest/Handle/ApiTest.lean](../RunAtTest/Handle/ApiTest.lean),
+  [RunAtTest/Handle/RestartTest.lean](../RunAtTest/Handle/RestartTest.lean),
+  [RunAtTest/Handle/LifecycleTest.lean](../RunAtTest/Handle/LifecycleTest.lean), and
+  [RunAtTest/Handle/NestedHandleFailureTest.lean](../RunAtTest/Handle/NestedHandleFailureTest.lean)
+- full registered LSP request coverage in
+  [RunAtTest/RequestSurfaceTest.lean](../RunAtTest/RequestSurfaceTest.lean)
+- search-style handle workflows in
+  [RunAtTest/Scenario/MctsProofSearchTest.lean](../RunAtTest/Scenario/MctsProofSearchTest.lean)
+- parallel multi-sorry speculative solve plus atomic batch-edit coverage in
+  [RunAtTest/Scenario/ParallelGrindBatchTest.lean](../RunAtTest/Scenario/ParallelGrindBatchTest.lean),
+  which currently anchors the outer declarations from the `10` declaration-level `sorry`
+  diagnostics, scans the file text for the exact `100` branch-local `sorry` tokens, launches one
+  speculative request per token, and then mirrors those exact token replacements in one atomic
+  batched `didChange`
 - lightweight search-workload latency reporting in
   [RunAtTest/Scenario/SearchWorkloadReport.lean](../RunAtTest/Scenario/SearchWorkloadReport.lean)
   and [scripts/search-workload-report.sh](../scripts/search-workload-report.sh)
 
-## Search-Style Coverage
+### Kinds Of LSP Tests
 
-The repo now has a seeded MCTS-style proof-search regression in
-[RunAtTest/Scenario/MctsProofSearchTest.lean](../RunAtTest/Scenario/MctsProofSearchTest.lean).
+The current LSP suite is mostly a black-box integration suite around the Lean server plugin. It is
+not primarily a unit-test suite.
 
-That test exercises:
+The main LSP test kinds are:
 
-- repeated playouts from one preserved proof handle
-- non-linear branching from the same recovered basis
-- linear continuation on derived handles
-- semantic-failure probes that must not mutate preserved handles
-- linear failure probes that must consume the current handle
-- cancellation on branched proof-search handles, including preserved-parent reuse and linear-handle consumption
-- explicit release of explored side branches
-- stale invalidation of live search handles after a document edit
-- nested semantic failures that preserve proof-state payloads, suppress successor handles, and still distinguish non-linear from linear handle reuse
+- golden file-anchored request tests through
+  [tests/interactive](../tests/interactive) and
+  [RunAtTest/TestRunner.lean](../RunAtTest/TestRunner.lean), where inline directives drive requests
+  and stderr output is diffed against checked-in golden files
+- stateful scenario DSL tests through
+  [tests/scenario](../tests/scenario) and
+  [RunAtTest/ScenarioRunner.lean](../RunAtTest/ScenarioRunner.lean), where `.scn` scripts exercise
+  open / change / sync / close / send / await / cancel flows over one or more documents
+- programmatic scenario integration tests through
+  [RunAtTest/Scenario/ApiTest.lean](../RunAtTest/Scenario/ApiTest.lean) and
+  [RunAtTest/RequestSurfaceTest.lean](../RunAtTest/RequestSurfaceTest.lean), where Lean code calls
+  the scenario API directly instead of going through the `.scn` DSL
+- targeted handle invariant tests through
+  [RunAtTest/Handle/ApiTest.lean](../RunAtTest/Handle/ApiTest.lean),
+  [RunAtTest/Handle/LifecycleTest.lean](../RunAtTest/Handle/LifecycleTest.lean),
+  [RunAtTest/Handle/RestartTest.lean](../RunAtTest/Handle/RestartTest.lean), and
+  [RunAtTest/Handle/NestedHandleFailureTest.lean](../RunAtTest/Handle/NestedHandleFailureTest.lean)
+- concurrency and stale-state correctness tests through
+  [RunAtTest/Scenario/StressTest.lean](../RunAtTest/Scenario/StressTest.lean)
+- search-style correctness tests through
+  [RunAtTest/Scenario/MctsProofSearchTest.lean](../RunAtTest/Scenario/MctsProofSearchTest.lean)
+  and the workload-report checks in
+  [RunAtTest/Scenario/SearchWorkloadReport.lean](../RunAtTest/Scenario/SearchWorkloadReport.lean)
 
-This sits on top of earlier search-enabling coverage:
+What the LSP suite currently does not emphasize:
 
-- non-linear proof branching in
-  [tests/scenario/handleProofBranchDsl.scn](../tests/scenario/handleProofBranchDsl.scn)
-- programmable request orchestration through [RunAt/Scenario.lean](../RunAt/Scenario.lean)
-- shuffled concurrent workload coverage in
-  [RunAt/ScenarioStressTest.lean](../RunAt/ScenarioStressTest.lean)
-- nested multi-goal cursor corner cases in
-  [tests/interactive/proofNestedConstructorOrder.lean](../tests/interactive/proofNestedConstructorOrder.lean),
-  [tests/interactive/proofNestedBulletWhitespace.lean](../tests/interactive/proofNestedBulletWhitespace.lean), and
-  [tests/interactive/proofNestedRightSibling.lean](../tests/interactive/proofNestedRightSibling.lean)
-- nested right-sibling handle continuation in
-  [tests/scenario/handleNestedRightBranchDsl.scn](../tests/scenario/handleNestedRightBranchDsl.scn)
+- fine-grained pure unit tests
+- property-based tests
+- fuzzing
+- benchmark-style performance assertions
 
-What still does not exist:
+Run the LSP surface when the change touches:
 
-- a benchmark-style test for much larger search trees
-- a search test that models a full UCT scoring policy rather than seeded playout branching
-- performance assertions around many thousands of successor handles
+- request semantics
+- proof-vs-command basis selection
+- position handling
+- cancellation
+- handle invalidation or lifecycle
+- stale snapshot behavior
+- per-request isolation
+- any method in [RunAt/Plugin.lean](../RunAt/Plugin.lean)
 
-So the current state is: the repo now tests a real search-style handle workflow, but it is still a
-correctness regression, not yet a performance benchmark.
+## Beam Surface
 
-## Broker Suites
+The Beam surface starts above the plugin boundary. It covers:
 
-- start with [tests/test-broker-fast.sh](../tests/test-broker-fast.sh) for broker-stream, barrier,
-  and request-stream contract changes; this is the quickest broker signal
-- add [tests/test-broker-slow.sh](../tests/test-broker-slow.sh) when the change touches wrapper,
-  install, or bundle-resolution behavior
-- use [tests/test-broker-rocq.sh](../tests/test-broker-rocq.sh) for Rocq broker and wrapper
-  coverage, including `coq-lsp` discovery from project-local `_opam` roots and the active PATH
-- use [tests/test-broker.sh](../tests/test-broker.sh) to execute both suites together before
-  landing a broader broker-facing change
-- use [scripts/lint-shell.sh](../scripts/lint-shell.sh) when you change shell wrappers, installer,
-  or shell-based test harnesses; CI runs the same `shellcheck` pass
+- broker transport and request contracts
+- Beam daemon lifecycle and stream handling
+- `lean-beam` CLI and wrapper UX
+- save replay, runtime bundle resolution, and install layout
+- supported-toolchain validation
+- Rocq broker and wrapper behavior
 
-## Important Next Gap
+### Default Beam Entrypoints
 
-If Monte Carlo style proof search is an important use case, the next missing regression is a larger
-search workload that:
+- [tests/test-beam-fast.sh](../tests/test-beam-fast.sh): fast broker stream, barrier, and request-contract coverage
+- [tests/test-beam-slow.sh](../tests/test-beam-slow.sh): wrapper, sandbox-wrapper, and save-replay coverage
+- [tests/test-beam-install.sh](../tests/test-beam-install.sh): installer and installed-runtime layout
+- [tests/test-beam.sh](../tests/test-beam.sh): aggregate default Beam surface
 
-- starts from one preserved proof basis
-- performs many more `runWith` playouts than the current seeded regression
-- branches both linearly and non-linearly at greater depth
-- mixes semantic failure, success, cancellation, and stale invalidation
-- verifies that old and successor handles behave correctly under heavier branching pressure
-- begins to approximate realistic tree-policy plus playout workloads rather than a small correctness loop
+### Additional Beam Lanes
 
-That would move the repo from “search-style correctness coverage exists” toward “search workloads
-are stressed in a way that looks like real proof search.”
+- [tests/test-beam-toolchain-compat.sh](../tests/test-beam-toolchain-compat.sh) `<toolchain>`:
+  supported-toolchain bundle validation
+- [tests/test-beam-rocq.sh](../tests/test-beam-rocq.sh): Rocq broker and wrapper coverage
+
+Current Beam coverage includes:
+
+- fast Beam daemon smoke, request-stream, save-stream, startup-handshake, and tracked-diagnostic
+  dedup coverage through [tests/test-beam-fast.sh](../tests/test-beam-fast.sh),
+  [RunAtTest/Broker/SmokeTest.lean](../RunAtTest/Broker/SmokeTest.lean),
+  [RunAtTest/Broker/SaveStreamTest.lean](../RunAtTest/Broker/SaveStreamTest.lean),
+  [RunAtTest/Broker/RequestStreamContractTest.lean](../RunAtTest/Broker/RequestStreamContractTest.lean),
+  [RunAtTest/Broker/StartupHandshakeTest.lean](../RunAtTest/Broker/StartupHandshakeTest.lean), and
+  [RunAtTest/Broker/StreamDedupTest.lean](../RunAtTest/Broker/StreamDedupTest.lean)
+- wrapper coverage for `lean-run-at`, handle mint / continue / release, progress forwarding,
+  hidden compatibility aliases, stats accounting, `doctor`, and stale-import recovery hints in
+  [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh), which now aggregates the focused
+  wrapper slices
+  [tests/test-beam-wrapper-probe.sh](../tests/test-beam-wrapper-probe.sh),
+  [tests/test-beam-wrapper-runtime.sh](../tests/test-beam-wrapper-runtime.sh),
+  [tests/test-beam-wrapper-sync-save.sh](../tests/test-beam-wrapper-sync-save.sh),
+  [tests/test-beam-wrapper-handle.sh](../tests/test-beam-wrapper-handle.sh), and
+  [tests/test-beam-wrapper-diagnostics.sh](../tests/test-beam-wrapper-diagnostics.sh)
+- Linux-only PID-isolated sandbox wrapper coverage in
+  [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)
+- zero-build save replay and stale-save race coverage in
+  [tests/test-broker-save-olean.sh](../tests/test-broker-save-olean.sh)
+- install flow, installed runtime layout, manifest metadata, `supported-toolchains`, and `doctor`
+  coverage in [tests/test-beam-install.sh](../tests/test-beam-install.sh)
+- supported-toolchain bundle-install coverage in
+  [tests/test-beam-toolchain-compat.sh](../tests/test-beam-toolchain-compat.sh)
+- Rocq wrapper and broker smoke coverage in
+  [tests/test-beam-wrapper-rocq.sh](../tests/test-beam-wrapper-rocq.sh) and
+  [RunAtTest/Broker/RocqSmokeTest.lean](../RunAtTest/Broker/RocqSmokeTest.lean)
+
+Run the Beam surface when the change touches:
+
+- Beam broker protocol or transport
+- request / progress / diagnostics stream behavior
+- Beam daemon session or restart logic
+- wrapper CLI behavior
+- bundle resolution or install layout
+- `doctor`, `supported-toolchains`, or toolchain gating
+- save replay or save barrier behavior
+- Rocq integration
+
+## Maintainer Surface
+
+The maintainer surface is not part of the public or agent-facing product story. It covers local
+workflow helpers that exist to keep contributors and maintainers safe:
+
+- [tests/test-maintainer.sh](../tests/test-maintainer.sh)
+- [tests/test-codex-harness.sh](../tests/test-codex-harness.sh)
+- [tests/test-validate-defensive.sh](../tests/test-validate-defensive.sh)
+
+The aggregate maintainer runner skips
+[tests/test-codex-harness.sh](../tests/test-codex-harness.sh) when the current checkout has tracked
+edits, because the harness regression intentionally verifies that new task worktrees start from a
+clean primary checkout.
+
+Run these when the change touches:
+
+- [scripts/codex-harness.sh](../scripts/codex-harness.sh)
+- [scripts/codex-session-start.sh](../scripts/codex-session-start.sh)
+- [scripts/validate-defensive.sh](../scripts/validate-defensive.sh)
+
+These checks are intentionally separate from the default product-surface runners.
+
+## CI Map
+
+The current GitHub Actions workflow in [.github/workflows/ci.yml](../.github/workflows/ci.yml)
+maps to the testing surfaces like this:
+
+- `build-and-test`: [tests/test-lsp.sh](../tests/test-lsp.sh)
+- `beam-fast`: [tests/test-beam-fast.sh](../tests/test-beam-fast.sh)
+- `beam-slow`: [tests/test-beam-slow.sh](../tests/test-beam-slow.sh)
+- `beam-install`: [tests/test-beam-install.sh](../tests/test-beam-install.sh)
+- `beam-toolchain-compat`: [tests/test-beam-toolchain-compat.sh](../tests/test-beam-toolchain-compat.sh) `<toolchain>`
+- `beam-rocq`: [tests/test-beam-rocq.sh](../tests/test-beam-rocq.sh)
+- `shell-lint`: [scripts/lint-shell.sh](../scripts/lint-shell.sh)
+
+## Coverage Gaps
+
+The main current gaps are:
+
+- the search-style LSP surface still has correctness-heavy coverage, but not a larger benchmark-style
+  workload with much deeper branching pressure
+- the Beam `deps` path is still mostly covered by happy-path smoke checks even though
+  [Beam/Broker/Deps.lean](../Beam/Broker/Deps.lean) is explicitly a stopgap scanner
+- maintainer-surface regressions are documented and runnable, but they are still separate from the
+  default product CI lanes

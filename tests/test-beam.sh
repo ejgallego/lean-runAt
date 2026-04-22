@@ -8,5 +8,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-bash tests/test-broker-fast.sh
-bash tests/test-broker-slow.sh
+bash tests/test-beam-fast.sh
+bash tests/test-beam-slow.sh
+bash tests/test-beam-install.sh

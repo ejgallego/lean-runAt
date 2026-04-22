@@ -97,11 +97,14 @@ When working locally:
   do not place long-lived task worktrees under `/tmp`
 - keep destructive shell cleanup scoped to owned temp/worktree paths; do not use broad `rm` or
   `rm -rf` against repo-local `.beam`, install caches, or user homes as part of normal workflows
-- for broker protocol / stream / barrier changes, run `bash tests/test-broker-fast.sh` first
-- for wrapper / install / bundle-resolution changes, also run `bash tests/test-broker-slow.sh`
+- for LSP request / handle / scenario changes, run `bash tests/test-lsp.sh`
+- for Beam broker protocol / stream / barrier changes, run `bash tests/test-beam-fast.sh` first
+- for Beam wrapper / install / bundle-resolution changes, also run `bash tests/test-beam-slow.sh`
+- for supported Lean toolchain changes, add `bash tests/test-beam-toolchain-compat.sh <toolchain>`
+- for Rocq broker / wrapper changes, use `bash tests/test-beam-rocq.sh`
 - for risky local install / wrapper validation, prefer `bash scripts/validate-defensive.sh` so slow
   suites run in a cloned `/tmp` sandbox with fake homes and guarded path operations
-- use `bash tests/test-broker.sh` when you want the aggregate broker suite
+- use `bash tests/test-beam.sh` when you want the aggregate default Beam suite
 - prefer the broker client or wrapper over raw LSP when the task fits
 - use Lean `deps` before planning multi-file edits
 - use Rocq only through `coq-lsp`
