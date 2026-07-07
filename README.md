@@ -6,58 +6,20 @@ The extensions provide Lean-specific capabilities, and the broker exposes them t
 [`lean-beam` CLI](docs/SETUP.md#use-beam-from-a-lean-project) and an
 [MCP server](docs/SETUP.md#mcp-setup) for agent- and tool-facing workflows.
 
-```mermaid
-flowchart TB
-  subgraph level1["Level 1: agents and tools"]
-    cli["CLI / shell / agent"]
-    mcp["MCP client / agent"]
-  end
+Its central operation is speculative execution: a client sends
+[`runAt`](docs/STATUS.md#core-lean-surface) for a position in a saved file and a Lean command or
+tactic, and Beam checks whether that text would work there without changing the file.
 
-  subgraph level2["Level 2: Beam broker"]
-    broker["Beam broker<br/>request routing<br/>session ownership"]
-  end
-
-  subgraph level3["Level 3: Lean instances"]
-    subgraph lsp1["Lean LSP server"]
-      lean1["Lean"]
-      plugin1["Beam LSP plugin"]
-    end
-    subgraph lsp2["Lean LSP server"]
-      lean2["Lean"]
-      plugin2["Beam LSP plugin"]
-    end
-    subgraph lspn["Lean LSP server"]
-      leanN["Lean"]
-      pluginN["Beam LSP plugin"]
-    end
-  end
-
-  cli -- lean-beam --> broker
-  mcp -- lean-beam-mcp --> broker
-  broker --> lsp1
-  broker -- Lean LSP + Beam requests --> lsp2
-  broker --> lspn
-  lean1 --- plugin1
-  lean2 --- plugin2
-  leanN --- pluginN
-```
-
-Beam keeps the agent-facing surface small: clients talk to the broker, and the broker owns request
-routing plus one or more Lean LSP sessions with the Beam plugin loaded.
-
-Beam lets a client try Lean commands or tactics at specific positions in saved files without
-changing those files. The central Beam extension is speculative execution through
-[`runAt`](docs/STATUS.md#core-lean-surface), exposed by the CLI as
+`runAt` is exposed by the CLI as
 [`lean-beam run-at`](docs/SETUP.md#use-beam-from-a-lean-project) and through MCP as
-[`lean_run_at`](docs/MCP.md#public-tools). Because these probes can be issued
-concurrently, agents and tools can cheaply explore several "would this work here?" possibilities in
-the real module context.
+[`lean_run_at`](docs/MCP.md#public-tools). Because these probes can be issued concurrently, agents
+and tools can cheaply explore several "would this work here?" possibilities in the real module
+context.
 
-Together, the LSP extensions, CLI, and MCP interface are intended to make that loop cheaper and more
-structured than repeatedly creating scratch files or using full `lake build` runs as the inner loop.
-
-Beam is implemented in Lean, which lets it integrate more directly with Lean server state, saved
-snapshots, and synchronization where that matters.
+Together, the LSP extensions, CLI, and MCP interface make this loop cheaper and more structured than
+repeatedly creating scratch files or using full `lake build` runs as the inner loop. Beam is
+implemented in Lean, which lets it integrate directly with Lean server state, saved snapshots, and
+synchronization where that matters.
 
 We have found Beam useful for proof repair, proof search experiments, proof translation and porting,
 autoformalization experiments, and regular AI-assisted Lean editing.
@@ -76,6 +38,29 @@ tracked in [docs/STATUS.md](docs/STATUS.md).
 Most readers should start with [Install](#install), then use [docs/SETUP.md](docs/SETUP.md) for
 toolchains, first CLI commands, agent-skill setup, and MCP registration. Release-facing changes are
 tracked in [CHANGELOG.md](CHANGELOG.md).
+
+## Install
+
+Install or update Beam from a Lean Beam checkout:
+
+```bash
+./scripts/install-beam.sh
+```
+
+Run the installer again when you update the checkout and want the installed runtime to match it.
+Setup details, validated and compatible toolchains, agent-skill installation, MCP registration,
+direct CLI examples, installer locations, overrides, and offline advice live in
+[docs/SETUP.md](docs/SETUP.md).
+
+Beam retains prior immutable runtimes so updates remain atomic. Use `lean-beam prune` to preview
+old installed state and follow the [prune guide](docs/SETUP.md#prune-old-installed-state) before
+applying cleanup.
+
+Lean Beam fully validates exact toolchains listed in
+[`validated-lean-toolchains`](validated-lean-toolchains) and locally qualifies canonical RC/patch
+variants from [`compatible-lean-release-lines`](compatible-lean-release-lines). See
+[docs/SETUP.md](docs/SETUP.md#validated-and-compatible-toolchains) for bundle setup and
+[docs/CUSTOM_TOOLCHAINS.md](docs/CUSTOM_TOOLCHAINS.md) for explicitly accepted local Lean builds.
 
 ## Current Beta Surface
 
@@ -111,28 +96,49 @@ If no successful clean CI result is available, or server-sensitive elaboration i
 one-time local batch check described in the
 [sync and diagnostics contract](docs/SYNC_AND_DIAGNOSTICS.md#development-checkpoints-and-batch-validation).
 
-## Install
+## Architecture At A Glance
 
-Install or update Beam from a Lean Beam checkout:
+Most clients only need the CLI or MCP surface, but the split below explains where request routing
+and Lean state live.
 
-```bash
-./scripts/install-beam.sh
+```mermaid
+flowchart TB
+  subgraph clients["Clients and agents"]
+    cli["CLI / shell / agent"]
+    mcp["MCP client / agent"]
+  end
+
+  subgraph runtime["Beam broker"]
+    broker["request routing<br/>session ownership"]
+  end
+
+  subgraph sessions["Lean LSP sessions"]
+    subgraph lsp1["Lean LSP server"]
+      lean1["Lean"]
+      plugin1["Beam LSP plugin"]
+    end
+    subgraph lsp2["Lean LSP server"]
+      lean2["Lean"]
+      plugin2["Beam LSP plugin"]
+    end
+    subgraph lspn["Lean LSP server"]
+      leanN["Lean"]
+      pluginN["Beam LSP plugin"]
+    end
+  end
+
+  cli -- lean-beam --> broker
+  mcp -- lean-beam-mcp --> broker
+  broker --> lsp1
+  broker -- Lean LSP + Beam requests --> lsp2
+  broker --> lspn
+  lean1 --- plugin1
+  lean2 --- plugin2
+  leanN --- pluginN
 ```
 
-Run the installer again when you update the checkout and want the installed runtime to match it.
-Setup details, validated and compatible toolchains, agent-skill installation, MCP registration,
-direct CLI examples, installer locations, overrides, and offline advice live in
-[docs/SETUP.md](docs/SETUP.md).
-
-Beam retains prior immutable runtimes so updates remain atomic. Use `lean-beam prune` to preview
-old installed state and follow the [prune guide](docs/SETUP.md#prune-old-installed-state) before
-applying cleanup.
-
-Lean Beam fully validates exact toolchains listed in
-[`validated-lean-toolchains`](validated-lean-toolchains) and locally qualifies canonical RC/patch
-variants from [`compatible-lean-release-lines`](compatible-lean-release-lines). See
-[docs/SETUP.md](docs/SETUP.md#validated-and-compatible-toolchains) for bundle setup and
-[docs/CUSTOM_TOOLCHAINS.md](docs/CUSTOM_TOOLCHAINS.md) for explicitly accepted local Lean builds.
+Clients talk to the broker, and the broker owns request routing plus one or more Lean LSP sessions
+with the Beam plugin loaded.
 
 ## Documentation Map
 
