@@ -99,7 +99,7 @@ private def withWrapperClientRequestId (req : Request) : IO WrapperBrokerRequest
 private def WrapperBrokerRequest.visibleResponse
     (wrapperReq : WrapperBrokerRequest)
     (resp : Response) : Response :=
-  { resp with clientRequestId? := wrapperReq.visibleClientRequestId? }
+  resp.setClientRequestId wrapperReq.visibleClientRequestId?
 
 private def mkInterruptWatcher? (clientRequestId? : Option String) : IO (Option InterruptWatcher) := do
   match clientRequestId? with

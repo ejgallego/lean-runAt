@@ -1343,7 +1343,7 @@ private def saveCompletedResponse
     (closeAfter : Bool) : Response :=
   let result :=
     if closeAfter then
-      toJson ({ closed := true, saved := saved.result } : CloseSaveResult)
+      toJson ({ saved := saved.result } : CloseSaveResult)
     else
       toJson saved.result
   responseWithFileProgress (Response.success result) saved.fileProgress?
@@ -1567,7 +1567,7 @@ private def saveOleanCore
     uri := started.uri
     version := started.version
     spec
-    result := leanSaveResult spec started.version started.textTraceHash syncResult
+    result := leanSaveResult spec started.textTraceHash syncResult
     fileProgress? := barrierProgress?
   }
 

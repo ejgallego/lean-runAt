@@ -48,7 +48,7 @@ def responseWithFileProgress
     (resp : Response)
     (fileProgress? : Option SyncFileProgress) : Response :=
   match fileProgress? with
-  | some progress => { resp with fileProgress? := some progress }
+  | some progress => resp.withFileProgress (some progress)
   | none => resp
 
 def syncBarrierIncompleteResponse

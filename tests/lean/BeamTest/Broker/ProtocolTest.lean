@@ -93,7 +93,7 @@ private def syncResultFor
     (warningCount : Nat := 0) : SyncFileResult := {
   path := "Demo.lean"
   version
-  diagnostics := { counts := { warning := warningCount, total := warningCount } }
+  diagnostics := { counts := { warning := warningCount } }
   readiness := {
     saveReady
     reason
@@ -145,7 +145,7 @@ private def checkStreamMessageDecode : IO Unit := do
     fromJson? (α := StreamMessage) (toJson <| StreamMessage.mkResponse response)
   require "valid response stream kind" (validResponse.kind == .response)
 
-  let correlatedResponse := { response with clientRequestId? := some "req-response" }
+  let correlatedResponse := response.setClientRequestId (some "req-response")
   let validCorrelatedResponse ← expectOk "valid correlated response stream" <|
     fromJson? (α := StreamMessage) (toJson <| StreamMessage.mkResponse correlatedResponse)
   require "valid correlated response stream omits redundant outer request id"
@@ -227,9 +227,7 @@ private def checkResponseJsonDecode : IO Unit := do
 
 private def checkSaveResultJsonDecode : IO Unit := do
   let saveResult : SaveOleanResult := {
-    path := "Demo.lean"
     module := "Demo"
-    version := 7
     sourceHash := "9a9bdc9950870951"
     olean := "/tmp/Demo.olean"
     ilean := "/tmp/Demo.ilean"
@@ -242,10 +240,14 @@ private def checkSaveResultJsonDecode : IO Unit := do
     fromJson? (α := SaveOleanResult) (toJson saveResult)
   require "save result round-trip preserves source hash"
     (decodedSave.sourceHash == saveResult.sourceHash)
+  require "save result derives its path from nested sync"
+    (decodedSave.path == "Demo.lean")
+  require "save result derives its version from nested sync"
+    (decodedSave.version == 7)
   require "save result round-trip preserves nested sync version"
     (decodedSave.sync.version == saveResult.sync.version)
 
-  let closeSaveResult : CloseSaveResult := { closed := true, saved := saveResult }
+  let closeSaveResult : CloseSaveResult := { saved := saveResult }
   let decodedCloseSave ← expectOk "close-save result round-trip" <|
     fromJson? (α := CloseSaveResult) (toJson closeSaveResult)
   require "close-save result round-trip preserves closure and nested save"
@@ -272,15 +274,12 @@ private def checkSaveResultJsonDecode : IO Unit := do
     (toJson closeSaveResult).setObjVal! "closed" (toJson false)
 
 private def checkOrderedJsonPretty : IO Unit := do
-  let resp : Response := {
-    ok := true
-    result? := some <| toJson <| syncResultFor 3
-    fileProgress? := some {
+  let resp : Response :=
+    (Response.success <| toJson <| syncResultFor 3).withFileProgress <| some {
       updates := 2
       done := true
       rangeEndLine? := some 1
     }
-  }
   let json := toJson resp
   let rendered := Beam.orderedJsonPretty json
   let expected := String.intercalate "\n" [

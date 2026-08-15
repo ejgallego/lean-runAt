@@ -279,6 +279,16 @@ private def optionalField? [FromJson α] (j : Json) (field : String) : Except St
   | .error _ =>
       pure none
 
+private def requireOnlyInputFields
+    (label : String)
+    (allowed : Array String) : Json → Except String Unit
+  | .obj fields =>
+      let unexpected := fields.foldl (init := #[]) fun unexpected field _ =>
+        if allowed.contains field then unexpected else unexpected.push field
+      unless unexpected.isEmpty do
+        throw s!"{label} accepts no undeclared input fields: {String.intercalate ", " unexpected.toList}"
+  | other => throw s!"{label} must be an object, got {other.compress}"
+
 /-- Input for Lean reference queries. -/
 structure ReferencesInput where
   path : String
@@ -429,10 +439,7 @@ structure PathInput where
   path : String
   deriving FromJson, ToJson
 
-/--
-Input for sync/refresh operations with optional diagnostic scope and final replay control.
-Save adapters reuse only the path and diagnostic scope.
--/
+/-- Input for sync/refresh operations with optional diagnostic scope and final replay control. -/
 structure SyncInput where
   path : String
   diagnosticScope? : Option Beam.Broker.DiagnosticScope := none
@@ -451,10 +458,31 @@ instance : ToJson SyncInput where
 
 instance : FromJson SyncInput where
   fromJson? j := do
+    requireOnlyInputFields "sync input" #["path", "diagnostic_scope", "diagnostics_in_result"] j
     let path ← j.getObjValAs? String "path"
     let diagnosticScope? ← optionalField? (α := Beam.Broker.DiagnosticScope) j "diagnostic_scope"
     let diagnosticsInResult? ← optionalField? (α := Bool) j "diagnostics_in_result"
     pure { path, diagnosticScope?, diagnosticsInResult? }
+
+/-- Input for save/close-save operations with optional live diagnostic scope. -/
+structure SaveInput where
+  path : String
+  diagnosticScope? : Option Beam.Broker.DiagnosticScope := none
+
+instance : ToJson SaveInput where
+  toJson input :=
+    Json.mkObj <|
+      [("path", toJson input.path)] ++
+      match input.diagnosticScope? with
+      | some diagnosticScope => [("diagnostic_scope", toJson diagnosticScope)]
+      | none => []
+
+instance : FromJson SaveInput where
+  fromJson? j := do
+    requireOnlyInputFields "save input" #["path", "diagnostic_scope"] j
+    let path ← j.getObjValAs? String "path"
+    let diagnosticScope? ← optionalField? (α := Beam.Broker.DiagnosticScope) j "diagnostic_scope"
+    pure { path, diagnosticScope? }
 
 def RunAtInput.toBrokerRequest
     (input : RunAtInput)
@@ -634,7 +662,7 @@ def SyncInput.toRefreshBrokerRequest (input : SyncInput) (root : String) : Beam.
   diagnosticsInResult? := input.diagnosticsInResult?
 }
 
-def SyncInput.toSaveBrokerRequest (input : SyncInput) (root : String) : Beam.Broker.Request := {
+def SaveInput.toSaveBrokerRequest (input : SaveInput) (root : String) : Beam.Broker.Request := {
   op := .saveOlean
   backend := .lean
   root? := some root
@@ -642,7 +670,7 @@ def SyncInput.toSaveBrokerRequest (input : SyncInput) (root : String) : Beam.Bro
   diagnosticScope? := input.diagnosticScope?
 }
 
-def SyncInput.toCloseSaveBrokerRequest (input : SyncInput) (root : String) : Beam.Broker.Request := {
+def SaveInput.toCloseSaveBrokerRequest (input : SaveInput) (root : String) : Beam.Broker.Request := {
   op := .close
   backend := .lean
   root? := some root
@@ -691,9 +719,9 @@ def Operation.toBrokerRequest
   | .refresh =>
       pure <| (← fromJson? (α := SyncInput) input).toRefreshBrokerRequest root
   | .save =>
-      pure <| (← fromJson? (α := SyncInput) input).toSaveBrokerRequest root
+      pure <| (← fromJson? (α := SaveInput) input).toSaveBrokerRequest root
   | .closeSave =>
-      pure <| (← fromJson? (α := SyncInput) input).toCloseSaveBrokerRequest root
+      pure <| (← fromJson? (α := SaveInput) input).toCloseSaveBrokerRequest root
   | .close =>
       pure <| (← fromJson? (α := PathInput) input).toCloseBrokerRequest root
 

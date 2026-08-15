@@ -85,12 +85,10 @@ partial def sendRequestWithStream
       let msg ← Transport.recvMsg client
       let stream ← decodeStreamMessage msg
       onStream stream
-      match stream.kind with
-      | .response =>
-          let some resp := stream.response?
-            | throw <| IO.userError "invalid Beam daemon response stream: missing response payload"
-          pure resp
-      | .fileProgress | .diagnostic =>
+      match stream with
+      | .response response =>
+          pure response
+      | .fileProgress .. | .diagnostic .. =>
           loop
     loop
   finally
@@ -101,17 +99,13 @@ partial def sendRequestWithCallbacks
     (req : Request)
     (callbacks : StreamCallbacks := {}) : IO Response := do
   sendRequestWithStream endpoint req fun stream => do
-    match stream.kind with
-    | .response =>
+    match stream with
+    | .response _ =>
         pure ()
-    | .fileProgress =>
-        let some progress := stream.fileProgress?
-          | throw <| IO.userError "invalid Beam daemon response stream: missing fileProgress payload"
-        callbacks.onFileProgress stream.clientRequestId? progress
-    | .diagnostic =>
-        let some diagnostic := stream.diagnostic?
-          | throw <| IO.userError "invalid Beam daemon response stream: missing diagnostic payload"
-        callbacks.onDiagnostic stream.clientRequestId? diagnostic
+    | .fileProgress clientRequestId? progress =>
+        callbacks.onFileProgress clientRequestId? progress
+    | .diagnostic clientRequestId? diagnostic =>
+        callbacks.onDiagnostic clientRequestId? diagnostic
 def sendRequestWithProgress
     (endpoint : Endpoint)
     (req : Request)

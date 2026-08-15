@@ -136,6 +136,8 @@ by `beam-client request-stream`; wrapper stderr should be treated as human-facin
 require an explicit top-level `ok` boolean, giving projection layers an unambiguous success/error
 discriminator. A successful response always includes `result`; response and stream envelopes reject
 undeclared fields, and typed save/close-save results reject incomplete or extended artifact shapes.
+Internally, tagged response/stream variants keep discriminants and payloads consistent, while
+redundant diagnostic totals and save/close-save result fields are derived from canonical data.
 
 `lean-beam-mcp` is the experimental stdio MCP entry point. User setup lives in
 [SETUP.md](SETUP.md#mcp-setup); implementation, protocol, tool-list, and conformance notes live in
@@ -282,8 +284,6 @@ Near-term work is mostly about hardening and simplifying:
 - add richer MCP progress percentages or bounded work-unit totals if Lean exposes them; keep
   structured MCP log messages for incremental diagnostics rather than overloading progress
   notifications or the final tool result
-- replace broker response and stream optional-payload products with tagged unions, and split
-  sync/refresh inputs from save inputs, so invalid protocol states cannot be constructed internally
 - keep the `sync`, `refresh`, `save`, and `close-save` projections aligned as the canonical
   sync-result schema evolves
 - keep Beam-daemon-side conveniences useful without turning them into a large public surface too early

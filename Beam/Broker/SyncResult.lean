@@ -16,7 +16,6 @@ namespace Beam.Broker
 
 private def diagnosticCounts (diagnostics : Array Diagnostic) : SyncDiagnosticCounts :=
   diagnostics.foldl (init := {}) fun counts diagnostic =>
-    let counts := { counts with total := counts.total + 1 }
     match effectiveSyncDiagnosticSeverity diagnostic with
     | some .error => { counts with error := counts.error + 1 }
     | some .warning => { counts with warning := counts.warning + 1 }

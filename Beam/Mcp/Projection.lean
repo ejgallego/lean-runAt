@@ -92,7 +92,11 @@ def leanOperationToBrokerRequest
     (root : String)
     (workspaceId : Beam.Workspace.WorkspaceId)
     (input : Json) : Except String Beam.Broker.Request := do
-  let req ← operation.toBrokerRequest root input
+  let operationInput ←
+    match input with
+    | .obj fields => pure <| Json.obj (fields.erase "workspace")
+    | other => throw s!"Lean operation input must be an object, got {other.compress}"
+  let req ← operation.toBrokerRequest root operationInput
   pure { req with workspaceId? := some workspaceId }
 
 def beamVersionDescription : String :=
@@ -242,6 +246,7 @@ abbrev RunWithInput := Beam.Lean.RunWithInput
 abbrev ReleaseInput := Beam.Lean.ReleaseInput
 abbrev PathInput := Beam.Lean.PathInput
 abbrev SyncInput := Beam.Lean.SyncInput
+abbrev SaveInput := Beam.Lean.SaveInput
 
 private def optionJson (value? : Option α) [ToJson α] : Json :=
   match value? with
@@ -537,19 +542,11 @@ Broker-level failures become `ToolError`s so an MCP server can map them to tool/
 Semantic Lean failures remain normal tool results with `success = false`.
 -/
 def normalizeBrokerResponse (tool : ToolName) (resp : Beam.Broker.Response) : Except ToolError Json := do
-  if resp.ok && resp.error?.isSome then
-    throw <| ToolError.invalidEnvelope "ok=true must not include an error"
-  if !resp.ok && resp.error?.isNone then
-    throw <| ToolError.invalidEnvelope "ok=false must include an error"
-  if !resp.ok && resp.result?.isSome then
-    throw <| ToolError.invalidEnvelope "ok=false must not include a result"
-  if !resp.ok then
-    let some err := resp.error?
-      | throw <| ToolError.invalidEnvelope "ok=false must include an error"
-    throw <| ToolError.fromBrokerError err
-  let some result := resp.result?
-    | throw <| ToolError.invalidEnvelope "ok=true must include a result"
-  let result ← normalizeResult tool result
-  pure <| withDocumentProgress tool result resp.fileProgress?
+  match resp with
+  | .errorResult error _ _ =>
+      throw <| ToolError.fromBrokerError error
+  | .successResult result fileProgress? _ =>
+      let result ← normalizeResult tool result
+      pure <| withDocumentProgress tool result fileProgress?
 
 end Beam.Mcp

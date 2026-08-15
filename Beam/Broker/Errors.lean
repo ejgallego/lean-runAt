@@ -69,14 +69,7 @@ structure BrokerFailure where
   deriving Inhabited, FromJson, ToJson
 
 def BrokerFailure.toResponse (failure : BrokerFailure) : Response :=
-  {
-    ok := false
-    error? := some {
-      code := failure.code.name
-      message := failure.message
-      data? := failure.data?
-    }
-  }
+  Response.error failure.code.name failure.message failure.data?
 
 def reqError (code : String) (message : String := "") (data? : Option Json := none) : Response :=
   Response.error code message data?
