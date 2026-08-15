@@ -151,16 +151,18 @@ def expectWarningDiagnosticPresent
       s!"expected {label} diagnostics to include at least one warning, got {(toJson diagnostics).compress}"
 
 def expectOk (resp : Beam.Broker.Response) : IO Json := do
-  if !resp.ok then
-    throw <| IO.userError s!"unexpected Beam daemon error: {(toJson resp).compress}"
-  return resp.result?.getD Json.null
+  match resp with
+  | .successResult result .. => pure result
+  | .errorResult .. =>
+      throw <| IO.userError s!"unexpected Beam daemon error: {(toJson resp).compress}"
 
 def expectErrCode (resp : Beam.Broker.Response) (code : String) : IO Unit := do
-  if resp.ok then
-    throw <| IO.userError s!"expected error {code}, got success {(toJson resp).compress}"
-  let actual := resp.error?.map (·.code)
-  if actual != some code && actual != some "-32602" then
-    throw <| IO.userError s!"expected error {code}, got {(toJson resp).compress}"
+  match resp with
+  | .successResult .. =>
+      throw <| IO.userError s!"expected error {code}, got success {(toJson resp).compress}"
+  | .errorResult error .. =>
+      if error.code != code && error.code != "-32602" then
+        throw <| IO.userError s!"expected error {code}, got {(toJson resp).compress}"
 
 def expectOpCountAtLeast (payload : Json) (backend op : String) (minCount : Nat) : IO Unit := do
   let byBackend ← IO.ofExcept <| payload.getObjVal? "byBackend"

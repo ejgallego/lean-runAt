@@ -15,12 +15,9 @@ def responsePayloadOrWarning
     (label : String)
     (resp : Beam.Broker.Response)
     (warnings : Array String) : Json × Array String :=
-  if resp.ok then
-    match resp.result? with
-    | some result => (result, warnings)
-    | none => (Json.null, warnings.push s!"{label} returned no result payload")
-  else
-    let errText := (resp.error?.map (fun err => s!"{err.code}: {err.message}")).getD "unknown error"
-    (Json.null, warnings.push s!"{label} failed: {errText}")
+  match resp with
+  | .successResult result _ _ => (result, warnings)
+  | .errorResult error _ _ =>
+      (Json.null, warnings.push s!"{label} failed: {error.code}: {error.message}")
 
 end Beam.Feedback

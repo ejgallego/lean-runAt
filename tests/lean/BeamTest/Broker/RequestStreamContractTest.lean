@@ -26,13 +26,12 @@ private def buildLakeTarget (root : System.FilePath) (target : String) : IO Unit
     throw <| IO.userError s!"failed to build {target} in {root}\n{out.stderr}"
 
 private def expectErrorCode (label code : String) (resp : Beam.Broker.Response) : IO Unit := do
-  if resp.ok then
-    throw <| IO.userError s!"expected {label} error {code}, got success {(toJson resp).compress}"
-  let actual := resp.error?.map (·.code)
-  if actual != some code then
-    throw <| IO.userError s!"expected {label} error {code}, got {(toJson resp).compress}"
-  if resp.result?.isSome then
-    throw <| IO.userError s!"expected {label} error response to omit result payload, got {(toJson resp).compress}"
+  match resp with
+  | .successResult .. =>
+      throw <| IO.userError s!"expected {label} error {code}, got success {(toJson resp).compress}"
+  | .errorResult error .. =>
+      if error.code != code then
+        throw <| IO.userError s!"expected {label} error {code}, got {(toJson resp).compress}"
 
 private def expectTodoKindOnly
     (label : String)

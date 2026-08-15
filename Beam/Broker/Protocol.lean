@@ -869,21 +869,20 @@ def saveUnsupportedSetupCode : String :=
 def saveTargetNotModuleCode : String :=
   "saveTargetNotModule"
 
-inductive StreamKind where
+private inductive StreamKind where
   | response
   | fileProgress
   | diagnostic
-  deriving Inhabited, BEq, Repr
 
-def StreamKind.key : StreamKind → String
+private def StreamKind.key : StreamKind → String
   | .response => "response"
   | .fileProgress => "fileProgress"
   | .diagnostic => "diagnostic"
 
-instance : ToJson StreamKind where
+private instance : ToJson StreamKind where
   toJson kind := toJson kind.key
 
-instance : FromJson StreamKind where
+private instance : FromJson StreamKind where
   fromJson?
     | .str "response" => .ok .response
     | .str "fileProgress" => .ok .fileProgress

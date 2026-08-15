@@ -38,22 +38,21 @@ private def requireError
     (expectedCode : String)
     (expectedMessage : String)
     (resp : Response) : IO Error := do
-  if resp.ok then
-    throw <| IO.userError s!"{label}: expected error response, got {(toJson resp).compress}"
-  match resp.error? with
-  | some err =>
+  match resp with
+  | .successResult .. =>
+      throw <| IO.userError s!"{label}: expected error response, got {(toJson resp).compress}"
+  | .errorResult err .. =>
       if err.code != expectedCode then
         throw <| IO.userError s!"{label}: expected code={expectedCode}, got {(toJson resp).compress}"
       if err.message != expectedMessage then
         throw <| IO.userError s!"{label}: expected message={expectedMessage}, got {(toJson resp).compress}"
       pure err
-  | none =>
-      throw <| IO.userError s!"{label}: expected error payload, got {(toJson resp).compress}"
 
 private def requireResponseResult (label : String) (resp : Response) : IO Json := do
-  match resp.result? with
-  | some result => pure result
-  | none => throw <| IO.userError s!"{label}: expected result payload, got {(toJson resp).compress}"
+  match resp with
+  | .successResult result .. => pure result
+  | .errorResult .. =>
+      throw <| IO.userError s!"{label}: expected result payload, got {(toJson resp).compress}"
 
 private def requireErrorData (label : String) (err : Error) : IO Json := do
   match err.data? with

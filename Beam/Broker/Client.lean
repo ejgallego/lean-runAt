@@ -128,9 +128,8 @@ def printResponse (resp : Response) : IO Unit := do
   IO.println <| Beam.orderedJsonPretty (toJson resp)
 
 def failOnError (resp : Response) : IO Unit := do
-  if resp.ok then
-    pure ()
-  else
-    throw <| IO.userError ((resp.error?.map (·.message)).getD "Beam daemon error")
+  match resp with
+  | .successResult .. => pure ()
+  | .errorResult error .. => throw <| IO.userError error.message
 
 end Beam.Broker

@@ -57,7 +57,7 @@ def object (description : String) : Json :=
 Construct a closed object input schema for public operation surfaces.
 
 Beam tool inputs are deliberately small and explicit. Keeping `additionalProperties=false` at this
-shared boundary prevents CLI/MCP projections from accepting undeclared fields by accident.
+shared boundary prevents operation/MCP decoders from accepting undeclared fields by accident.
 -/
 def inputObject (properties : List (String × Json)) (required : Array String) : Json :=
   Json.mkObj [
