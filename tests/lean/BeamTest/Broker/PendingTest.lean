@@ -174,6 +174,26 @@ private def checkPendingStoreFailAll : IO Unit := do
   require "failAll clears pending store"
     ((← PendingRequestStore.snapshot store).isEmpty)
 
+private def checkPendingResolveError : IO Unit := do
+  let (pending, promise) ← mkPending
+  let data := Json.mkObj [
+    ("expectedVersion", toJson (4 : Nat)),
+    ("acceptedVersion", toJson (5 : Nat))
+  ]
+  PendingRequest.resolveError pending .contentModified "document changed" (some data)
+  match ← PendingRequest.awaitOutcome promise with
+  | .ok _ =>
+      throw <| IO.userError "pending typed error resolved as a success"
+  | .error failure =>
+      let err ← requireFailureCode
+        "pending typed error preserves its code" "contentModified" failure
+      require "pending typed error preserves its message" (err.message == "document changed")
+      match err.data? with
+      | none =>
+          throw <| IO.userError "pending typed error lost its data"
+      | some actual =>
+          require "pending typed error preserves its data" (actual.compress == data.compress)
+
 private def mkRange (startLine startCharacter endLine endCharacter : Nat) : Range := {
   start := { line := startLine, character := startCharacter }
   «end» := { line := endLine, character := endCharacter }
@@ -342,6 +362,7 @@ def main : IO Unit := do
   checkPendingCancellationIdentity
   checkPendingStoreResolve
   checkPendingStoreFailAll
+  checkPendingResolveError
   checkSyncFileProgressDisplay
   checkSyncFileProgressLines
   checkDiagnosticLineCanExceedProgressRange

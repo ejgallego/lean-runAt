@@ -383,7 +383,7 @@ private def checkSyncFileResultDecode : IO Unit := do
   expectDecodeFailure SyncFileResult "sync result missing saveReady" <|
     syncFileResultJson 7 incompleteReadiness
 
-private def checkBrokerFailureResponse : IO Unit := do
+private def checkFailureResponseConversions : IO Unit := do
   let data := Json.mkObj [("uri", toJson "file:///A.lean")]
   let failure : BrokerFailure := {
     code := .contentModified
@@ -423,24 +423,6 @@ private def checkDocumentVersionMismatchErrorData : IO Unit := do
   requireJsonInt "version mismatch data" "acceptedVersion" 2 data
   requireJsonInt "version mismatch data" "currentVersion" 2 data
   requireJsonString "version mismatch data" "uri" "file:///A.lean" data
-
-private def checkJsonRpcErrorObjectMapping : IO Unit := do
-  discard <| requireError
-    "jsonrpc known numeric error"
-    "invalidParams"
-    "bad params"
-    ((responseFailureForJsonRpcErrorObject <| Json.mkObj [
-      ("code", toJson (-32602 : Int)),
-      ("message", toJson "bad params")
-    ]).toResponse)
-  discard <| requireError
-    "jsonrpc string error"
-    "-32803"
-    "focused goal error"
-    ((responseFailureForJsonRpcErrorObject <| Json.mkObj [
-      ("code", toJson "-32803"),
-      ("message", toJson "focused goal error")
-    ]).toResponse)
 
 private def checkReadinessBoundary : IO Unit := do
   let uri := "file:///workspace/SaveSmoke/A.lean"
@@ -881,9 +863,8 @@ def main : IO Unit := do
   checkSaveResultJsonDecode
   checkOrderedJsonPretty
   checkSyncFileResultDecode
-  checkBrokerFailureResponse
+  checkFailureResponseConversions
   checkDocumentVersionMismatchErrorData
-  checkJsonRpcErrorObjectMapping
   checkReadinessBoundary
   checkStaleDirectDepHints
   checkRequestArgsBoundary

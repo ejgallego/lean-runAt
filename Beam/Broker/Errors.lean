@@ -55,36 +55,11 @@ def BrokerFailureCode.name : BrokerFailureCode → String
   | .saveTargetNotModule => saveTargetNotModuleCode
   | .internalError => "internalError"
 
-instance : ToJson BrokerFailureCode where
-  toJson code := toJson code.name
-
-instance : FromJson BrokerFailureCode where
-  fromJson? j :=
-    match j with
-    | .str "invalidParams" => .ok .invalidParams
-    | .str "requestCancelled" => .ok .requestCancelled
-    | .str "contentModified" => .ok .contentModified
-    | .str "workerExited" => .ok .workerExited
-    | .str s =>
-        if s == syncBarrierIncompleteCode then
-          .ok .syncBarrierIncomplete
-        else if s == saveTraceStaleCode then
-          .ok .saveTraceStale
-        else if s == saveUnsupportedSetupCode then
-          .ok .saveUnsupportedSetup
-        else if s == saveTargetNotModuleCode then
-          .ok .saveTargetNotModule
-        else if s == "internalError" then
-          .ok .internalError
-        else
-          .error s!"expected broker failure code, got {j.compress}"
-    | _ => .error s!"expected broker failure code, got {j.compress}"
-
 structure BrokerFailure where
   code : BrokerFailureCode
   message : String := ""
   data? : Option Json := none
-  deriving Inhabited, FromJson, ToJson
+  deriving Inhabited
 
 def BrokerFailure.toResponseFailure (failure : BrokerFailure) : ResponseFailure :=
   responseFailure failure.code.name failure.message failure.data?
@@ -125,23 +100,5 @@ def errorCodeName : JsonRpc.ErrorCode → String
   | .rpcNeedsReconnect => "rpcNeedsReconnect"
   | .workerExited => "workerExited"
   | .workerCrashed => "workerCrashed"
-
-private def responseFailureFromJsonRpcErrorObject? (json : Json) : Option ResponseFailure :=
-  match json.getObjVal? "code", json.getObjVal? "message" with
-  | .ok code, .ok (.str message) =>
-      let data? := (json.getObjVal? "data").toOption
-      match code with
-      | .str codeName => some <| responseFailure codeName message data?
-      | _ =>
-          match fromJson? code with
-          | .ok (errCode : JsonRpc.ErrorCode) =>
-              some <| responseFailure (errorCodeName errCode) message data?
-          | .error _ => some <| responseFailure code.compress message data?
-  | _, _ => none
-
-def responseFailureForJsonRpcErrorObject (errJson : Json) : ResponseFailure :=
-  match responseFailureFromJsonRpcErrorObject? errJson with
-  | some failure => failure
-  | none => responseFailure "internalError" s!"invalid JSON-RPC error object: {errJson.compress}"
 
 end Beam.Broker

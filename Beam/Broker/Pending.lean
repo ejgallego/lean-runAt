@@ -88,19 +88,8 @@ def resolveError
     (code : ErrorCode)
     (message : String)
     (data? : Option Json := none) : IO Unit := do
-  let errJson := Json.mkObj <|
-    [("code", toJson code), ("message", toJson message)] ++
-    match data? with
-    | some data => [("data", data)]
-    | none => []
   try
-    pending.promise.resolve (.error (responseFailureForJsonRpcErrorObject errJson))
-  catch _ =>
-    pure ()
-
-def resolveErrorJson (pending : PendingRequest) (errJson : Json) : IO Unit := do
-  try
-    pending.promise.resolve (.error (responseFailureForJsonRpcErrorObject errJson))
+    pending.promise.resolve (.error (responseFailure (errorCodeName code) message data?))
   catch _ =>
     pure ()
 

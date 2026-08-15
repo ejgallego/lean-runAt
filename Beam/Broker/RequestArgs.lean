@@ -9,7 +9,7 @@ import Beam.Broker.Lean
 
 namespace Beam.Broker
 
-def invalidParamsFailure (message : String) : ResponseFailure :=
+private def invalidParamsFailure (message : String) : ResponseFailure :=
   responseFailure "invalidParams" message
 
 private def asInvalidParams (arg : Except String α) : Except ResponseFailure α :=
