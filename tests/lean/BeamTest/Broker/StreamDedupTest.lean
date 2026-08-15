@@ -253,8 +253,9 @@ def check : IO Unit := do
     let (_session, _result, _progress?, diagnostics) ←
       match trackedResult with
       | .ok result => pure result
-      | .error resp =>
-          throw <| IO.userError s!"expected tracked request success, got {(toJson resp).compress}"
+      | .error failure =>
+          throw <| IO.userError
+            s!"expected tracked request success, got {(toJson failure.toResponse).compress}"
     let streamed ← streamedRef.get
     if streamed.size != 2 then
       throw <| IO.userError s!"expected two deduped streamed diagnostics, got {(toJson streamed).compress}"

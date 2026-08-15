@@ -224,7 +224,9 @@ or root selector.
 Broker `Response` and `StreamMessage` values are tagged unions internally. Their explicit JSON
 codecs retain the public `ok` and `kind` discriminants while preventing mismatched payloads from
 being constructed after decoding; consume stream messages with exhaustive pattern matching rather
-than rebuilding optional payload views. `Operation.toBrokerRequest` validates every operation input
+than rebuilding optional payload views. Internal request and pending error channels carry
+`ResponseFailure`, never the full response sum, and convert it to `Response.errorResult` only when
+completing a request. `Operation.toBrokerRequest` validates every operation input
 against its closed `Operation.inputSchema` before typed decoding. Keep sync/refresh and
 save/close-save operation inputs separate: only sync-like inputs may carry final diagnostic replay
 control. Likewise, keep redundant wire observations derived internally: diagnostic `total` is the

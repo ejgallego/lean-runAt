@@ -15,14 +15,13 @@ open BeamTest.Broker.JsonAssert
 
 namespace BeamTest.Broker.PendingTest
 
-private def requireErrorCode (label expectedCode : String) (resp : Response) : IO Error := do
-  match resp.error? with
-  | some err =>
-      if err.code != expectedCode then
-        throw <| IO.userError s!"{label}: expected code={expectedCode}, got {(toJson resp).compress}"
-      pure err
-  | none =>
-      throw <| IO.userError s!"{label}: expected error response, got {(toJson resp).compress}"
+private def requireFailureCode
+    (label expectedCode : String)
+    (failure : ResponseFailure) : IO Error := do
+  if failure.error.code != expectedCode then
+    throw <| IO.userError
+      s!"{label}: expected code={expectedCode}, got {(toJson failure.toResponse).compress}"
+  pure failure.error
 
 private def mkPending
     (cancelRef? : Option (IO.Ref Bool) := none)
@@ -30,7 +29,7 @@ private def mkPending
     (tracked? : Option (DocumentUri × Nat) := none)
     (diagnosticScope : DiagnosticScope := .errors)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
-    IO (PendingRequest × IO.Promise (Except Response PendingResult)) := do
+    IO (PendingRequest × IO.Promise (Except ResponseFailure PendingResult)) := do
   let promise ← IO.Promise.new
   let progressRef ← IO.mkRef progress?
   let diagnosticsRef ← IO.mkRef #[]
@@ -80,11 +79,11 @@ private def checkActiveRegistry : IO Unit := do
   match ← ensureRequestNotCancelled (some (ActiveRequest.cancelRef first)) with
   | .ok _ =>
       throw <| IO.userError "ensureRequestNotCancelled reports broker cancellation: expected error"
-  | .error resp =>
-      discard <| requireErrorCode
+  | .error failure =>
+      discard <| requireFailureCode
         "ensureRequestNotCancelled reports broker cancellation"
         "requestCancelled"
-        resp
+        failure
 
   ActiveRequestRegistry.unregister registry first?
   require "unregistered active request is no longer cancellable"
@@ -100,18 +99,19 @@ private def checkActiveRegistry : IO Unit := do
     (Option.isNone (← ActiveRequestRegistry.markCancelledActive registry first))
   match ← ensureRequestNotCancelled (some replacement.cancelRef) with
   | .ok _ => pure ()
-  | .error resp =>
-      throw <| IO.userError s!"stale active handle cancelled replacement: {(toJson resp).compress}"
+  | .error failure =>
+      throw <| IO.userError
+        s!"stale active handle cancelled replacement: {(toJson failure.toResponse).compress}"
   require "stale unregister preserves replacement active request"
     (Option.isSome (← ActiveRequestRegistry.markCancelled registry "req-1"))
   match ← ensureRequestNotCancelled (some replacement.cancelRef) with
   | .ok _ =>
       throw <| IO.userError "replacement active request did not observe cancellation"
-  | .error resp =>
-      discard <| requireErrorCode
+  | .error failure =>
+      discard <| requireFailureCode
         "replacement active request reports broker cancellation"
         "requestCancelled"
-        resp
+        failure
   ActiveRequestRegistry.unregister registry replacement?
 
 private def checkPendingCancellationIdentity : IO Unit := do
@@ -149,8 +149,9 @@ private def checkPendingStoreResolve : IO Unit := do
   let result ←
     match ← PendingRequest.awaitOutcome promise with
     | .ok result => pure result
-    | .error resp =>
-        throw <| IO.userError s!"pending response result: expected success, got {(toJson resp).compress}"
+    | .error failure =>
+        throw <| IO.userError
+          s!"pending response result: expected success, got {(toJson failure.toResponse).compress}"
   requireJsonBool "pending response result" "value" true result.result
   require "pending response preserves progress"
     (result.progress? == some { updates := 3, done := false })
@@ -163,12 +164,13 @@ private def checkPendingStoreFailAll : IO Unit := do
   let store ← PendingRequestStore.create
   let (pending, promise) ← mkPending
   PendingRequestStore.insert store 11 pending
-  PendingRequestStore.failAll store (Response.error "workerExited" "worker exited")
+  PendingRequestStore.failAll store (responseFailure "workerExited" "worker exited")
   match ← PendingRequest.awaitOutcome promise with
   | .ok _ =>
       throw <| IO.userError "failAll resolves pending request as an error: expected error"
-  | .error resp =>
-      discard <| requireErrorCode "failAll resolves pending request as an error" "workerExited" resp
+  | .error failure =>
+      discard <| requireFailureCode
+        "failAll resolves pending request as an error" "workerExited" failure
   require "failAll clears pending store"
     ((← PendingRequestStore.snapshot store).isEmpty)
 

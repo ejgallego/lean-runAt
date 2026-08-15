@@ -62,12 +62,12 @@ private def requireErrorData (label : String) (err : Error) : IO Json := do
 private def expectRequestArgError
     (label : String)
     (expectedMessage : String)
-    (result : Except Response α) : IO Unit := do
+    (result : Except ResponseFailure α) : IO Unit := do
   match result with
   | .ok _ =>
       throw <| IO.userError s!"{label}: expected invalidParams response"
-  | .error resp =>
-      discard <| requireError label "invalidParams" expectedMessage resp
+  | .error failure =>
+      discard <| requireError label "invalidParams" expectedMessage failure.toResponse
 
 private def lspPos (line character : Nat) : Lsp.Position :=
   { line, character }
@@ -399,6 +399,21 @@ private def checkBrokerFailureResponse : IO Unit := do
   | none =>
       throw <| IO.userError "broker failure response: expected error data"
 
+  let progress : SyncFileProgress := { updates := 3, done := false, rangeEndLine? := some 17 }
+  let responseFailure : ResponseFailure := {
+    error := { code := "backendSpecific", message := "backend failed", data? := some data }
+    fileProgress? := some progress
+    clientRequestId? := some "request-7"
+  }
+  match responseFailure.toResponse with
+  | .successResult .. =>
+      throw <| IO.userError "response failure converted to a successful response"
+  | .errorResult err fileProgress? clientRequestId? =>
+      require "response failure preserves an arbitrary backend code"
+        (err.code == "backendSpecific")
+      require "response failure preserves progress metadata" (fileProgress? == some progress)
+      require "response failure preserves request identity" (clientRequestId? == some "request-7")
+
 private def checkDocumentVersionMismatchErrorData : IO Unit := do
   let data := documentVersionMismatchErrorData 1 2
     (currentVersion? := some 2)
@@ -414,18 +429,18 @@ private def checkJsonRpcErrorObjectMapping : IO Unit := do
     "jsonrpc known numeric error"
     "invalidParams"
     "bad params"
-    (responseForJsonRpcErrorObject <| Json.mkObj [
+    ((responseFailureForJsonRpcErrorObject <| Json.mkObj [
       ("code", toJson (-32602 : Int)),
       ("message", toJson "bad params")
-    ])
+    ]).toResponse)
   discard <| requireError
     "jsonrpc string error"
     "-32803"
     "focused goal error"
-    (responseForJsonRpcErrorObject <| Json.mkObj [
+    ((responseFailureForJsonRpcErrorObject <| Json.mkObj [
       ("code", toJson "-32803"),
       ("message", toJson "focused goal error")
-    ])
+    ]).toResponse)
 
 private def checkReadinessBoundary : IO Unit := do
   let uri := "file:///workspace/SaveSmoke/A.lean"

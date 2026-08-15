@@ -486,14 +486,13 @@ private def ensureBrokerWorkspace
       | .error err => pure <| .error err
       | .ok config =>
           let brokerResp ← runtime.initWorkspaceWithConfig workspaceId config (some .set)
-          if brokerResp.ok then
-            state.application.modify fun application =>
-              application.trackWorkspace workspaceId config.root
-            pure <| .ok config.root
-          else
-            let message := (brokerResp.error?.map (·.message)).getD
-              s!"failed to initialize workspace '{workspaceId}'"
-            pure <| .error <| RpcError.invalidRequest message
+          match brokerResp with
+          | .successResult .. =>
+              state.application.modify fun application =>
+                application.trackWorkspace workspaceId config.root
+              pure <| .ok config.root
+          | .errorResult err .. =>
+              pure <| .error <| RpcError.invalidRequest err.message
 
 private def ensureRuntimeForWorkspace
     (state : ServerState)
@@ -559,13 +558,6 @@ private def resolveWorkspaceForDrop
   let descriptor := Beam.Workspace.Descriptor.ofRoot root
   pure <| .ok { descriptor, root, workspaceId := descriptor.cacheKey }
 
-private def toolErrorOfBrokerResponse
-    (resp : Beam.Broker.Response)
-    (fallback : String) : ToolError :=
-  match resp.error? with
-  | some err => ToolError.fromBrokerError err
-  | none => ToolError.runtimeSetup fallback
-
 private structure BeamStatsResult where
   uptimeMs : Nat
   workspaces : Json
@@ -628,25 +620,19 @@ private def handleDropWorkspace
         op := .dropWorkspace
         workspaceId? := some workspace.workspaceId
       }
-      if brokerResp.ok then
-        match brokerResp.result? with
-        | some payload =>
-            match fromJson? (α := Beam.Workspace.DropResult) payload with
-            | .ok dropped =>
-                if dropped.dropped then
-                  updateTrackedState
-                pure <| callToolResult <|
-                  resultJson dropped.dropped dropped.invalidatedHandles dropped.reason?
-            | .error err =>
-                pure <| callToolErrorResult <| ToolError.invalidResult
-                  s!"invalid workspace drop result: {err}"
-        | none =>
-            pure <| callToolErrorResult <|
-              ToolError.invalidResult "workspace drop succeeded without a result payload"
-      else
-        let err := toolErrorOfBrokerResponse brokerResp
-          "workspace drop failed without a typed broker error"
-        pure <| callToolErrorResult err
+      match brokerResp with
+      | .successResult payload .. =>
+          match fromJson? (α := Beam.Workspace.DropResult) payload with
+          | .ok dropped =>
+              if dropped.dropped then
+                updateTrackedState
+              pure <| callToolResult <|
+                resultJson dropped.dropped dropped.invalidatedHandles dropped.reason?
+          | .error err =>
+              pure <| callToolErrorResult <| ToolError.invalidResult
+                s!"invalid workspace drop result: {err}"
+      | .errorResult err .. =>
+          pure <| callToolErrorResult <| ToolError.fromBrokerError err
 
 private def resolvedBeamHome? : IO (Option System.FilePath) := do
   match ← IO.getEnv "BEAM_HOME" with
