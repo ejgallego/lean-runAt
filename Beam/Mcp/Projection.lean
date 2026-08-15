@@ -217,22 +217,8 @@ def toolDescriptors : Array ToolDescriptor :=
   toolNames.map ToolName.descriptor
 
 /-- Reject fields outside the closed schema advertised for one MCP tool. -/
-def ToolName.validateInputFields (tool : ToolName) (input : Json) : Except String Unit := do
-  let properties ← tool.descriptor.inputSchema.getObjVal? "properties"
-  match properties with
-  | .obj _ => pure ()
-  | other => throw s!"{tool.key} input schema properties must be an object, got {other.compress}"
-  match input with
-  | .obj fields =>
-      let unexpected := fields.foldl (init := #[]) fun unexpected field _ =>
-        if (properties.getObjVal? field).isOk then
-          unexpected
-        else
-          unexpected.push field
-      unless unexpected.isEmpty do
-        throw s!"{tool.key} accepts no undeclared input fields: {String.intercalate ", " unexpected.toList}"
-  | other =>
-      throw s!"{tool.key} input must be an object, got {other.compress}"
+def ToolName.validateInputFields (tool : ToolName) (input : Json) : Except String Unit :=
+  Beam.JsonSchema.validateInputFields tool.key tool.descriptor.inputSchema input
 
 abbrev RunAtInput := Beam.Lean.RunAtInput
 abbrev PositionInput := Beam.Lean.PositionInput

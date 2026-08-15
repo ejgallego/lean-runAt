@@ -139,24 +139,60 @@ private def checkResponseJsonShape : IO Unit := do
   requireFieldPresent "error response" "error" errorJson
   requireFieldAbsent "error response" "result" errorJson
 
+  let identified := (Response.success Json.null).setClientRequestId (some "original")
+  require "optional request id setter preserves an existing id when no replacement is supplied"
+    ((identified.setClientRequestIdIfSome none).clientRequestId? == some "original")
+  require "optional request id setter applies a supplied replacement"
+    ((identified.setClientRequestIdIfSome (some "replacement")).clientRequestId? ==
+      some "replacement")
+  require "exact request id setter can clear an existing id"
+    ((identified.setClientRequestId none).clientRequestId?.isNone)
+
 private def checkStreamMessageDecode : IO Unit := do
   let response := Response.success (Json.mkObj [("value", toJson (1 : Nat))])
   let validResponse ← expectOk "valid response stream" <|
-    fromJson? (α := StreamMessage) (toJson <| StreamMessage.mkResponse response)
-  require "valid response stream kind" (validResponse.kind == .response)
+    fromJson? (α := StreamMessage) (toJson <| StreamMessage.response response)
+  match validResponse with
+  | .response _ => pure ()
+  | other => throw <| IO.userError s!"valid response stream decoded as {(toJson other).compress}"
 
   let correlatedResponse := response.setClientRequestId (some "req-response")
   let validCorrelatedResponse ← expectOk "valid correlated response stream" <|
-    fromJson? (α := StreamMessage) (toJson <| StreamMessage.mkResponse correlatedResponse)
-  require "valid correlated response stream omits redundant outer request id"
-    validCorrelatedResponse.clientRequestId?.isNone
-  require "valid correlated response stream preserves payload request id"
-    (validCorrelatedResponse.response?.bind (·.clientRequestId?) == some "req-response")
+    fromJson? (α := StreamMessage) (toJson <| StreamMessage.response correlatedResponse)
+  match validCorrelatedResponse with
+  | .response decodedResponse =>
+      require "valid correlated response stream preserves payload request id"
+        (decodedResponse.clientRequestId? == some "req-response")
+  | other =>
+      throw <| IO.userError s!"valid correlated response decoded as {(toJson other).compress}"
 
   let progress : SyncFileProgress := { updates := 2, done := false }
   let validProgress ← expectOk "valid progress stream" <|
-    fromJson? (α := StreamMessage) (toJson <| StreamMessage.mkFileProgress (some "req-1") progress)
-  require "valid progress stream kind" (validProgress.kind == .fileProgress)
+    fromJson? (α := StreamMessage) (toJson <| StreamMessage.fileProgress (some "req-1") progress)
+  match validProgress with
+  | .fileProgress clientRequestId? decodedProgress =>
+      require "valid progress stream preserves request id" (clientRequestId? == some "req-1")
+      require "valid progress stream preserves payload" (decodedProgress.updates == 2)
+  | other => throw <| IO.userError s!"valid progress stream decoded as {(toJson other).compress}"
+
+  let diagnostic : StreamDiagnostic := {
+    path := "Demo.lean"
+    uri := "file:///repo/Demo.lean"
+    version? := some 3
+    severity? := some .warning
+    range := lspRange 0 0 1
+    message := "unused variable"
+  }
+  let validDiagnostic ← expectOk "valid diagnostic stream" <|
+    fromJson? (α := StreamMessage) <|
+      toJson <| StreamMessage.diagnostic (some "req-2") diagnostic
+  match validDiagnostic with
+  | .diagnostic clientRequestId? decodedDiagnostic =>
+      require "valid diagnostic stream preserves request id" (clientRequestId? == some "req-2")
+      require "valid diagnostic stream preserves payload"
+        (decodedDiagnostic.path == "Demo.lean" && decodedDiagnostic.message == "unused variable")
+  | other =>
+      throw <| IO.userError s!"valid diagnostic stream decoded as {(toJson other).compress}"
 
   let responseJson := toJson response
   let progressJson := toJson progress
@@ -275,7 +311,7 @@ private def checkSaveResultJsonDecode : IO Unit := do
 
 private def checkOrderedJsonPretty : IO Unit := do
   let resp : Response :=
-    (Response.success <| toJson <| syncResultFor 3).withFileProgress <| some {
+    (Response.success <| toJson <| syncResultFor 3).withFileProgress {
       updates := 2
       done := true
       rangeEndLine? := some 1

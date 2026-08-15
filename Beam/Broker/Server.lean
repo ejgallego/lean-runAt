@@ -2224,7 +2224,7 @@ private def ServerRuntime.withRequestAdmission
     s!"dispatch start op={req.op.key} clientRequestId={optionLabel req.clientRequestId?}"
   match req.validateFields with
   | .error err =>
-      let resp := (reqError "invalidParams" err).withClientRequestId req.clientRequestId?
+      let resp := (reqError "invalidParams" err).setClientRequestIdIfSome req.clientRequestId?
       traceBroker
         s!"dispatch rejected op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} error={err}"
       recordDispatchMetrics server req resp startedAt
@@ -2237,7 +2237,7 @@ private def ServerRuntime.withRequestAdmission
         | .ok active? => pure active?
         | .error failure =>
             let resp := BrokerFailure.toResponse failure
-            let resp := resp.withClientRequestId req.clientRequestId?
+            let resp := resp.setClientRequestIdIfSome req.clientRequestId?
             recordDispatchMetrics server req resp startedAt
             return (resp, false)
       else
@@ -2245,7 +2245,7 @@ private def ServerRuntime.withRequestAdmission
     try
       let handle : RequestHandle := { runtime := server, active? }
       let (resp, shouldStop) ← act handle
-      let resp := resp.withClientRequestId req.clientRequestId?
+      let resp := resp.setClientRequestIdIfSome req.clientRequestId?
       traceBroker
         s!"dispatch complete op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} ok={resp.ok}"
       recordDispatchMetrics server req resp startedAt
@@ -2253,7 +2253,8 @@ private def ServerRuntime.withRequestAdmission
     finally
       ActiveRequestRegistry.unregister server.activeRequests active?
   catch e =>
-    let resp := (Response.error "internalError" e.toString).withClientRequestId req.clientRequestId?
+    let resp :=
+      (Response.error "internalError" e.toString).setClientRequestIdIfSome req.clientRequestId?
     traceBroker
       s!"dispatch exception op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} error={e.toString}"
     recordDispatchMetrics server req resp startedAt
@@ -2332,23 +2333,25 @@ private def handleClient (server : ServerRuntime) (client : Transport.Connection
               pure <| Except.error <| reqError "invalidParams" s!"invalid request payload: {err}"
     match request with
     | Except.error resp =>
-        Transport.sendMsg client (toJson (StreamMessage.mkResponse resp)).compress
+        Transport.sendMsg client (toJson (StreamMessage.response resp)).compress
     | Except.ok req =>
         clientRequestIdRef.set req.clientRequestId?
         let emitProgress : SyncFileProgress → IO Unit := fun progress =>
           Transport.sendMsg client
-            (toJson (StreamMessage.mkFileProgress req.clientRequestId? progress)).compress
+            (toJson (StreamMessage.fileProgress req.clientRequestId? progress)).compress
         let emitDiagnostic : StreamDiagnostic → IO Unit := fun diagnostic =>
           Transport.sendMsg client
-            (toJson (StreamMessage.mkDiagnostic req.clientRequestId? diagnostic)).compress
+            (toJson (StreamMessage.diagnostic req.clientRequestId? diagnostic)).compress
         let (resp, shouldStop) ← server.dispatchRequest req (some emitProgress) (some emitDiagnostic)
-        Transport.sendMsg client (toJson (StreamMessage.mkResponse resp)).compress
+        Transport.sendMsg client (toJson (StreamMessage.response resp)).compress
         if shouldStop then
           requestStop server
   catch e =>
-    let resp := (Response.error "internalError" e.toString).withClientRequestId (← clientRequestIdRef.get)
+    let resp :=
+      (Response.error "internalError" e.toString).setClientRequestIdIfSome
+        (← clientRequestIdRef.get)
     try
-      Transport.sendMsg client (toJson (StreamMessage.mkResponse resp)).compress
+      Transport.sendMsg client (toJson (StreamMessage.response resp)).compress
     catch _ =>
       pure ()
   finally

@@ -191,7 +191,7 @@ private def checkSyncWaitSpecs : IO Unit := do
       path := "Demo.lean"
       version := 5
       : Beam.Broker.SyncFileResult
-    })).withFileProgress (some { updates := 2, done := true })
+    })).withFileProgress { updates := 2, done := true }
   require "sync complete message should include version and progress"
     ((Beam.Cli.syncWaitSpec "Demo.lean").completeMsg okResp ==
       "beam: sync complete for Demo.lean (version 5, fp updates=2)")

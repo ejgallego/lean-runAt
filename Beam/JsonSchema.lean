@@ -68,6 +68,26 @@ def inputObject (properties : List (String × Json)) (required : Array String) :
     ("additionalProperties", toJson false)
   ]
 
+/-- Reject fields outside the properties advertised by a closed object input schema. -/
+def validateInputFields
+    (label : String)
+    (schema input : Json) : Except String Unit := do
+  let properties ← schema.getObjVal? "properties"
+  match properties with
+  | .obj _ => pure ()
+  | other => throw s!"{label} input schema properties must be an object, got {other.compress}"
+  match input with
+  | .obj fields =>
+      let unexpected := fields.foldl (init := #[]) fun unexpected field _ =>
+        if (properties.getObjVal? field).isOk then
+          unexpected
+        else
+          unexpected.push field
+      unless unexpected.isEmpty do
+        throw s!"{label} accepts no undeclared input fields: {String.intercalate ", " unexpected.toList}"
+  | other =>
+      throw s!"{label} input must be an object, got {other.compress}"
+
 /-- Add one required property to an object schema produced by `inputObject`. -/
 def withRequiredProperty
     (schema : Json)

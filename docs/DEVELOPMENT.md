@@ -223,10 +223,13 @@ or root selector.
 
 Broker `Response` and `StreamMessage` values are tagged unions internally. Their explicit JSON
 codecs retain the public `ok` and `kind` discriminants while preventing mismatched payloads from
-being constructed after decoding. Keep sync/refresh and save/close-save operation inputs separate:
-only sync-like inputs may carry final diagnostic replay control. Likewise, keep redundant wire
-observations derived internally: diagnostic `total` is the severity sum, save `path` and `version`
-come from its nested sync result, and a decoded close-save result is always closed.
+being constructed after decoding; consume stream messages with exhaustive pattern matching rather
+than rebuilding optional payload views. `Operation.toBrokerRequest` validates every operation input
+against its closed `Operation.inputSchema` before typed decoding. Keep sync/refresh and
+save/close-save operation inputs separate: only sync-like inputs may carry final diagnostic replay
+control. Likewise, keep redundant wire observations derived internally: diagnostic `total` is the
+severity sum, save `path` and `version` come from its nested sync result, and a decoded close-save
+result is always closed.
 
 Lean/Lake root validation remains shared with the CLI. MCP descriptors use
 `Beam.Lean.Workspace.resolveRoot`, which requires absolute paths; ordinary `lean-beam` CLI paths use

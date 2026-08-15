@@ -791,6 +791,7 @@ instance : FromJson CloseSaveResult where
       throw "close-save result requires 'closed' to be true"
     pure { saved }
 
+/-- A successful broker payload or a typed broker error, with shared response observations. -/
 inductive Response where
   | successResult
       (result : Json)
@@ -889,33 +890,12 @@ instance : FromJson StreamKind where
     | .str "diagnostic" => .ok .diagnostic
     | j => .error s!"expected Beam daemon stream kind, got {j.compress}"
 
+/-- One decoded broker stream event with exactly the payload selected by its wire `kind`. -/
 inductive StreamMessage where
   | response (response : Response)
   | fileProgress (clientRequestId? : Option String) (progress : SyncFileProgress)
   | diagnostic (clientRequestId? : Option String) (diagnostic : StreamDiagnostic)
   deriving Inhabited
-
-def StreamMessage.kind : StreamMessage → StreamKind
-  | .response .. => .response
-  | .fileProgress .. => .fileProgress
-  | .diagnostic .. => .diagnostic
-
-def StreamMessage.response? : StreamMessage → Option Response
-  | .response resp => some resp
-  | _ => none
-
-def StreamMessage.fileProgress? : StreamMessage → Option SyncFileProgress
-  | .fileProgress _ progress => some progress
-  | _ => none
-
-def StreamMessage.diagnostic? : StreamMessage → Option StreamDiagnostic
-  | .diagnostic _ streamDiagnostic => some streamDiagnostic
-  | _ => none
-
-def StreamMessage.clientRequestId? : StreamMessage → Option String
-  | .response _ => none
-  | .fileProgress clientRequestId? _
-  | .diagnostic clientRequestId? _ => clientRequestId?
 
 instance : ToJson StreamMessage where
   toJson
@@ -945,42 +925,25 @@ instance : FromJson StreamMessage where
     let clientRequestId? ← optionalField? (α := String) json "clientRequestId"
     match kind with
     | .response =>
-        unless response?.isSome && fileProgress?.isNone && diagnostic?.isNone do
-          throw "Beam response stream message requires only a 'response' payload"
-        unless clientRequestId?.isNone do
-          throw "Beam response stream message carries clientRequestId only in its response payload"
+        match response?, fileProgress?, diagnostic? with
+        | some response, none, none =>
+            if clientRequestId?.isSome then
+              throw "Beam response stream message carries clientRequestId only in its response payload"
+            else
+              pure <| .response response
+        | _, _, _ =>
+            throw "Beam response stream message requires only a 'response' payload"
     | .fileProgress =>
-        unless response?.isNone && fileProgress?.isSome && diagnostic?.isNone do
-          throw "Beam fileProgress stream message requires only a 'fileProgress' payload"
+        match response?, fileProgress?, diagnostic? with
+        | none, some progress, none => pure <| .fileProgress clientRequestId? progress
+        | _, _, _ =>
+            throw "Beam fileProgress stream message requires only a 'fileProgress' payload"
     | .diagnostic =>
-        unless response?.isNone && fileProgress?.isNone && diagnostic?.isSome do
-          throw "Beam diagnostic stream message requires only a 'diagnostic' payload"
-    match kind with
-    | .response =>
-        let some resp := response?
-          | throw "Beam response stream message requires only a 'response' payload"
-        pure <| .response resp
-    | .fileProgress =>
-        let some progress := fileProgress?
-          | throw "Beam fileProgress stream message requires only a 'fileProgress' payload"
-        pure <| .fileProgress clientRequestId? progress
-    | .diagnostic =>
-        let some streamDiagnostic := diagnostic?
-          | throw "Beam diagnostic stream message requires only a 'diagnostic' payload"
-        pure <| .diagnostic clientRequestId? streamDiagnostic
-
-def StreamMessage.mkResponse (resp : Response) : StreamMessage :=
-  .response resp
-
-def StreamMessage.mkFileProgress
-    (clientRequestId? : Option String)
-    (progress : SyncFileProgress) : StreamMessage :=
-  .fileProgress clientRequestId? progress
-
-def StreamMessage.mkDiagnostic
-    (clientRequestId? : Option String)
-    (streamDiagnostic : StreamDiagnostic) : StreamMessage :=
-  .diagnostic clientRequestId? streamDiagnostic
+        match response?, fileProgress?, diagnostic? with
+        | none, none, some streamDiagnostic =>
+            pure <| .diagnostic clientRequestId? streamDiagnostic
+        | _, _, _ =>
+            throw "Beam diagnostic stream message requires only a 'diagnostic' payload"
 
 def Response.success (result : Json) : Response :=
   .successResult result none none
@@ -990,12 +953,12 @@ def Response.error (code : String) (message : String := "") (data? : Option Json
 
 def Response.withFileProgress
     (resp : Response)
-    (fileProgress? : Option SyncFileProgress) : Response :=
+    (fileProgress : SyncFileProgress) : Response :=
   match resp with
   | .successResult result _ clientRequestId? =>
-      .successResult result fileProgress? clientRequestId?
+      .successResult result (some fileProgress) clientRequestId?
   | .errorResult error _ clientRequestId? =>
-      .errorResult error fileProgress? clientRequestId?
+      .errorResult error (some fileProgress) clientRequestId?
 
 def Response.setClientRequestId (resp : Response) (clientRequestId? : Option String) : Response :=
   match resp with
@@ -1004,7 +967,9 @@ def Response.setClientRequestId (resp : Response) (clientRequestId? : Option Str
   | .errorResult error fileProgress? _ =>
       .errorResult error fileProgress? clientRequestId?
 
-def Response.withClientRequestId (resp : Response) (clientRequestId? : Option String) : Response :=
+def Response.setClientRequestIdIfSome
+    (resp : Response)
+    (clientRequestId? : Option String) : Response :=
   resp.setClientRequestId (clientRequestId? <|> resp.clientRequestId?)
 
 def Request.resolvedWorkspaceId? (req : Request) : Option WorkspaceId :=

@@ -253,6 +253,10 @@ def Operation.inputSchema : Operation → Json
   | .close =>
       inputObject [pathField] #["path"]
 
+/-- Reject fields outside the closed schema owned by one Lean operation. -/
+def Operation.validateInputFields (operation : Operation) (input : Json) : Except String Unit :=
+  Beam.JsonSchema.validateInputFields operation.key operation.inputSchema input
+
 /-- Input for position-based Lean execution. Coordinates use LSP zero-based line/character units. -/
 structure RunAtInput where
   path : String
@@ -278,16 +282,6 @@ private def optionalField? [FromJson α] (j : Json) (field : String) : Except St
       | .error err => throw s!"invalid '{field}': {err}"
   | .error _ =>
       pure none
-
-private def requireOnlyInputFields
-    (label : String)
-    (allowed : Array String) : Json → Except String Unit
-  | .obj fields =>
-      let unexpected := fields.foldl (init := #[]) fun unexpected field _ =>
-        if allowed.contains field then unexpected else unexpected.push field
-      unless unexpected.isEmpty do
-        throw s!"{label} accepts no undeclared input fields: {String.intercalate ", " unexpected.toList}"
-  | other => throw s!"{label} must be an object, got {other.compress}"
 
 /-- Input for Lean reference queries. -/
 structure ReferencesInput where
@@ -458,7 +452,6 @@ instance : ToJson SyncInput where
 
 instance : FromJson SyncInput where
   fromJson? j := do
-    requireOnlyInputFields "sync input" #["path", "diagnostic_scope", "diagnostics_in_result"] j
     let path ← j.getObjValAs? String "path"
     let diagnosticScope? ← optionalField? (α := Beam.Broker.DiagnosticScope) j "diagnostic_scope"
     let diagnosticsInResult? ← optionalField? (α := Bool) j "diagnostics_in_result"
@@ -479,7 +472,6 @@ instance : ToJson SaveInput where
 
 instance : FromJson SaveInput where
   fromJson? j := do
-    requireOnlyInputFields "save input" #["path", "diagnostic_scope"] j
     let path ← j.getObjValAs? String "path"
     let diagnosticScope? ← optionalField? (α := Beam.Broker.DiagnosticScope) j "diagnostic_scope"
     pure { path, diagnosticScope? }
@@ -683,6 +675,7 @@ def Operation.toBrokerRequest
     (op : Operation)
     (root : String)
     (input : Json) : Except String Beam.Broker.Request := do
+  op.validateInputFields input
   match op with
   | .runAt =>
       pure <| (← fromJson? (α := RunAtInput) input).toBrokerRequest root

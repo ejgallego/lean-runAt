@@ -222,6 +222,14 @@ private def checkBrokerRequestAdapters : IO Unit := do
         require s!"{tool.key} undeclared field error names the closed input boundary"
           (err.contains "undeclared input fields")
 
+  for operation in Beam.Lean.Operation.all do
+    let input := Json.mkObj [("__undeclared", toJson true)]
+    match operation.toBrokerRequest root input with
+    | .ok _ => throw <| IO.userError s!"{operation.key} accepted an undeclared operation field"
+    | .error err =>
+        require s!"{operation.key} undeclared field error names the operation input boundary"
+          (err.contains "undeclared input fields")
+
   let runAtInput : Beam.Mcp.RunAtInput := {
     path := "Demo.lean"
     version := 12
@@ -466,11 +474,6 @@ private def checkBrokerRequestAdapters : IO Unit := do
   requireFieldAbsent "save input json" "diagnostics_in_result" saveJson
   let decodedSave ← expectOk "decode save input" <| fromJson? (α := Beam.Mcp.SaveInput) saveJson
   require "decoded save diagnostic scope" (decodedSave.diagnosticScope? == some .all)
-  match fromJson? (α := Beam.Mcp.SaveInput) syncJson with
-  | .ok _ => throw <| IO.userError "save input accepted sync-only diagnostics_in_result"
-  | .error err =>
-      require "save input rejection identifies diagnostics_in_result"
-        (err.contains "diagnostics_in_result")
   match Beam.Mcp.leanOperationToBrokerRequest .save root workspaceId (inWorkspace syncJson) with
   | .ok _ => throw <| IO.userError "save tool accepted sync-only diagnostics_in_result"
   | .error err =>
@@ -498,7 +501,7 @@ private def checkRunAtNormalization : IO Unit := do
   let normalizedHandle ← expectToolOk "normalize handle result" <|
     Beam.Mcp.normalizeBrokerResponse (.leanOperation .runAtHandle) <|
       ((Beam.Broker.Response.success successWithHandle).withFileProgress
-        (some { updates := 2, done := true })).setClientRequestId (some "req-1")
+        { updates := 2, done := true }).setClientRequestId (some "req-1")
   let nextHandle ← requireObjVal "handle result" "next_handle" normalizedHandle
   requireJsonString "next handle" "session" "session" nextHandle
   let rawHandle ← requireObjVal "next handle" "raw" nextHandle
@@ -536,7 +539,7 @@ private def sampleSyncResult : Beam.Broker.SyncFileResult := {
 private def checkSyncAndSaveNormalization : IO Unit := do
   let normalizedSync ← expectToolOk "normalize sync result" <|
     Beam.Mcp.normalizeBrokerResponse (.leanOperation .sync) <|
-      (Beam.Broker.Response.success <| toJson sampleSyncResult).withFileProgress <| some {
+      (Beam.Broker.Response.success <| toJson sampleSyncResult).withFileProgress {
         updates := 4
         done := true
         rangeStartLine? := some 1
@@ -579,7 +582,7 @@ private def checkSyncAndSaveNormalization : IO Unit := do
   ]
   let normalizedSave ← expectToolOk "normalize save result" <|
     Beam.Mcp.normalizeBrokerResponse (.leanOperation .save) <|
-      (Beam.Broker.Response.success rawSave).withFileProgress (some { updates := 4, done := true })
+      (Beam.Broker.Response.success rawSave).withFileProgress { updates := 4, done := true }
   requireJsonString "save result" "source_hash" "abc" normalizedSave
   requireJsonString "save result" "olean_server" "/tmp/Demo.olean.server" normalizedSave
   requireFieldAbsent "save result" "sourceHash" normalizedSave

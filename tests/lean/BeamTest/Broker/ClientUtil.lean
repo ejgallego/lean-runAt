@@ -96,29 +96,25 @@ def requireFinalStreamResponse
   if messages.isEmpty then
     throw <| IO.userError s!"expected {label} stream messages"
   let responseCount := messages.foldl (init := 0) fun acc msg =>
-    acc + if msg.kind == .response then 1 else 0
+    acc + match msg with
+      | .response _ => 1
+      | _ => 0
   if responseCount != 1 then
     throw <| IO.userError s!"expected exactly one {label} response message, got {(toJson messages).compress}"
   let some last := messages.back?
     | throw <| IO.userError s!"expected {label} final response"
-  if last.kind != .response then
-    throw <| IO.userError s!"expected {label} response to arrive last, got {(toJson messages).compress}"
-  let some resp := last.response?
-    | throw <| IO.userError s!"expected {label} final response payload"
-  pure resp
-
-def expectStreamKindsOnly
-    (label : String)
-    (messages : Array Beam.Broker.StreamMessage) : IO Unit := do
-  unless messages.all (fun msg =>
-      msg.kind == .diagnostic || msg.kind == .fileProgress || msg.kind == .response) do
-    throw <| IO.userError
-      s!"expected {label} kinds to stay within diagnostic/fileProgress/response, got {(toJson messages).compress}"
+  match last with
+  | .response resp => pure resp
+  | _ =>
+      throw <| IO.userError
+        s!"expected {label} response to arrive last, got {(toJson messages).compress}"
 
 def requireAnyStreamDiagnostics
     (label : String)
     (messages : Array Beam.Broker.StreamMessage) : IO (Array Beam.Broker.StreamDiagnostic) := do
-  let diagnostics := messages.filterMap (·.diagnostic?)
+  let diagnostics := messages.filterMap fun
+    | .diagnostic _ diagnostic => some diagnostic
+    | _ => none
   if diagnostics.isEmpty then
     throw <| IO.userError s!"expected {label} to stream diagnostics, got {(toJson messages).compress}"
   pure diagnostics
@@ -126,7 +122,9 @@ def requireAnyStreamDiagnostics
 def requireAnyStreamFileProgress
     (label : String)
     (messages : Array Beam.Broker.StreamMessage) : IO (Array Beam.Broker.SyncFileProgress) := do
-  let progress := messages.filterMap (·.fileProgress?)
+  let progress := messages.filterMap fun
+    | .fileProgress _ progress => some progress
+    | _ => none
   if progress.isEmpty then
     throw <| IO.userError s!"expected {label} to stream fileProgress, got {(toJson messages).compress}"
   pure progress
