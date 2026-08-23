@@ -141,3 +141,7 @@ Evidence bundles contain `card.md`, `metadata.json`, `collected.json`, `report.j
 Confidential bundles omit the `evidence/` directory and local `bundle_dir` / `zip_path` fields from
 their internal `report.json`. The local CLI or MCP result still returns those operational paths so
 the caller can find the bundle.
+
+Sequential bundle writes choose distinct paths instead of overwriting an existing bundle. Path
+selection and directory creation are not atomic across concurrent writers, so callers should
+serialize reports that could resolve to the same derived or explicit output base.
