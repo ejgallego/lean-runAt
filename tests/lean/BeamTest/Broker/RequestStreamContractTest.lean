@@ -97,6 +97,7 @@ def main : IO Unit := do
     }
     expectStreamClientRequestId "sync_file" syncMessages syncRequestId
     let syncResp ← requireFinalStreamResponse "sync_file" syncMessages
+    discard <| requireFileProgress "sync_file terminal response" syncResp
     let syncPayload ← expectOk syncResp
     expectNoReplayDiagnosticsField "sync_file" syncPayload
     let syncResult ← requireSyncFileResult "sync_file" syncPayload
@@ -198,6 +199,7 @@ def main : IO Unit := do
     }
     let staleSyncResp ← requireFinalStreamResponse "stale sync_file" staleSyncMessages
     expectErrorCode "stale sync_file" Beam.Broker.syncBarrierIncompleteCode staleSyncResp
+    discard <| requireFileProgress "stale sync_file terminal response" staleSyncResp
 
     let staleSaveMessages ← requireFailedStream "stale save_olean" <| ← runRequestStream port {
       op := .saveOlean
@@ -206,6 +208,7 @@ def main : IO Unit := do
     }
     let staleSaveResp ← requireFinalStreamResponse "stale save_olean" staleSaveMessages
     expectErrorCode "stale save_olean" Beam.Broker.syncBarrierIncompleteCode staleSaveResp
+    discard <| requireFileProgress "stale save_olean terminal response" staleSaveResp
 
     let staleCloseMessages ← requireFailedStream "stale close-save" <| ← runRequestStream port {
       op := .close
@@ -215,6 +218,7 @@ def main : IO Unit := do
     }
     let staleCloseResp ← requireFinalStreamResponse "stale close-save" staleCloseMessages
     expectErrorCode "stale close-save" Beam.Broker.syncBarrierIncompleteCode staleCloseResp
+    discard <| requireFileProgress "stale close-save terminal response" staleCloseResp
 
     IO.FS.writeFile (root / "SaveSmoke" / "B.lean") "def bVal : Nat := 1\n"
     buildLakeTarget root "SaveSmoke/A.lean"

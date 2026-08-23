@@ -52,8 +52,17 @@ def BrokerFailure.toResponseFailure (failure : BrokerFailure) : ResponseFailure 
 def BrokerFailure.toResponse (failure : BrokerFailure) : Response :=
   failure.toResponseFailure.toResponse
 
-def reqError (code : String) (message : String := "") (data? : Option Json := none) : Response :=
-  (responseFailure code message data?).toResponse
+def responseFailureFor
+    (code : BrokerFailureCode)
+    (message : String := "")
+    (data? : Option Json := none) : ResponseFailure :=
+  ({ code, message, data? } : BrokerFailure).toResponseFailure
+
+def errorResponseFor
+    (code : BrokerFailureCode)
+    (message : String := "")
+    (data? : Option Json := none) : Response :=
+  (responseFailureFor code message data?).toResponse
 
 def documentVersionMismatchErrorData
     (expectedVersion acceptedVersion : Nat)

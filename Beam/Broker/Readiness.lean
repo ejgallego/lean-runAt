@@ -45,13 +45,6 @@ def decideSyncBarrier
         none
   }
 
-def responseWithFileProgress
-    (resp : Response)
-    (fileProgress? : Option SyncFileProgress) : Response :=
-  match fileProgress? with
-  | some progress => resp.withFileProgress progress
-  | none => resp
-
 def syncBarrierIncompleteFailure
     (uri : DocumentUri)
     (version : Nat)
@@ -59,10 +52,11 @@ def syncBarrierIncompleteFailure
     (hints : Array StaleDirectDepHint)
     (diagnostics : Array Diagnostic)
     (fileProgress? : Option SyncFileProgress) : ResponseFailure :=
-  responseFailure
-    syncBarrierIncompleteCode
+  (responseFailureFor
+    .syncBarrierIncomplete
     (syncBarrierIncompleteMessage uri version fileProgress?)
-    (some <| staleSyncErrorData targetPath hints (completionBlockingDiagnostics diagnostics))
+    (some <| staleSyncErrorData targetPath hints (completionBlockingDiagnostics diagnostics)))
+  |>.withOptionalFileProgress fileProgress?
 
 def syncBarrierIncompleteResponse
     (uri : DocumentUri)
@@ -77,7 +71,7 @@ def syncFileSuccessResponse
     (result : SyncFileResult)
     (fileProgress? : Option SyncFileProgress)
     : Response :=
-  responseWithFileProgress
+  Response.withOptionalFileProgress
     (Response.success <| toJson result)
     fileProgress?
 

@@ -898,45 +898,39 @@ instance : ToJson StreamMessage where
     | .response clientRequestId? resp =>
         Json.mkObj <| [
           ("kind", toJson StreamKind.response),
-          ("response", toJson resp)
+          ("payload", toJson resp)
         ] ++ optionalJsonField "clientRequestId" clientRequestId?
     | .fileProgress clientRequestId? progress =>
         Json.mkObj <| [
           ("kind", toJson StreamKind.fileProgress),
-          ("fileProgress", toJson progress)
+          ("payload", toJson progress)
         ] ++ optionalJsonField "clientRequestId" clientRequestId?
     | .diagnostic clientRequestId? streamDiagnostic =>
         Json.mkObj <| [
           ("kind", toJson StreamKind.diagnostic),
-          ("diagnostic", toJson streamDiagnostic)
+          ("payload", toJson streamDiagnostic)
         ] ++ optionalJsonField "clientRequestId" clientRequestId?
+
+private def decodeStreamPayload [FromJson α]
+    (kind : StreamKind)
+    (payload : Json) : Except String α :=
+  (fromJson? payload).mapError fun err =>
+    s!"invalid Beam {kind.key} stream payload: {err}"
 
 instance : FromJson StreamMessage where
   fromJson? json := do
     requireOnlyJsonFields "Beam stream message"
-      #["kind", "response", "fileProgress", "diagnostic", "clientRequestId"] json
+      #["kind", "payload", "clientRequestId"] json
     let kind ← json.getObjValAs? StreamKind "kind"
-    let response? ← optionalField? (α := Response) json "response"
-    let fileProgress? ← optionalField? (α := SyncFileProgress) json "fileProgress"
-    let diagnostic? ← optionalField? (α := StreamDiagnostic) json "diagnostic"
+    let payload ← json.getObjVal? "payload"
     let clientRequestId? ← optionalField? (α := String) json "clientRequestId"
     match kind with
     | .response =>
-        match response?, fileProgress?, diagnostic? with
-        | some response, none, none => pure <| .response clientRequestId? response
-        | _, _, _ =>
-            throw "Beam response stream message requires only a 'response' payload"
+        pure <| .response clientRequestId? (← decodeStreamPayload kind payload)
     | .fileProgress =>
-        match response?, fileProgress?, diagnostic? with
-        | none, some progress, none => pure <| .fileProgress clientRequestId? progress
-        | _, _, _ =>
-            throw "Beam fileProgress stream message requires only a 'fileProgress' payload"
+        pure <| .fileProgress clientRequestId? (← decodeStreamPayload kind payload)
     | .diagnostic =>
-        match response?, fileProgress?, diagnostic? with
-        | none, none, some streamDiagnostic =>
-            pure <| .diagnostic clientRequestId? streamDiagnostic
-        | _, _, _ =>
-            throw "Beam diagnostic stream message requires only a 'diagnostic' payload"
+        pure <| .diagnostic clientRequestId? (← decodeStreamPayload kind payload)
 
 def Response.success (result : Json) : Response :=
   .successResult result none
@@ -955,6 +949,20 @@ def Response.withFileProgress
       .successResult result (some fileProgress)
   | .errorResult failure =>
       .errorResult { failure with fileProgress? := some fileProgress }
+
+def Response.withOptionalFileProgress
+    (resp : Response)
+    (fileProgress? : Option SyncFileProgress) : Response :=
+  match fileProgress? with
+  | some fileProgress => resp.withFileProgress fileProgress
+  | none => resp
+
+def ResponseFailure.withOptionalFileProgress
+    (failure : ResponseFailure)
+    (fileProgress? : Option SyncFileProgress) : ResponseFailure :=
+  match fileProgress? with
+  | some fileProgress => { failure with fileProgress? := some fileProgress }
+  | none => failure
 
 def Request.resolvedWorkspaceId? (req : Request) : Option WorkspaceId :=
   match req.workspaceId?, req.handle? with

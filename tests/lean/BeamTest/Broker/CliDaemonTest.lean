@@ -153,6 +153,17 @@ private def checkProjectDaemonWorkspaceRouting : IO Unit := do
   require "CLI routing should preserve an explicitly selected workspace"
     (explicitReq.workspaceId? == some "maintenance-fixture")
 
+private def checkClientResponsePresentation : IO Unit := do
+  let semantic := Beam.Broker.Response.success Json.null
+  let presented :=
+    Beam.Broker.responseOutputJson semantic (some "visible-request")
+  requireJsonString "presented response" "clientRequestId" "visible-request" presented
+  match fromJson? (α := Beam.Broker.Response) presented with
+  | .ok response =>
+      throw <| IO.userError
+        s!"presentation-decorated response decoded as semantic response: {(toJson response).compress}"
+  | .error _ => pure ()
+
 private def checkCliRecoveryHints : IO Unit := do
   let staleData := Json.mkObj [
     ("targetPath", toJson "SaveSmoke/A.lean"),
@@ -1081,6 +1092,7 @@ private def checkRuntimeBundleMetadataAcceptance : IO Unit := do
 
 def main : IO Unit := do
   checkProjectDaemonWorkspaceRouting
+  checkClientResponsePresentation
   checkCliRecoveryHints
   checkSyncWaitSpecs
   checkCancelAcknowledgementDecoding

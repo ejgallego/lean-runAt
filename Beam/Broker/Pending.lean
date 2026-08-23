@@ -88,8 +88,11 @@ def resolveError
     (code : ErrorCode)
     (message : String)
     (data? : Option Json := none) : IO Unit := do
+  let progress? ← pending.progressRef.get
+  let failure :=
+    (responseFailure (errorCodeName code) message data?).withOptionalFileProgress progress?
   try
-    pending.promise.resolve (.error (responseFailure (errorCodeName code) message data?))
+    pending.promise.resolve (.error failure)
   catch _ =>
     pure ()
 
@@ -210,8 +213,11 @@ private def emitNewTrackedDiagnostics
       seen := seen.insert key
       match emitDiagnostic? with
       | some emitDiagnostic =>
-          emitDiagnostic <|
-            streamDiagnosticOfDiagnostic root diagnosticParam.uri diagnosticParam.version? diagnostic
+          try
+            emitDiagnostic <|
+              streamDiagnosticOfDiagnostic root diagnosticParam.uri diagnosticParam.version? diagnostic
+          catch _ =>
+            pure ()
       | none =>
           pure ()
   pure seen
@@ -266,6 +272,8 @@ namespace PendingRequestStore
 def failAll (store : PendingRequestStore) (failure : ResponseFailure) : IO Unit := do
   let pending ← clear store
   for req in pending do
+    let progress? ← req.progressRef.get
+    let failure := failure.withOptionalFileProgress progress?
     try
       req.promise.resolve (.error failure)
     catch _ =>

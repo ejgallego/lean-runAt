@@ -162,20 +162,31 @@ private def checkPendingStoreResolve : IO Unit := do
 
 private def checkPendingStoreFailAll : IO Unit := do
   let store ← PendingRequestStore.create
-  let (pending, promise) ← mkPending
-  PendingRequestStore.insert store 11 pending
-  PendingRequestStore.failAll store (responseFailure "workerExited" "worker exited")
-  match ← PendingRequest.awaitOutcome promise with
-  | .ok _ =>
-      throw <| IO.userError "failAll resolves pending request as an error: expected error"
-  | .error failure =>
-      discard <| requireFailureCode
-        "failAll resolves pending request as an error" "workerExited" failure
+  let firstProgress : SyncFileProgress := { updates := 5, done := false }
+  let secondProgress : SyncFileProgress := { updates := 8, done := true }
+  let (firstPending, firstPromise) ← mkPending (progress? := some firstProgress)
+  let (secondPending, secondPromise) ← mkPending (progress? := some secondProgress)
+  PendingRequestStore.insert store 11 firstPending
+  PendingRequestStore.insert store 12 secondPending
+  PendingRequestStore.failAll store (responseFailureFor .workerExited "worker exited")
+  for (label, promise, expectedProgress) in #[
+      ("first", firstPromise, firstProgress),
+      ("second", secondPromise, secondProgress)
+    ] do
+    match ← PendingRequest.awaitOutcome promise with
+    | .ok _ =>
+        throw <| IO.userError s!"failAll resolves {label} pending request as an error: expected error"
+    | .error failure =>
+        discard <| requireFailureCode
+          s!"failAll resolves {label} pending request as an error" "workerExited" failure
+        require s!"failAll preserves {label} pending request progress"
+          (failure.fileProgress? == some expectedProgress)
   require "failAll clears pending store"
     ((← PendingRequestStore.snapshot store).isEmpty)
 
 private def checkPendingResolveError : IO Unit := do
-  let (pending, promise) ← mkPending
+  let expectedProgress : SyncFileProgress := { updates := 4, done := false }
+  let (pending, promise) ← mkPending (progress? := some expectedProgress)
   let data := Json.mkObj [
     ("expectedVersion", toJson (4 : Nat)),
     ("acceptedVersion", toJson (5 : Nat))
@@ -193,6 +204,8 @@ private def checkPendingResolveError : IO Unit := do
           throw <| IO.userError "pending typed error lost its data"
       | some actual =>
           require "pending typed error preserves its data" (actual.compress == data.compress)
+      require "pending typed error preserves progress"
+        (failure.fileProgress? == some expectedProgress)
 
 private def mkRange (startLine startCharacter endLine endCharacter : Nat) : Range := {
   start := { line := startLine, character := startCharacter }
@@ -328,6 +341,22 @@ private def observeStreamedDiagnostics
     (mkPublishDiagnostics diagnostics)
   streamedRef.get
 
+private def checkDiagnosticEmitterFailureIsolation : IO Unit := do
+  let diagnostic := mkDiagnostic (mkRange 1 0 1 4) "stream consumer disconnected"
+  let (pending, _) ← mkPending
+    (tracked? := some ("file:///workspace/Foo.lean", 1))
+    (diagnosticScope := .all)
+    (emitDiagnostic? := some fun _ =>
+      throw <| IO.userError "diagnostic sink failed")
+  PendingRequest.observeDiagnostics
+    (System.FilePath.mk "/workspace")
+    pending
+    (mkPublishDiagnostics #[diagnostic])
+  require "diagnostic sink failure still records the publication"
+    (← pending.diagnosticsSeenRef.get)
+  require "diagnostic sink failure still records current diagnostics"
+    ((← pending.diagnosticsRef.get).map (·.message) == #[diagnostic.message])
+
 private def checkSetupFileProgressStreamsByScope : IO Unit := do
   let setupProgress :=
     mkDiagnosticWithSeverity
@@ -366,6 +395,7 @@ def main : IO Unit := do
   checkSyncFileProgressDisplay
   checkSyncFileProgressLines
   checkDiagnosticLineCanExceedProgressRange
+  checkDiagnosticEmitterFailureIsolation
   checkSetupFileProgressStreamsByScope
 
 end BeamTest.Broker.PendingTest

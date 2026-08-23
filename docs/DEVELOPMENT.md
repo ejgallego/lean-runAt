@@ -224,7 +224,8 @@ or root selector.
 Broker `Response` and `StreamMessage` values are tagged unions internally. Their explicit JSON
 codecs retain the public `ok` and `kind` discriminants while preventing mismatched payloads from
 being constructed after decoding; consume stream messages with exhaustive pattern matching rather
-than rebuilding optional payload views. `StreamMessage` owns `clientRequestId` correlation uniformly
+than rebuilding optional payload views. Every stream variant uses the same wire `payload` field;
+the `kind` discriminant selects its typed decoder. `StreamMessage` owns `clientRequestId` uniformly
 for progress, diagnostic, and terminal response variants; semantic `Response` values do not own
 transport identity. CLI output may decorate a printed response with a caller-visible request ID only
 at that presentation edge. Internal request and pending error channels carry `ResponseFailure`,

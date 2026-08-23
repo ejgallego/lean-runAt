@@ -277,9 +277,6 @@ def ToolError.invalidResult (message : String) : ToolError :=
 def ToolError.invalidInput (message : String) : ToolError :=
   { code := "invalidInput", message }
 
-def ToolError.runtimeSetup (message : String) : ToolError :=
-  { code := "runtimeSetup", message }
-
 /--
 Normalize a broker-level `runAt` result into the agent-facing field names.
 

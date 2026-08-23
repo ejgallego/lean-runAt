@@ -5,7 +5,6 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Beam.Broker.Errors
-import Beam.Broker.Client
 import Beam.Broker.Protocol
 import Beam.Broker.Readiness
 import Beam.Broker.RequestArgs
@@ -141,8 +140,6 @@ private def checkResponseJsonShape : IO Unit := do
   requireFieldAbsent "error response" "result" errorJson
 
   requireFieldAbsent "semantic success response" "clientRequestId" successJson
-  let presentedJson := responseOutputJson (Response.success Json.null) (some "visible-request")
-  requireJsonString "presented response" "clientRequestId" "visible-request" presentedJson
 
 private def checkStreamMessageDecode : IO Unit := do
   let response := Response.success (Json.mkObj [("value", toJson (1 : Nat))])
@@ -157,7 +154,7 @@ private def checkStreamMessageDecode : IO Unit := do
   requireJsonString "correlated response stream" "clientRequestId" "req-response"
     correlatedResponseJson
   let correlatedResponsePayload ←
-    requireObjVal "correlated response stream" "response" correlatedResponseJson
+    requireObjVal "correlated response stream" "payload" correlatedResponseJson
   requireFieldAbsent "correlated response payload" "clientRequestId" correlatedResponsePayload
   let validCorrelatedResponse ← expectOk "valid correlated response stream" <|
     fromJson? (α := StreamMessage) correlatedResponseJson
@@ -203,23 +200,19 @@ private def checkStreamMessageDecode : IO Unit := do
   expectDecodeFailure StreamMessage "response stream missing payload" <|
     Json.mkObj [("kind", toJson "response")]
   expectDecodeFailure StreamMessage "progress stream with response payload" <|
-    Json.mkObj [("kind", toJson "fileProgress"), ("response", responseJson)]
-  expectDecodeFailure StreamMessage "response stream with two payloads" <|
-    Json.mkObj [
-      ("kind", toJson "response"),
-      ("response", responseJson),
-      ("fileProgress", progressJson)
-    ]
+    Json.mkObj [("kind", toJson "fileProgress"), ("payload", responseJson)]
+  expectDecodeFailure StreamMessage "response stream with legacy variant payload field" <|
+    Json.mkObj [("kind", toJson "response"), ("response", responseJson)]
   expectDecodeFailure StreamMessage "response stream with nested request id" <|
     Json.mkObj [
       ("kind", toJson "response"),
-      ("response", (toJson response).setObjVal! "clientRequestId" (toJson "req-response")),
+      ("payload", (toJson response).setObjVal! "clientRequestId" (toJson "req-response")),
       ("clientRequestId", toJson "req-response")
     ]
   expectDecodeFailure StreamMessage "stream with undeclared field" <|
     Json.mkObj [
       ("kind", toJson "fileProgress"),
-      ("fileProgress", progressJson),
+      ("payload", progressJson),
       ("extra", toJson true)
     ]
 
@@ -264,9 +257,6 @@ private def checkResponseJsonDecode : IO Unit := do
     ("result", Json.mkObj []),
     ("extra", toJson true)
   ]
-  expectDecodeFailure Response "response with presentation request id" <|
-    responseOutputJson (Response.success Json.null) (some "visible-request")
-
 private def checkSaveResultJsonDecode : IO Unit := do
   let saveResult : SaveOleanResult := {
     module := "Demo"
@@ -462,6 +452,8 @@ private def checkReadinessBoundary : IO Unit := do
     syncBarrierIncompleteCode
     (syncBarrierIncompleteMessage uri 7 diagnosticBarrier.fileProgress?)
     incompleteResp
+  require "readiness incomplete response should preserve fileProgress"
+    (incompleteResp.fileProgress? == diagnosticBarrier.fileProgress?)
   let data ← requireErrorData "readiness incomplete response" err
   requireJsonString "readiness incomplete response data" "targetPath" "SaveSmoke/A.lean" data
   let saveDepsJson ← requireObjVal "readiness incomplete response data" "saveDeps" data

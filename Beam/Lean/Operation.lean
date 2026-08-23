@@ -246,9 +246,7 @@ def Operation.inputSchema : Operation → Json
       inputObject [pathField] #["path"]
   | .sync | .refresh =>
       inputObject [pathField, syncDiagnosticScopeField, diagnosticsInResultField] #["path"]
-  | .save =>
-      inputObject [pathField, saveDiagnosticScopeField] #["path"]
-  | .closeSave =>
+  | .save | .closeSave =>
       inputObject [pathField, saveDiagnosticScopeField] #["path"]
   | .close =>
       inputObject [pathField] #["path"]

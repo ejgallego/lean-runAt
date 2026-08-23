@@ -34,13 +34,6 @@ def parseEndpointOption (args : List String) : Except String (Endpoint × List S
   | _ =>
       pure (.tcp 8765, args)
 
-def parsePortOption (args : List String) : Except String (UInt16 × List String) := do
-  match args with
-  | "--port" :: port :: rest =>
-      pure (← parsePortText "port" port, rest)
-  | _ =>
-      pure (8765, args)
-
 private def decodeStreamMessage (msg : String) : IO StreamMessage := do
   match Json.parse msg with
   | .error err => throw <| IO.userError s!"invalid Beam daemon response json: {err}"
@@ -109,12 +102,6 @@ partial def sendRequestWithCallbacks
         callbacks.onFileProgress clientRequestId? progress
     | .diagnostic clientRequestId? diagnostic =>
         callbacks.onDiagnostic clientRequestId? diagnostic
-def sendRequestWithProgress
-    (endpoint : Endpoint)
-    (req : Request)
-    (onFileProgress : Option String → SyncFileProgress → IO Unit) : IO Response :=
-  sendRequestWithCallbacks endpoint req { onFileProgress := onFileProgress }
-
 def sendRequest (endpoint : Endpoint) (req : Request) : IO Response :=
   sendRequestWithCallbacks endpoint req
 

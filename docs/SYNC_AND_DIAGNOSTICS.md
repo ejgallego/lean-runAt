@@ -126,23 +126,24 @@ observed it. A request may produce any number of `fileProgress` and `diagnostic`
 by exactly one terminal `response`; the response is last and no later message belongs to that
 request.
 
-Every stream variant owns correlation in the same place. When the request supplies
-`clientRequestId`, each message repeats it on the outer stream envelope:
+Every stream variant uses the same `kind`, `payload`, and optional correlation envelope. When the
+request supplies `clientRequestId`, each message repeats it on that outer stream envelope:
 
-```json
-{"clientRequestId":"sync-7","fileProgress":{"done":false,"updates":2},"kind":"fileProgress"}
-{"clientRequestId":"sync-7","diagnostic":{"completionBlocking":false,"message":"unused variable","path":"Demo.lean","range":{"end":{"character":1,"line":0},"start":{"character":0,"line":0}},"severity":2,"uri":"file:///workspace/Demo.lean","version":3},"kind":"diagnostic"}
-{"clientRequestId":"sync-7","kind":"response","response":{"fileProgress":{"done":true,"updates":3},"ok":true,"result":{"diagnostics":{"counts":{"error":0,"hint":0,"information":0,"total":1,"unknown":0,"warning":1}},"path":"Demo.lean","readiness":{"blockingDiagnostics":[],"blockingErrorCount":0,"blockingMessages":[],"reason":"ok","saveReady":true},"version":3}}}
+```jsonl
+{"clientRequestId":"sync-7","kind":"fileProgress","payload":{"done":false,"updates":2}}
+{"clientRequestId":"sync-7","kind":"diagnostic","payload":{"completionBlocking":false,"message":"unused variable","path":"Demo.lean","range":{"end":{"character":1,"line":0},"start":{"character":0,"line":0}},"severity":2,"uri":"file:///workspace/Demo.lean","version":3}}
+{"clientRequestId":"sync-7","kind":"response","payload":{"fileProgress":{"done":true,"updates":3},"ok":true,"result":{"diagnostics":{"counts":{"error":0,"hint":0,"information":0,"total":1,"unknown":0,"warning":1}},"path":"Demo.lean","readiness":{"blockingDiagnostics":[],"blockingErrorCount":0,"blockingMessages":[],"reason":"ok","saveReady":true},"version":3}}}
 ```
 
-The nested `response` is the semantic result and never repeats `clientRequestId`. The ordinary
+The response `payload` is the semantic result and never repeats `clientRequestId`. The ordinary
 wrapper's final stdout object may echo a caller-supplied `BEAM_REQUEST_ID` as a presentation
 convenience; internally generated wrapper cancellation IDs remain hidden. This decoration is not
 part of the broker `Response` type.
 
 The terminal response's `fileProgress` is the latest observation available when the result was
-constructed. It can be newer than the last throttled live `fileProgress` line and does not imply
-that the current request itself emitted every preceding update.
+constructed. It can be newer than the last live broker `fileProgress` event because the barrier can
+adjust or reuse a prior observation, and it does not imply that the current request itself emitted
+every preceding update. Raw broker events are not throttled; MCP progress notifications are.
 
 ## MCP Diagnostics
 
@@ -199,12 +200,12 @@ report `rangeStartLine` and/or `rangeEndLine`; MCP spells these `range_start_lin
 `range_end_line`. The range end is the upper line bound reported by
 Lean's progress ranges, not the source file's line count; diagnostics may legitimately refer to
 lines beyond it. The final response contains the latest observation available when that response is
-constructed, so it may be newer than the last throttled live notification. An operation can also
-reuse a previously observed value without emitting live file progress; `updates` is not a count of
-work performed by the current request. Use these fields for coarse UI progress only. Final machine
-decisions should use the readiness and diagnostic result fields. MCP includes final
-`document_progress` only for `lean_sync`, `lean_refresh`, `lean_save`, and `lean_close_save`; it is
-not inherited by `runAt` or unrelated tools.
+constructed, so it may be newer than the last live broker event or throttled MCP notification. An
+operation can also reuse a previously observed value without emitting live file progress; `updates`
+is not a count of work performed by the current request. Use these fields for coarse UI progress
+only. Final machine decisions should use the readiness and diagnostic result fields. MCP includes
+final `document_progress` only for `lean_sync`, `lean_refresh`, `lean_save`, and
+`lean_close_save`; it is not inherited by `runAt` or unrelated tools.
 
 For `sync`, `refresh`, `save`, and `close-save`, completed Lean file progress is one input to the
 diagnostics-complete barrier. For non-barrier calls, file progress may be partial because the

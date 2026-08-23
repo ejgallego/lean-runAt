@@ -97,6 +97,19 @@ private def liftBrokerFailureIO (act : IO (Except BrokerFailure α)) : HandlerM 
     | .ok value => pure <| .ok value
     | .error failure => pure <| .error failure.toResponseFailure
 
+private def withFailureProgress
+    (fileProgress? : Option SyncFileProgress)
+    (act : HandlerM α) : HandlerM α :=
+  ExceptT.mk do
+    try
+      match ← act.run with
+      | .ok value => pure (.ok value)
+      | .error failure =>
+          pure (.error <| failure.withOptionalFileProgress fileProgress?)
+    catch e =>
+      pure (.error <|
+        (responseFailureFor .internalError e.toString).withOptionalFileProgress fileProgress?)
+
 private def requestArg (arg : Except ResponseFailure α) : HandlerM α :=
   match arg with
   | .ok value => pure value
@@ -105,7 +118,7 @@ private def requestArg (arg : Except ResponseFailure α) : HandlerM α :=
 private def requestMethod (method : Except String String) : HandlerM String :=
   match method with
   | .ok method => pure method
-  | .error msg => throw <| responseFailure "invalidParams" msg
+  | .error msg => throw <| responseFailureFor .invalidParams msg
 
 private def runHandler (act : HandlerM (Response × Bool)) : IO (Response × Bool) := do
   try
@@ -113,7 +126,7 @@ private def runHandler (act : HandlerM (Response × Bool)) : IO (Response × Boo
     | .ok result => pure result
     | .error failure => pure (failure.toResponse, false)
   catch e =>
-    pure (Response.error "internalError" e.toString, false)
+    pure (errorResponseFor .internalError e.toString, false)
 
 private def mkSessionToken : IO String := do
   let pid ← IO.Process.getPID
@@ -391,15 +404,9 @@ private def startWaitDiagnosticsWatchdog
             s!"waitForDiagnostics watchdog after {timeoutMs}ms: {label}"
       pure ()
 
-private def pendingOrThrow
-    (outcome : Except ResponseFailure PendingResult) : HandlerM PendingResult :=
-  match outcome with
-  | .ok pending => pure pending
-  | .error failure => throw failure
-
 private def awaitPending (promise : IO.Promise (Except ResponseFailure PendingResult)) :
     HandlerM PendingResult := do
-  pendingOrThrow (← liftHandlerIO <| PendingRequest.awaitOutcome promise)
+  requestArg (← liftHandlerIO <| PendingRequest.awaitOutcome promise)
 
 private def awaitWaitForDiagnosticsBarrier
     (label : String)
@@ -414,7 +421,7 @@ private def awaitWaitForDiagnosticsBarrier
     catch e =>
       doneRef.set true
       throw e
-  pendingOrThrow outcome
+  requestArg outcome
 
 private def nextRequestId (session : Session) : Session × RequestID :=
   let id : RequestID := session.nextId
@@ -506,7 +513,7 @@ private def startRequestJsonTrackedDetailed
     discard <| PendingRequestStore.remove session.pending id
     traceBroker s!"lsp request send failed id={id} method={method} error={e.toString}"
     try
-      promise.resolve (.error (responseFailure "internalError" e.toString))
+      promise.resolve (.error (responseFailureFor .internalError e.toString))
     catch _ =>
       pure ()
     throw e
@@ -956,7 +963,7 @@ def ServerRuntime.initWorkspaceWithConfig
     (config : BrokerConfig)
     (mode? : Option Beam.Workspace.InitMode := none) : IO Response := do
   if !validWorkspaceId workspaceId then
-    return reqError "invalidParams" "workspace id must be non-empty"
+    return errorResponseFor .invalidParams "workspace id must be non-empty"
   let mode := mode?.getD .set
   server.withState do
     let state ← get
@@ -964,7 +971,7 @@ def ServerRuntime.initWorkspaceWithConfig
     | some current =>
         if mode == .reset then
           if let some otherId := duplicateRootWorkspace? state workspaceId config then
-            pure <| reqError "invalidParams" <|
+            pure <| errorResponseFor .invalidParams <|
               s!"workspace root {config.root} is already owned by workspace '{otherId}'"
           else
             shutdownWorkspaceSessions current
@@ -976,15 +983,15 @@ def ServerRuntime.initWorkspaceWithConfig
           pure <| Response.success <| toJson <|
             workspaceInitResult workspaceId current.config.root mode true false
         else
-          pure <| reqError "invalidParams" <|
+          pure <| errorResponseFor .invalidParams <|
             s!"workspace '{workspaceId}' is already initialized for {current.config.root}; " ++
             s!"use workspaceMode=reset to switch it explicitly to {config.root}"
     | none =>
         if mode == .verify then
-          pure <| reqError "invalidParams"
+          pure <| errorResponseFor .invalidParams
             s!"workspace '{workspaceId}' is not initialized; use workspaceMode=set first"
         else if let some otherId := duplicateRootWorkspace? state workspaceId config then
-          pure <| reqError "invalidParams" <|
+          pure <| errorResponseFor .invalidParams <|
             s!"workspace root {config.root} is already owned by workspace '{otherId}'"
         else
           modify fun state => setWorkspace state workspaceId (mkWorkspaceState config)
@@ -1005,7 +1012,7 @@ def ServerRuntime.dropWorkspace
     (server : ServerRuntime)
     (workspaceId : WorkspaceId) : IO Response := do
   if !validWorkspaceId workspaceId then
-    return reqError "invalidParams" "workspace id must be non-empty"
+    return errorResponseFor .invalidParams "workspace id must be non-empty"
   server.withState do
     let state ← get
     match getWorkspace? state workspaceId with
@@ -1098,16 +1105,16 @@ private def validateRequestWorkspace
   let workspaceId ←
     match req.requireWorkspaceId with
     | .ok workspaceId => pure workspaceId
-    | .error err => return .error (responseFailure "invalidParams" err)
+    | .error err => return .error (responseFailureFor .invalidParams err)
   if let some explicitWorkspaceId := req.workspaceId? then
     if let some handle := req.handle? then
       if explicitWorkspaceId != handle.workspaceId then
-        return .error <| responseFailure "invalidParams"
+        return .error <| responseFailureFor .invalidParams
           s!"request workspace '{explicitWorkspaceId}' does not match handle workspace '{handle.workspaceId}'"
   let workspace? ← server.withState do
     pure <| (← get).workspaces.get? workspaceId
   let some workspace := workspace?
-    | return .error (responseFailure "invalidParams" s!"unknown Beam workspace '{workspaceId}'")
+    | return .error (responseFailureFor .invalidParams s!"unknown Beam workspace '{workspaceId}'")
   match req.root? with
   | none => pure (.ok { toRequest := req, workspaceId })
   | some rootText =>
@@ -1115,9 +1122,9 @@ private def validateRequestWorkspace
         try
           resolveRoot (System.FilePath.mk rootText)
         catch e =>
-          return .error (responseFailure "invalidParams" e.toString)
+          return .error (responseFailureFor .invalidParams e.toString)
       if requestedRoot != workspace.config.root then
-        return .error <| responseFailure "invalidParams"
+        return .error <| responseFailureFor .invalidParams
           s!"Beam workspace '{workspaceId}' serves {workspace.config.root}, not {requestedRoot}"
       pure (.ok { toRequest := req, workspaceId })
 
@@ -1182,8 +1189,8 @@ private def trackedLeanDocumentVersion
 private def documentVersionMismatchFailure
     (expectedVersion acceptedVersion : Nat)
     (uri : DocumentUri) : ResponseFailure :=
-  responseFailure
-    "contentModified"
+  responseFailureFor
+    .contentModified
     (s!"document version mismatch for {uri}: expected document version {expectedVersion}, got {acceptedVersion}")
     (some <| documentVersionMismatchErrorData expectedVersion acceptedVersion
       (currentVersion? := some acceptedVersion)
@@ -1240,7 +1247,8 @@ private def awaitSyncedDocumentRequest
   liftHandlerIO <| propagatePendingCancellation started.session cancelRef?
   let pending ← awaitPending started.promise
   if started.tracked.isSome then
-    liftHandlerIO <| mergeFileProgressIfCurrent server started.session started.uri pending.progress?
+    withFailureProgress pending.progress? <|
+      liftHandlerIO <| mergeFileProgressIfCurrent server started.session started.uri pending.progress?
   pure pending
 
 private def readRequestSyncSnapshot
@@ -1347,7 +1355,7 @@ private def saveCompletedResponse
       toJson ({ saved := saved.result } : CloseSaveResult)
     else
       toJson saved.result
-  responseWithFileProgress (Response.success result) saved.fileProgress?
+  Response.withOptionalFileProgress (Response.success result) saved.fileProgress?
 
 private def syncSaveReadinessOfBarrierResult
     (uri : DocumentUri)
@@ -1458,31 +1466,35 @@ private def saveOleanCore
     s!"save_olean sync barrier clientRequestId={optionLabel req.clientRequestId?} uri={started.uri} version={started.version}"
     started.promise
   let barrierResult : DiagnosticsBarrierResult ←
-    liftHandlerIO <| decodeResponseAs barrier.result
+    withFailureProgress barrier.progress? <| liftHandlerIO <| decodeResponseAs barrier.result
   if barrierResult.version != started.version then
-    throw <| documentVersionMismatchFailure started.version barrierResult.version started.uri
-  liftFailureIO <| ensureRequestNotCancelled cancelRef?
+    throw <| (documentVersionMismatchFailure started.version barrierResult.version started.uri)
+      |>.withOptionalFileProgress barrier.progress?
+  withFailureProgress barrier.progress? <| liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let saveReadiness ←
-    syncSaveReadinessOfBarrierResult started.uri started.version started.textHash barrierResult
+    withFailureProgress barrier.progress? <|
+      syncSaveReadinessOfBarrierResult started.uri started.version started.textHash barrierResult
   let currentDiagnostics := saveReadiness.currentDiagnostics
-  let barrierOutcome ←
+  let barrierOutcome ← withFailureProgress barrier.progress? <|
     syncBarrierOutcome server started barrier.progress? barrier.diagnosticsSeen
       barrier.diagnostics barrierResult.directImports currentDiagnostics
   let barrierProgress? := barrierOutcome.fileProgress?
-  liftHandlerIO <| mergeFileProgressIfCurrent server started.session started.uri barrierProgress?
+  withFailureProgress barrierProgress? <|
+    liftHandlerIO <| mergeFileProgressIfCurrent server started.session started.uri barrierProgress?
   if barrierOutcome.incomplete then
     let targetPath := trackedPathLabel started.session.root started.uri
     throw <| syncBarrierIncompleteFailure
       started.uri started.version targetPath barrierOutcome.hints
       barrierOutcome.completionDiagnostics barrierProgress?
-  let spec ← liftBrokerFailureIO <|
+  let spec ← withFailureProgress barrierProgress? <| liftBrokerFailureIO <|
     mkLeanSaveSpec started.session.root path
       { hash := started.textTraceHash, mtime := started.textMTime } leanCmd?
   let syncResult :=
     mkSyncFileResult spec.relPath started.version currentDiagnostics saveReadiness
-  recordCompletedSync server started.session started.uri started.version
+  withFailureProgress barrierProgress? <|
+    recordCompletedSync server started.session started.uri started.version
   if let some reason := spec.unsupportedSetupReason? then
-    throwBrokerFailure {
+    withFailureProgress barrierProgress? <| throwBrokerFailure {
       code := .saveUnsupportedSetup
       message :=
         s!"lean-beam save cannot reuse the Lean server snapshot for {spec.relPath}: {reason}. " ++
@@ -1494,7 +1506,8 @@ private def saveOleanCore
           |>.setObjVal! "reason" (toJson reason)
           |>.setObjVal! "path" (toJson spec.relPath)
     }
-  let method ← requestMethod <| saveArtifactsMethod started.session.backend
+  let method ← withFailureProgress barrierProgress? <|
+    requestMethod <| saveArtifactsMethod started.session.backend
   let params := toJson ({
     textDocument := ({ uri := started.uri : TextDocumentIdentifier })
     expectedVersion := started.version
@@ -1515,22 +1528,25 @@ private def saveOleanCore
     : Beam.LSP.Save.SaveArtifactsParams
   })
   -- A cancellation after readiness/spec computation must not invalidate a valid trace.
-  liftFailureIO <| ensureRequestNotCancelled cancelRef?
+  withFailureProgress barrierProgress? <| liftFailureIO <| ensureRequestNotCancelled cancelRef?
   -- Once artifact publication can begin, an older trace must not remain visible: it may have the
   -- same dependency hash while describing a different in-server artifact family.
-  liftHandlerIO <| invalidateLeanSaveTrace spec
-  let (session, savePromise) ← withCurrentMatchingSession server started.session fun current => do
-    let (current, savePromise) ← startRequestJsonTrackedDetailed current method params
-      (clientRequestId? := req.clientRequestId?)
-      (cancelRef? := cancelRef?)
-    updateSession current
-    pure (current, savePromise)
-  liftHandlerIO <| propagatePendingCancellation session cancelRef?
+  withFailureProgress barrierProgress? <| liftHandlerIO <| invalidateLeanSaveTrace spec
+  let (session, savePromise) ← withFailureProgress barrierProgress? <|
+    withCurrentMatchingSession server started.session fun current => do
+      let (current, savePromise) ← startRequestJsonTrackedDetailed current method params
+        (clientRequestId? := req.clientRequestId?)
+        (cancelRef? := cancelRef?)
+      updateSession current
+      pure (current, savePromise)
+  withFailureProgress barrierProgress? <|
+    liftHandlerIO <| propagatePendingCancellation session cancelRef?
   let savePending ←
-    match ← liftHandlerIO <| PendingRequest.awaitOutcome savePromise with
+    match ← withFailureProgress barrierProgress? <|
+        liftHandlerIO <| PendingRequest.awaitOutcome savePromise with
     | .ok pending => pure pending
     | .error failure =>
-        throw <| {
+        throw <| ({
           failure with
           error := {
             failure.error with
@@ -1540,16 +1556,18 @@ private def saveOleanCore
               else
                 failure.error.data?
           }
-        }
+        }).withOptionalFileProgress barrierProgress?
   let saveResult : Beam.LSP.Save.SaveArtifactsResult ←
-    liftHandlerIO <| decodeResponseAs savePending.result
+    withFailureProgress barrierProgress? <| liftHandlerIO <| decodeResponseAs savePending.result
   if saveResult.version != started.version then
-    throw <| responseFailure "internalError"
-      s!"save_olean saved version {saveResult.version}, expected document version {started.version}"
+    throw <| (responseFailureFor .internalError
+      s!"save_olean saved version {saveResult.version}, expected document version {started.version}")
+      |>.withOptionalFileProgress barrierProgress?
   if saveResult.textHash != started.textHash then
-    throw <| responseFailure "internalError"
-      s!"save_olean saved text hash {saveResult.textHash}, expected synced hash {started.textHash}"
-  liftHandlerIO <| writeLeanSaveTrace spec
+    throw <| (responseFailureFor .internalError
+      s!"save_olean saved text hash {saveResult.textHash}, expected synced hash {started.textHash}")
+      |>.withOptionalFileProgress barrierProgress?
+  withFailureProgress barrierProgress? <| liftHandlerIO <| writeLeanSaveTrace spec
   pure {
     session
     uri := started.uri
@@ -1580,7 +1598,8 @@ private def handleSyncFileOp
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
     HandlerM (Response × Bool) := do
   if req.backend != .lean then
-    return (reqError "invalidParams" "sync_file diagnostics barrier is only supported for Lean", false)
+    return (errorResponseFor .invalidParams
+      "sync_file diagnostics barrier is only supported for Lean", false)
   let path ← requestArg req.pathArg
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let started ← liftHandlerIO <| startTrackedDiagnosticsBarrierIO server req path emitProgress?
@@ -1594,17 +1613,20 @@ private def handleSyncFileOp
   liftHandlerIO <| traceBroker
     s!"sync_file barrier completed clientRequestId={optionLabel req.clientRequestId?} progress={pending.progress?.isSome} diagnostics={pending.diagnostics.size} diagnosticsSeen={pending.diagnosticsSeen}"
   let barrierResult : DiagnosticsBarrierResult ←
-    liftHandlerIO <| decodeResponseAs pending.result
+    withFailureProgress pending.progress? <| liftHandlerIO <| decodeResponseAs pending.result
   if barrierResult.version != started.version then
-    throw <| documentVersionMismatchFailure started.version barrierResult.version started.uri
+    throw <| (documentVersionMismatchFailure started.version barrierResult.version started.uri)
+      |>.withOptionalFileProgress pending.progress?
   let saveReadiness ←
-    syncSaveReadinessOfBarrierResult started.uri started.version started.textHash barrierResult
+    withFailureProgress pending.progress? <|
+      syncSaveReadinessOfBarrierResult started.uri started.version started.textHash barrierResult
   let currentDiagnostics := saveReadiness.currentDiagnostics
-  let barrierOutcome ←
+  let barrierOutcome ← withFailureProgress pending.progress? <|
     syncBarrierOutcome server started pending.progress? pending.diagnosticsSeen
       pending.diagnostics barrierResult.directImports currentDiagnostics
   let fileProgress? := barrierOutcome.fileProgress?
-  liftHandlerIO <| mergeFileProgressIfCurrent server started.session started.uri fileProgress?
+  withFailureProgress fileProgress? <|
+    liftHandlerIO <| mergeFileProgressIfCurrent server started.session started.uri fileProgress?
   if barrierOutcome.incomplete then
     let targetPath := trackedPathLabel started.session.root started.uri
     return (syncBarrierIncompleteResponse
@@ -1619,7 +1641,8 @@ private def handleSyncFileOp
   let resultPath := trackedPathLabel started.session.root started.uri
   let syncResult :=
     mkSyncFileResult resultPath started.version currentDiagnostics saveReadiness replyDiagnostics?
-  recordCompletedSync server started.session started.uri started.version
+  withFailureProgress fileProgress? <|
+    recordCompletedSync server started.session started.uri started.version
   liftHandlerIO <| traceBroker
     s!"sync_file response ready clientRequestId={optionLabel req.clientRequestId?} version={started.version} saveReady={saveReadiness.saveReady}"
   pure (syncFileSuccessResponse
@@ -1727,7 +1750,7 @@ private def handleRunAtOp
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
   pure (
-    responseWithFileProgress
+    Response.withOptionalFileProgress
       (Response.success (wrapResultHandle started.session pending.result))
       pending.progress?,
     false)
@@ -1763,7 +1786,7 @@ private def handlePositionLspOp
       (emitProgress? := emitProgress?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (responseWithFileProgress (Response.success pending.result) pending.progress?, false)
+  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
 
 private def handleHoverOp
     (server : ServerRuntime)
@@ -1827,7 +1850,7 @@ private def handleDocumentSymbolsOp
       (emitProgress? := emitProgress?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (responseWithFileProgress (Response.success pending.result) pending.progress?, false)
+  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
 
 private def handleWorkspaceSymbolsOp
     (server : ServerRuntime)
@@ -1851,12 +1874,13 @@ private def handleWorkspaceSymbolsOp
 private def codeActionResolveSourceUri
     (action : CodeAction) : Except ResponseFailure DocumentUri := do
   let some data := action.data?
-    | throw <| responseFailure "invalidParams" "code_action_resolve requires codeAction.data"
+    | throw <| responseFailureFor .invalidParams
+        "code_action_resolve requires codeAction.data"
   let resolveData ←
     match (fromJson? data : Except String Lean.Server.CodeActionResolveData) with
     | .ok resolveData => pure resolveData
     | .error err =>
-        throw <| responseFailure "invalidParams" s!"invalid codeAction.data: {err}"
+        throw <| responseFailureFor .invalidParams s!"invalid codeAction.data: {err}"
   pure resolveData.params.textDocument.uri
 
 private def handleCodeActionResolveOp
@@ -1871,7 +1895,7 @@ private def handleCodeActionResolveOp
   let sourceUri ← requestArg <| codeActionResolveSourceUri args.codeAction
   if sourceUri != snapshot.uri then
     return (
-      reqError "invalidParams"
+      errorResponseFor .invalidParams
         s!"codeAction.data targets {sourceUri}, not requested document {snapshot.uri}",
       false)
   let started ← liftFailureIO <| server.withState do
@@ -1889,7 +1913,7 @@ private def handleCodeActionResolveOp
     version := started.version
     codeAction := resolved
   }
-  pure (responseWithFileProgress (Response.success (toJson payload)) pending.progress?, false)
+  pure (Response.withOptionalFileProgress (Response.success (toJson payload)) pending.progress?, false)
 
 private def handleSaveOleanOp
     (server : ServerRuntime)
@@ -1911,7 +1935,8 @@ private def handleGoalsOp
     HandlerM (Response × Bool) := do
   let args ← requestArg req.goalsArgs
   if req.backend == .lean && req.text?.isSome then
-    return (reqError "invalidParams" "lean goals does not accept speculative text; use lean-beam run-at for execution", false)
+    return (errorResponseFor .invalidParams
+      "lean goals does not accept speculative text; use lean-beam run-at for execution", false)
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
   let started ← liftFailureIO <| server.withState do
@@ -1944,7 +1969,7 @@ private def handleGoalsOp
       (emitProgress? := emitProgress?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (responseWithFileProgress (Response.success pending.result) pending.progress?, false)
+  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
 
 private def handleTodoOp
     (server : ServerRuntime)
@@ -1978,7 +2003,7 @@ private def handleTodoOp
       (emitProgress? := emitProgress?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (responseWithFileProgress (Response.success pending.result) pending.progress?, false)
+  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
 
 private def handleRunWithOp
     (server : ServerRuntime)
@@ -2019,7 +2044,7 @@ private def handleRunWithOp
         pure startedResult
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
   pure (
-    responseWithFileProgress
+    Response.withOptionalFileProgress
       (Response.success (wrapResultHandle started.session pending.result))
       pending.progress?,
     false)
@@ -2056,7 +2081,7 @@ private def handleReleaseOp
           (cancelRef? := cancelRef?)
         pure startedResult
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (responseWithFileProgress (Response.success pending.result) pending.progress?, false)
+  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
 
 private def initWorkspaceConfigFromRequest
     (server : ServerRuntime)
@@ -2069,12 +2094,12 @@ private def initWorkspaceConfigFromRequest
     try
       resolveRoot root
     catch e =>
-      return .error (responseFailure "invalidParams" e.toString)
+      return .error (responseFailureFor .invalidParams e.toString)
   let leanPlugin? ←
     try
       req.leanPlugin?.mapM (fun path => Beam.resolveExistingPath <| System.FilePath.mk path)
     catch e =>
-      return .error (responseFailure "invalidParams" e.toString)
+      return .error (responseFailureFor .invalidParams e.toString)
   if req.leanCmd?.isNone && leanPlugin?.isNone && req.rocqCmd?.isNone then
     let bootstrapConfig ← server.withState do
       let state ← get
@@ -2132,7 +2157,7 @@ private def handleRequestIO
                 (← server.withState <| openDocsPayload (some workspaceReq.workspaceId)), false)
   | .initWorkspace =>
       match req.requireWorkspaceId with
-      | .error err => pure (reqError "invalidParams" err, false)
+      | .error err => pure (errorResponseFor .invalidParams err, false)
       | .ok workspaceId =>
           match ← initWorkspaceConfigFromRequest server req with
           | .error failure => pure (failure.toResponse, false)
@@ -2141,7 +2166,7 @@ private def handleRequestIO
               pure (resp, false)
   | .dropWorkspace =>
       match req.requireWorkspaceId with
-      | .error err => pure (reqError "invalidParams" err, false)
+      | .error err => pure (errorResponseFor .invalidParams err, false)
       | .ok workspaceId =>
           let resp ← server.dropWorkspace workspaceId
           pure (resp, false)
@@ -2170,7 +2195,7 @@ private def handleRequestIO
                     ]
                     pure <| Response.success payload
                 catch e =>
-                  pure <| reqError "internalError" e.toString
+                  pure <| errorResponseFor .internalError e.toString
               pure (resp, false)
           | .updateFile => runHandler <| handleUpdateFileOp server workspaceReq cancelRef?
           | .syncFile =>
@@ -2213,7 +2238,7 @@ private def ServerRuntime.withRequestAdmission
     s!"dispatch start op={req.op.key} clientRequestId={optionLabel req.clientRequestId?}"
   match req.validateFields with
   | .error err =>
-      let resp := reqError "invalidParams" err
+      let resp := errorResponseFor .invalidParams err
       traceBroker
         s!"dispatch rejected op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} error={err}"
       recordDispatchMetrics server req resp startedAt
@@ -2240,7 +2265,7 @@ private def ServerRuntime.withRequestAdmission
     finally
       ActiveRequestRegistry.unregister server.activeRequests active?
   catch e =>
-    let resp := Response.error "internalError" e.toString
+    let resp := errorResponseFor .internalError e.toString
     traceBroker
       s!"dispatch exception op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} error={e.toString}"
     recordDispatchMetrics server req resp startedAt
@@ -2317,7 +2342,7 @@ private def handleClient (server : ServerRuntime) (client : Transport.Connection
       match Json.parse msg with
       | .error err =>
           pure <| Except.error <|
-            responseFailure "invalidParams" s!"invalid request json: {err}"
+            responseFailureFor .invalidParams s!"invalid request json: {err}"
       | .ok json => do
           match json.getObjValAs? String "clientRequestId" with
           | .ok clientRequestId => clientRequestIdRef.set (some clientRequestId)
@@ -2326,12 +2351,11 @@ private def handleClient (server : ServerRuntime) (client : Transport.Connection
           | .ok req => pure <| Except.ok req
           | .error err =>
               pure <| Except.error <|
-                responseFailure "invalidParams" s!"invalid request payload: {err}"
+                responseFailureFor .invalidParams s!"invalid request payload: {err}"
     match request with
     | Except.error failure =>
         sendResponse (← clientRequestIdRef.get) failure.toResponse
     | Except.ok req =>
-        clientRequestIdRef.set req.clientRequestId?
         let emitProgress : SyncFileProgress → IO Unit := fun progress =>
           Transport.sendMsg client
             (toJson (StreamMessage.fileProgress req.clientRequestId? progress)).compress
@@ -2345,7 +2369,7 @@ private def handleClient (server : ServerRuntime) (client : Transport.Connection
   catch e =>
     unless ← terminalSentRef.get do
       let clientRequestId? ← clientRequestIdRef.get
-      let resp := Response.error "internalError" e.toString
+      let resp := errorResponseFor .internalError e.toString
       try
         sendResponse clientRequestId? resp
       catch _ =>
