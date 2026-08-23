@@ -16,8 +16,9 @@ def responsePayloadOrWarning
     (resp : Beam.Broker.Response)
     (warnings : Array String) : Json × Array String :=
   match resp with
-  | .successResult result _ _ => (result, warnings)
-  | .errorResult error _ _ =>
+  | .successResult result _ => (result, warnings)
+  | .errorResult failure =>
+      let error := failure.error
       (Json.null, warnings.push s!"{label} failed: {error.code}: {error.message}")
 
 end Beam.Feedback

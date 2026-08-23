@@ -501,7 +501,7 @@ private def checkRunAtNormalization : IO Unit := do
   let normalizedHandle ← expectToolOk "normalize handle result" <|
     Beam.Mcp.normalizeBrokerResponse (.leanOperation .runAtHandle) <|
       ((Beam.Broker.Response.success successWithHandle).withFileProgress
-        { updates := 2, done := true }).setClientRequestId (some "req-1")
+        { updates := 2, done := true })
   let nextHandle ← requireObjVal "handle result" "next_handle" normalizedHandle
   requireJsonString "next handle" "session" "session" nextHandle
   let rawHandle ← requireObjVal "next handle" "raw" nextHandle

@@ -136,6 +136,9 @@ by `beam-client request-stream`; wrapper stderr should be treated as human-facin
 require an explicit top-level `ok` boolean, giving projection layers an unambiguous success/error
 discriminator. A successful response always includes `result`; response and stream envelopes reject
 undeclared fields, and typed save/close-save results reject incomplete or extended artifact shapes.
+All raw stream variants carry an optional `clientRequestId` on their outer envelope; the nested
+terminal response does not duplicate transport correlation. Exact event ordering and examples live
+in [SYNC_AND_DIAGNOSTICS.md](SYNC_AND_DIAGNOSTICS.md#raw-broker-stream).
 
 `lean-beam-mcp` is the experimental stdio MCP entry point. User setup lives in
 [SETUP.md](SETUP.md#mcp-setup); implementation, protocol, tool-list, and conformance notes live in

@@ -119,6 +119,31 @@ Their transport types differ by surface.
 Wrapper stderr is the human-facing surface. Machine consumers should use final stdout JSON or the
 broker JSON stream exposed by `beam-client request-stream`.
 
+### Raw Broker Stream
+
+`beam-client request-stream` prints one compact JSON object per line, in the order the broker
+observed it. A request may produce any number of `fileProgress` and `diagnostic` messages, followed
+by exactly one terminal `response`; the response is last and no later message belongs to that
+request.
+
+Every stream variant owns correlation in the same place. When the request supplies
+`clientRequestId`, each message repeats it on the outer stream envelope:
+
+```json
+{"clientRequestId":"sync-7","fileProgress":{"done":false,"updates":2},"kind":"fileProgress"}
+{"clientRequestId":"sync-7","diagnostic":{"completionBlocking":false,"message":"unused variable","path":"Demo.lean","range":{"end":{"character":1,"line":0},"start":{"character":0,"line":0}},"severity":2,"uri":"file:///workspace/Demo.lean","version":3},"kind":"diagnostic"}
+{"clientRequestId":"sync-7","kind":"response","response":{"fileProgress":{"done":true,"updates":3},"ok":true,"result":{"diagnostics":{"counts":{"error":0,"hint":0,"information":0,"total":1,"unknown":0,"warning":1}},"path":"Demo.lean","readiness":{"blockingDiagnostics":[],"blockingErrorCount":0,"blockingMessages":[],"reason":"ok","saveReady":true},"version":3}}}
+```
+
+The nested `response` is the semantic result and never repeats `clientRequestId`. The ordinary
+wrapper's final stdout object may echo a caller-supplied `BEAM_REQUEST_ID` as a presentation
+convenience; internally generated wrapper cancellation IDs remain hidden. This decoration is not
+part of the broker `Response` type.
+
+The terminal response's `fileProgress` is the latest observation available when the result was
+constructed. It can be newer than the last throttled live `fileProgress` line and does not imply
+that the current request itself emitted every preceding update.
+
 ## MCP Diagnostics
 
 The MCP server advertises logging and forwards incremental Lean diagnostics as structured

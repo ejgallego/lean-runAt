@@ -97,17 +97,26 @@ def requireFinalStreamResponse
     throw <| IO.userError s!"expected {label} stream messages"
   let responseCount := messages.foldl (init := 0) fun acc msg =>
     acc + match msg with
-      | .response _ => 1
+      | .response .. => 1
       | _ => 0
   if responseCount != 1 then
     throw <| IO.userError s!"expected exactly one {label} response message, got {(toJson messages).compress}"
   let some last := messages.back?
     | throw <| IO.userError s!"expected {label} final response"
   match last with
-  | .response resp => pure resp
+  | .response _ resp => pure resp
   | _ =>
       throw <| IO.userError
         s!"expected {label} response to arrive last, got {(toJson messages).compress}"
+
+def expectStreamClientRequestId
+    (label : String)
+    (messages : Array Beam.Broker.StreamMessage)
+    (expected : Option String) : IO Unit := do
+  messages.forM fun message =>
+    unless message.clientRequestId? == expected do
+      throw <| IO.userError
+        s!"expected every {label} stream envelope to carry request id {expected}, got {(toJson message).compress}"
 
 def requireAnyStreamDiagnostics
     (label : String)
@@ -160,8 +169,8 @@ def expectErrCode (resp : Beam.Broker.Response) (code : String) : IO Unit := do
   match resp with
   | .successResult .. =>
       throw <| IO.userError s!"expected error {code}, got success {(toJson resp).compress}"
-  | .errorResult error .. =>
-      if error.code != code && error.code != "-32602" then
+  | .errorResult failure =>
+      if failure.error.code != code && failure.error.code != "-32602" then
         throw <| IO.userError s!"expected error {code}, got {(toJson resp).compress}"
 
 def expectOpCountAtLeast (payload : Json) (backend op : String) (minCount : Nat) : IO Unit := do

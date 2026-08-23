@@ -74,7 +74,7 @@ def main (args : List String) : IO Unit := do
             | none => msg
           IO.eprintln msg
       }
-      printResponse resp
+      printResponse resp req.clientRequestId?
       failOnError resp
   | .requestStream =>
       let resp ← sendRequestWithStream endpoint req fun stream =>

@@ -156,7 +156,6 @@ private def runSyncSmoke
     throw <| IO.userError
       s!"expected sync_file blocking error count to be zero for clean module, got {(toJson syncRes).compress}"
   let syncTop := ← requireFileProgress "sync_file" syncResp
-  expectClientRequestId "sync_file response" syncResp.clientRequestId? syncRequestId
   if !syncTop.done then
     throw <| IO.userError s!"expected top-level sync_file fileProgress.done = true, got {(toJson syncTop).compress}"
   let some syncLast := syncEvents.back?
@@ -186,7 +185,6 @@ private def runSyncSmoke
   if refreshRes.version != 1 then
     throw <| IO.userError s!"expected refresh_file to reopen version 1, got {refreshRes.version}"
   let refreshTop := ← requireFileProgress "refresh_file" refreshResp
-  expectClientRequestId "refresh_file response" refreshResp.clientRequestId? refreshRequestId
   if !refreshTop.done then
     throw <| IO.userError s!"expected top-level refresh_file fileProgress.done = true, got {(toJson refreshTop).compress}"
   let some refreshLast := refreshEvents.back?
@@ -435,7 +433,6 @@ private def runPartialProgressSmoke
   let partialRes ← expectOk partialResp
   let .ok true := partialRes.getObjValAs? Bool "success" | throw <| IO.userError "partial run_at did not succeed"
   let partialProgress := ← requireFileProgress "partial run_at" partialResp
-  expectClientRequestId "partial run_at response" partialResp.clientRequestId? partialRequestId
   if !partialProgress.done then
     throw <| IO.userError s!"expected versioned run_at fileProgress.done = true after sync, got {(toJson partialProgress).compress}"
   if let some partialLast := partialEvents.back? then
@@ -470,14 +467,12 @@ private def runConcurrentSmoke
   }
   let _hoverLatencyMs := ((← IO.monoNanosNow) - hoverStartedAt) / 1000000
   let hoverPayload ← expectOk hoverResp
-  expectClientRequestId "concurrent hover response" hoverResp.clientRequestId? concurrentHoverId
   expectProgressIds "concurrent hover progress" hoverEvents concurrentHoverId
   let hoverContents ← IO.ofExcept <| hoverPayload.getObjVal? "contents"
   let hoverValue ← IO.ofExcept <| hoverContents.getObjValAs? String "value"
   expectStringContains "concurrent hover markdown" hoverValue "answerA : Nat"
   let (concurrentSyncResp, concurrentSyncEvents) ← awaitTask "concurrent sync_file" syncTask
   let concurrentSyncTop := ← requireFileProgress "concurrent sync_file" concurrentSyncResp
-  expectClientRequestId "concurrent sync_file response" concurrentSyncResp.clientRequestId? concurrentSyncId
   expectProgressIds "concurrent sync_file progress" concurrentSyncEvents concurrentSyncId
   if !concurrentSyncTop.done then
     throw <| IO.userError
@@ -640,7 +635,6 @@ private def runCancelSmoke
     | throw <| IO.userError s!"expected cancel response to report cancelled=true, got {cancelPayload.compress}"
   let (slowResp, slowEvents) ← awaitTask "cancel slow run_at" slowTask
   expectErrCode slowResp "requestCancelled"
-  expectClientRequestId "cancelled run_at response" slowResp.clientRequestId? slowRequestId
   expectProgressIds "cancelled run_at progress" slowEvents slowRequestId
 
   let commandPath := "tests/scenario/docs/CommandA.lean"
@@ -693,7 +687,6 @@ private def runWorkerExitSmoke
   killLeanServerForEndpoint endpoint root
   let (slowResp, slowEvents) ← awaitTask "worker-exit slow run_at" slowTask
   expectErrCode slowResp "workerExited"
-  expectClientRequestId "worker-exit run_at response" slowResp.clientRequestId? workerExitRequestId
   expectProgressIds "worker-exit run_at progress" slowEvents workerExitRequestId
 
   let commandPath := "tests/scenario/docs/CommandA.lean"
@@ -803,6 +796,7 @@ private def runSaveAndStatsSmoke
 
   let unrelatedFieldResp ← runClient endpoint {
     op := .stats
+    clientRequestId? := some "invalid-stats-field"
     query? := some "must-not-be-ignored"
   }
   expectErrCode unrelatedFieldResp "invalidParams"

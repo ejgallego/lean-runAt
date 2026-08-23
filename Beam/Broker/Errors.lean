@@ -11,21 +11,6 @@ open Lean
 
 namespace Beam.Broker
 
-/--
-The failure branch of a broker response while it is still inside request handling.
-
-Keeping this separate from `Response` prevents successful responses from inhabiting `Except` error
-channels. The conversion to the wire-level response sum happens only when a request is completed.
--/
-structure ResponseFailure where
-  error : Error
-  fileProgress? : Option SyncFileProgress := none
-  clientRequestId? : Option String := none
-  deriving Inhabited
-
-def ResponseFailure.toResponse (failure : ResponseFailure) : Response :=
-  .errorResult failure.error failure.fileProgress? failure.clientRequestId?
-
 def responseFailure
     (code : String)
     (message : String := "")

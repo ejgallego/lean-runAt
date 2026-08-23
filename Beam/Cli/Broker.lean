@@ -37,7 +37,7 @@ def callBroker (root : System.FilePath) (endpoint : Transport.Endpoint) (req : R
   withBrokerErrorContext root do
     let req ← withEnvClientRequestId (inProjectDaemonWorkspace req)
     let resp ← sendRequest endpoint req
-    printResponse resp
+    printResponse resp req.clientRequestId?
     failOnError resp
 
 def callBrokerQuiet (root : System.FilePath) (endpoint : Transport.Endpoint) (req : Request) : IO Unit :=
@@ -95,11 +95,6 @@ private def withWrapperClientRequestId (req : Request) : IO WrapperBrokerRequest
         request := { req with clientRequestId? := some clientRequestId }
         visibleClientRequestId? := none
       }
-
-private def WrapperBrokerRequest.visibleResponse
-    (wrapperReq : WrapperBrokerRequest)
-    (resp : Response) : Response :=
-  resp.setClientRequestId wrapperReq.visibleClientRequestId?
 
 private def mkInterruptWatcher? (clientRequestId? : Option String) : IO (Option InterruptWatcher) := do
   match clientRequestId? with
@@ -414,7 +409,6 @@ def callBrokerWithProgress
     }
     let resp ← awaitBrokerResponseWithInterrupts endpoint req visibleClientRequestId? spec showProgress <|
       sendRequestWithCallbacks endpoint req callbacks
-    let resp := wrapperReq.visibleResponse resp
     match responseErrorSummary? spec.action spec.failureBoundary resp with
     | some note =>
         IO.eprintln <| annotateRunatMessage visibleClientRequestId? note
@@ -431,7 +425,7 @@ def callBrokerWithProgress
     | none =>
         pure ()
     maybeEmitLiteralBackslashNewlineHint visibleClientRequestId? req resp
-    printResponse resp
+    printResponse resp visibleClientRequestId?
     failOnError resp
 
 end Beam.Cli

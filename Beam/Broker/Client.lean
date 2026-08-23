@@ -84,9 +84,12 @@ partial def sendRequestWithStream
     let rec loop : IO Response := do
       let msg ← Transport.recvMsg client
       let stream ← decodeStreamMessage msg
+      unless stream.clientRequestId? == req.clientRequestId? do
+        throw <| IO.userError
+          s!"Beam daemon stream request id {stream.clientRequestId?} does not match request id {req.clientRequestId?}"
       onStream stream
       match stream with
-      | .response response =>
+      | .response _ response =>
           pure response
       | .fileProgress .. | .diagnostic .. =>
           loop
@@ -100,7 +103,7 @@ partial def sendRequestWithCallbacks
     (callbacks : StreamCallbacks := {}) : IO Response := do
   sendRequestWithStream endpoint req fun stream => do
     match stream with
-    | .response _ =>
+    | .response .. =>
         pure ()
     | .fileProgress clientRequestId? progress =>
         callbacks.onFileProgress clientRequestId? progress
@@ -124,12 +127,20 @@ def readRequestFromStdin : IO Request := do
       | .ok req => pure req
       | .error err => throw <| IO.userError s!"invalid request payload: {err}"
 
-def printResponse (resp : Response) : IO Unit := do
-  IO.println <| Beam.orderedJsonPretty (toJson resp)
+/-- Render a CLI response, optionally adding caller-visible correlation at the presentation edge. -/
+def responseOutputJson (resp : Response) (clientRequestId? : Option String := none) : Json :=
+  match clientRequestId? with
+  | some clientRequestId =>
+      (toJson resp).setObjVal! "clientRequestId" (toJson clientRequestId)
+  | none =>
+      toJson resp
+
+def printResponse (resp : Response) (clientRequestId? : Option String := none) : IO Unit := do
+  IO.println <| Beam.orderedJsonPretty (responseOutputJson resp clientRequestId?)
 
 def failOnError (resp : Response) : IO Unit := do
   match resp with
   | .successResult .. => pure ()
-  | .errorResult error .. => throw <| IO.userError error.message
+  | .errorResult failure => throw <| IO.userError failure.error.message
 
 end Beam.Broker

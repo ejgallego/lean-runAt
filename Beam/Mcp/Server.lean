@@ -491,8 +491,8 @@ private def ensureBrokerWorkspace
               state.application.modify fun application =>
                 application.trackWorkspace workspaceId config.root
               pure <| .ok config.root
-          | .errorResult err .. =>
-              pure <| .error <| RpcError.invalidRequest err.message
+          | .errorResult failure =>
+              pure <| .error <| RpcError.invalidRequest failure.error.message
 
 private def ensureRuntimeForWorkspace
     (state : ServerState)
@@ -631,8 +631,8 @@ private def handleDropWorkspace
           | .error err =>
               pure <| callToolErrorResult <| ToolError.invalidResult
                 s!"invalid workspace drop result: {err}"
-      | .errorResult err .. =>
-          pure <| callToolErrorResult <| ToolError.fromBrokerError err
+      | .errorResult failure =>
+          pure <| callToolErrorResult <| ToolError.fromBrokerError failure.error
 
 private def resolvedBeamHome? : IO (Option System.FilePath) := do
   match ← IO.getEnv "BEAM_HOME" with

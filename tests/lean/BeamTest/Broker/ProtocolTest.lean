@@ -5,6 +5,7 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Beam.Broker.Errors
+import Beam.Broker.Client
 import Beam.Broker.Protocol
 import Beam.Broker.Readiness
 import Beam.Broker.RequestArgs
@@ -41,7 +42,8 @@ private def requireError
   match resp with
   | .successResult .. =>
       throw <| IO.userError s!"{label}: expected error response, got {(toJson resp).compress}"
-  | .errorResult err .. =>
+  | .errorResult failure =>
+      let err := failure.error
       if err.code != expectedCode then
         throw <| IO.userError s!"{label}: expected code={expectedCode}, got {(toJson resp).compress}"
       if err.message != expectedMessage then
@@ -138,30 +140,33 @@ private def checkResponseJsonShape : IO Unit := do
   requireFieldPresent "error response" "error" errorJson
   requireFieldAbsent "error response" "result" errorJson
 
-  let identified := (Response.success Json.null).setClientRequestId (some "original")
-  require "optional request id setter preserves an existing id when no replacement is supplied"
-    ((identified.setClientRequestIdIfSome none).clientRequestId? == some "original")
-  require "optional request id setter applies a supplied replacement"
-    ((identified.setClientRequestIdIfSome (some "replacement")).clientRequestId? ==
-      some "replacement")
-  require "exact request id setter can clear an existing id"
-    ((identified.setClientRequestId none).clientRequestId?.isNone)
+  requireFieldAbsent "semantic success response" "clientRequestId" successJson
+  let presentedJson := responseOutputJson (Response.success Json.null) (some "visible-request")
+  requireJsonString "presented response" "clientRequestId" "visible-request" presentedJson
 
 private def checkStreamMessageDecode : IO Unit := do
   let response := Response.success (Json.mkObj [("value", toJson (1 : Nat))])
   let validResponse ← expectOk "valid response stream" <|
-    fromJson? (α := StreamMessage) (toJson <| StreamMessage.response response)
+    fromJson? (α := StreamMessage) (toJson <| StreamMessage.response none response)
   match validResponse with
-  | .response _ => pure ()
+  | .response none _ => pure ()
   | other => throw <| IO.userError s!"valid response stream decoded as {(toJson other).compress}"
 
-  let correlatedResponse := response.setClientRequestId (some "req-response")
+  let correlatedResponseJson :=
+    toJson <| StreamMessage.response (some "req-response") response
+  requireJsonString "correlated response stream" "clientRequestId" "req-response"
+    correlatedResponseJson
+  let correlatedResponsePayload ←
+    requireObjVal "correlated response stream" "response" correlatedResponseJson
+  requireFieldAbsent "correlated response payload" "clientRequestId" correlatedResponsePayload
   let validCorrelatedResponse ← expectOk "valid correlated response stream" <|
-    fromJson? (α := StreamMessage) (toJson <| StreamMessage.response correlatedResponse)
+    fromJson? (α := StreamMessage) correlatedResponseJson
   match validCorrelatedResponse with
-  | .response decodedResponse =>
-      require "valid correlated response stream preserves payload request id"
-        (decodedResponse.clientRequestId? == some "req-response")
+  | .response clientRequestId? decodedResponse =>
+      require "valid correlated response stream preserves envelope request id"
+        (clientRequestId? == some "req-response")
+      require "valid correlated response stream preserves response payload"
+        (decodedResponse.result?.isSome)
   | other =>
       throw <| IO.userError s!"valid correlated response decoded as {(toJson other).compress}"
 
@@ -205,10 +210,10 @@ private def checkStreamMessageDecode : IO Unit := do
       ("response", responseJson),
       ("fileProgress", progressJson)
     ]
-  expectDecodeFailure StreamMessage "response stream with redundant outer request id" <|
+  expectDecodeFailure StreamMessage "response stream with nested request id" <|
     Json.mkObj [
       ("kind", toJson "response"),
-      ("response", toJson correlatedResponse),
+      ("response", (toJson response).setObjVal! "clientRequestId" (toJson "req-response")),
       ("clientRequestId", toJson "req-response")
     ]
   expectDecodeFailure StreamMessage "stream with undeclared field" <|
@@ -259,6 +264,8 @@ private def checkResponseJsonDecode : IO Unit := do
     ("result", Json.mkObj []),
     ("extra", toJson true)
   ]
+  expectDecodeFailure Response "response with presentation request id" <|
+    responseOutputJson (Response.success Json.null) (some "visible-request")
 
 private def checkSaveResultJsonDecode : IO Unit := do
   let saveResult : SaveOleanResult := {
@@ -403,16 +410,15 @@ private def checkFailureResponseConversions : IO Unit := do
   let responseFailure : ResponseFailure := {
     error := { code := "backendSpecific", message := "backend failed", data? := some data }
     fileProgress? := some progress
-    clientRequestId? := some "request-7"
   }
   match responseFailure.toResponse with
   | .successResult .. =>
       throw <| IO.userError "response failure converted to a successful response"
-  | .errorResult err fileProgress? clientRequestId? =>
+  | .errorResult failure =>
       require "response failure preserves an arbitrary backend code"
-        (err.code == "backendSpecific")
-      require "response failure preserves progress metadata" (fileProgress? == some progress)
-      require "response failure preserves request identity" (clientRequestId? == some "request-7")
+        (failure.error.code == "backendSpecific")
+      require "response failure preserves progress metadata"
+        (failure.fileProgress? == some progress)
 
 private def checkDocumentVersionMismatchErrorData : IO Unit := do
   let data := documentVersionMismatchErrorData 1 2

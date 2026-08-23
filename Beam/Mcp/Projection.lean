@@ -271,9 +271,6 @@ structure ToolError where
 def ToolError.fromBrokerError (err : Beam.Broker.Error) : ToolError :=
   { code := err.code, message := err.message, data? := err.data? }
 
-def ToolError.invalidEnvelope (message : String) : ToolError :=
-  { code := "invalidEnvelope", message }
-
 def ToolError.invalidResult (message : String) : ToolError :=
   { code := "invalidResult", message }
 
@@ -529,9 +526,9 @@ Semantic Lean failures remain normal tool results with `success = false`.
 -/
 def normalizeBrokerResponse (tool : ToolName) (resp : Beam.Broker.Response) : Except ToolError Json := do
   match resp with
-  | .errorResult error _ _ =>
-      throw <| ToolError.fromBrokerError error
-  | .successResult result fileProgress? _ =>
+  | .errorResult failure =>
+      throw <| ToolError.fromBrokerError failure.error
+  | .successResult result fileProgress? =>
       let result ← normalizeResult tool result
       pure <| withDocumentProgress tool result fileProgress?
 

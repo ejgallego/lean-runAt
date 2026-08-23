@@ -29,8 +29,8 @@ private def expectErrorCode (label code : String) (resp : Beam.Broker.Response) 
   match resp with
   | .successResult .. =>
       throw <| IO.userError s!"expected {label} error {code}, got success {(toJson resp).compress}"
-  | .errorResult error .. =>
-      if error.code != code then
+  | .errorResult failure =>
+      if failure.error.code != code then
         throw <| IO.userError s!"expected {label} error {code}, got {(toJson resp).compress}"
 
 private def expectTodoKindOnly
@@ -87,12 +87,15 @@ def main : IO Unit := do
         s!"expected todo runAtPosition at {BeamTest.Fixtures.TodoFixture.sorryPosition}, got {(toJson todoSorry).compress}"
 
     writeSaveWarningFile root "-- request-stream sync"
+    let syncRequestId := some "request-stream-sync"
     let syncMessages ← requireSuccessStream "sync_file" <| ← runRequestStream port {
       op := .syncFile
+      clientRequestId? := syncRequestId
       root? := some root.toString
       path? := some "SaveSmoke/B.lean"
       diagnosticScope? := some .all
     }
+    expectStreamClientRequestId "sync_file" syncMessages syncRequestId
     let syncResp ← requireFinalStreamResponse "sync_file" syncMessages
     let syncPayload ← expectOk syncResp
     expectNoReplayDiagnosticsField "sync_file" syncPayload
