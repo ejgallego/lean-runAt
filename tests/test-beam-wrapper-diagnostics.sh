@@ -363,10 +363,10 @@ if "diagnostic" not in kinds:
     raise SystemExit(f"expected diagnostic stream message, got {kinds}")
 if kinds[-1] != "response":
     raise SystemExit(f"expected final stream message to be response, got {kinds[-1]!r}")
-diag = next(row["diagnostic"] for row in rows if row.get("kind") == "diagnostic")
+diag = next(row["payload"] for row in rows if row.get("kind") == "diagnostic")
 if diag.get("path") != "SaveSmoke/B.lean":
     raise SystemExit(f"expected diagnostic path SaveSmoke/B.lean, got {diag.get('path')!r}")
-response = rows[-1]["response"]
+response = rows[-1]["payload"]
 result = response.get("result", {})
 if "errorCount" in result:
     raise SystemExit(f"expected streamed sync response to omit top-level errorCount, got {result.get('errorCount')!r}")
