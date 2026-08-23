@@ -394,6 +394,20 @@ private def checkBundleWrite : IO Unit := do
     let inline ← IO.FS.readFile (bundleDir / "evidence" / "inline.json")
     require "inline evidence is written" (inline.contains "project")
 
+    let repeatedResult ← Beam.Feedback.buildResult input (sampleCollection home) {
+      root? := some root
+      allowedRoots := #[root]
+    }
+    let some repeatedBundleDirText := repeatedResult.bundleDir?
+      | throw <| IO.userError "repeated feedback bundle did not report bundle_dir"
+    let repeatedBundleDir := localPathFromResult home repeatedBundleDirText
+    require "sequential feedback bundles should use distinct paths"
+      (repeatedBundleDir.toString != bundleDir.toString)
+    require "repeated feedback bundle directory exists" (← repeatedBundleDir.pathExists)
+    let originalCard ← IO.FS.readFile (bundleDir / "card.md")
+    require "sequential feedback bundle should not overwrite the original bundle"
+      (originalCard == card)
+
 private def checkEvidencePathBoundary : IO Unit := do
   let home ← homeFixture
   withTempDir "beam-feedback-allowed-root" fun root =>

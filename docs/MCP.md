@@ -177,10 +177,28 @@ The annotation means the tool does not intentionally retain or update Beam seman
 not write Beam-managed artifacts. Incidental cache warming can affect debug statistics, but it is
 implementation bookkeeping rather than a project-semantic update. The hint is advisory and is not
 an OS sandbox: user-supplied Lean commands and project metaprogramming may perform IO. The generated
-descriptions for speculative tools state that boundary directly. Handle-producing or consuming
-tools, document mirror lifecycle tools, save operations, workspace eviction, and
-`beam_feedback_report` omit the hint. The feedback tool has an optional evidence-bundle mode that
-writes local files, so one static read-only annotation cannot describe every call.
+descriptions for speculative tools state that boundary directly. Other tools omit the hint. In
+particular, the feedback tool has an optional evidence-bundle mode that writes local files, so one
+static read-only annotation cannot describe every call.
+
+Two non-read-only tools advertise `annotations.destructiveHint = false` because their
+Beam-managed effects are only additive:
+
+- `lean_run_at_handle` may retain a fresh follow-up handle
+- `lean_run_with` may retain a fresh continuation handle without consuming its parent
+
+Two destructive lifecycle tools advertise `annotations.idempotentHint = true` because repeating
+them has no additional Beam-managed effect:
+
+- `lean_drop_workspace` leaves the cache absent and returns `dropped: false` with
+  `reason: "notFound"` when repeated before another request recreates the workspace
+- `lean_close` leaves the document closed and succeeds when it is already closed
+
+These hints do not make the tools read-only, approval-free, or safe to parallelize with dependent
+operations. Idempotence describes the resulting environment, not identical repeated responses.
+All other non-read-only tools retain the protocol defaults: potentially destructive and not
+idempotent. This includes `beam_feedback_report`, whose optional evidence-bundle mode writes local
+files subject to the concurrent-writer limitation in the [feedback output contract](FEEDBACK.md#output).
 
 `beam_version` returns the running server identity in `structuredContent`. Its `mcp_protocol` field
 is the server's preferred revision, not mutable negotiated state for the current request. Installed

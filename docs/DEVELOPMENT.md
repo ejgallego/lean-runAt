@@ -200,7 +200,9 @@ When adding an MCP-facing operation:
 
 1. Add or reuse a `Beam.Lean.Operation` with a typed input, broker adapter, description, and closed
    schema.
-2. Project it through `Beam.Mcp.Projection`; do not expose raw LSP or generic broker escape hatches.
+2. Project it through `Beam.Mcp.Projection` and classify its Beam-managed effects explicitly in
+   `ToolName.annotations`, retaining the conservative protocol defaults when uncertain. Do not
+   expose raw LSP or generic broker escape hatches.
 3. Add CLI projection work separately when the operation also belongs on the CLI.
 4. Require the descriptor in the generated MCP schema. Pass only the canonical private key to the
    broker. Do not add init/select/list tools or restore startup-root or Roots fallback.

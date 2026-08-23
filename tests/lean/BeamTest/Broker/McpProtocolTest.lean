@@ -234,16 +234,45 @@ private def readOnlyToolNames : Array String := #[
   "lean_code_action_resolve"
 ]
 
+private def additiveToolNames : Array String := #[
+  "lean_run_at_handle",
+  "lean_run_with"
+]
+
+private def idempotentToolNames : Array String := #[
+  "lean_drop_workspace",
+  "lean_close"
+]
+
+private def expectedToolAnnotations? (name : String) : Option Json :=
+  if readOnlyToolNames.contains name then
+    some <| Json.mkObj [("readOnlyHint", toJson true)]
+  else if additiveToolNames.contains name then
+    some <| Json.mkObj [("destructiveHint", toJson false)]
+  else if idempotentToolNames.contains name then
+    some <| Json.mkObj [("idempotentHint", toJson true)]
+  else
+    none
+
+private def requireUniqueStrings (label : String) (values : Array String) : IO Unit := do
+  let unique := values.foldl (init := #[]) fun seen value =>
+    if seen.contains value then seen else seen.push value
+  require s!"{label} contains duplicate values: {values}" (unique.size == values.size)
+
 private def checkToolAnnotationMatrix (tools : Array Json) : IO Unit := do
-  for name in readOnlyToolNames do
-    discard <| requireTool tools name
+  requireUniqueStrings "MCP effect annotation categories"
+    (readOnlyToolNames ++ additiveToolNames ++ idempotentToolNames)
+  for names in #[readOnlyToolNames, additiveToolNames, idempotentToolNames] do
+    for name in names do
+      discard <| requireTool tools name
   for tool in tools do
     let name ← IO.ofExcept <| tool.getObjValAs? String "name"
-    if readOnlyToolNames.contains name then
+    match expectedToolAnnotations? name with
+    | some expected =>
       let annotations ← requireObjVal s!"{name} tool" "annotations" tool
-      require s!"{name} should advertise only the MCP read-only hint"
-        (annotations == Json.mkObj [("readOnlyHint", toJson true)])
-    else
+      require s!"{name} should advertise exactly its non-default MCP annotations"
+        (annotations == expected)
+    | none =>
       requireFieldAbsent s!"{name} tool" "annotations" tool
 
 private def requireClosedInputSchema (label : String) (tool : Json) : IO Json := do
@@ -255,11 +284,6 @@ private def requireClosedInputSchema (label : String) (tool : Json) : IO Json :=
 private def objectFieldNames (label : String) : Json → IO (Array String)
   | .obj fields => pure <| fields.foldl (init := #[]) fun names field _ => names.push field
   | other => throw <| IO.userError s!"{label} is not an object: {other.compress}"
-
-private def requireUniqueStrings (label : String) (values : Array String) : IO Unit := do
-  let unique := values.foldl (init := #[]) fun seen value =>
-    if seen.contains value then seen else seen.push value
-  require s!"{label} contains duplicate fields: {values}" (unique.size == values.size)
 
 private def checkToolInputParameterUniqueness (tools : Array Json) : IO Unit := do
   let forbiddenAliases := #[
@@ -1388,6 +1412,66 @@ private def shutdownMcpRuntime (state : Beam.Mcp.Server.ServerState) : IO Unit :
   | some runtime =>
       discard <| runtime.dispatchRequest { op := .shutdown }
 
+private def checkIdempotentLifecycleTools : IO Unit := do
+  let root ← mkTempProjectRoot "lean-beam-mcp-idempotent-lifecycle"
+  let state ← Beam.Mcp.Server.ServerState.create
+  try
+    copySaveProjectFixture root
+    let opts ← mcpOptionsWithPlugin
+    let notifications : Beam.Mcp.Server.NotificationSink := {
+      send := fun _ => pure ()
+    }
+    initMcpSession state opts notifications
+
+    let syncResp ← callLeanSync state opts notifications root 2 "SaveSmoke/B.lean"
+    let syncResult ← requireObjVal "lifecycle lean_sync response" "result" syncResp
+    requireJsonBool "lifecycle lean_sync result" "isError" false syncResult
+
+    for (id, label) in #[(3, "first"), (4, "repeated")] do
+      let closeResp ← handleRpcRequestWithNotifications state opts notifications
+        s!"{label} lean close" id "tools/call" <| some <| toolCallParams "lean_close" <|
+          withWorkspace root <| Json.mkObj [
+            ("path", toJson "SaveSmoke/B.lean")
+          ]
+      let closeResult ← requireObjVal s!"{label} lean_close response" "result" closeResp
+      requireJsonBool s!"{label} lean_close result" "isError" false closeResult
+      let closeStructured ←
+        requireObjVal s!"{label} lean_close result" "structuredContent" closeResult
+      requireJsonBool s!"{label} lean_close structured result" "closed" true closeStructured
+
+    let firstDropResp ← handleRpcRequestWithNotifications state opts notifications
+      "first lean drop workspace" 5 "tools/call" <|
+        some <| toolCallParams "lean_drop_workspace" <| withWorkspace root (Json.mkObj [])
+    let firstDropResult ← requireObjVal "first lean_drop_workspace response" "result" firstDropResp
+    requireJsonBool "first lean_drop_workspace result" "isError" false firstDropResult
+    let firstDropStructured ←
+      requireObjVal "first lean_drop_workspace result" "structuredContent" firstDropResult
+    requireJsonBool "first lean_drop_workspace structured result" "dropped" true firstDropStructured
+    requireJsonBool "first lean_drop_workspace structured result" "invalidated_handles" true
+      firstDropStructured
+
+    let repeatedDropResp ← handleRpcRequestWithNotifications state opts notifications
+      "repeated lean drop workspace" 6 "tools/call" <|
+        some <| toolCallParams "lean_drop_workspace" <| withWorkspace root (Json.mkObj [])
+    let repeatedDropResult ←
+      requireObjVal "repeated lean_drop_workspace response" "result" repeatedDropResp
+    requireJsonBool "repeated lean_drop_workspace result" "isError" false repeatedDropResult
+    let repeatedDropStructured ←
+      requireObjVal "repeated lean_drop_workspace result" "structuredContent" repeatedDropResult
+    requireJsonBool "repeated lean_drop_workspace structured result" "dropped" false
+      repeatedDropStructured
+    requireJsonBool "repeated lean_drop_workspace structured result" "invalidated_handles" false
+      repeatedDropStructured
+    requireJsonString "repeated lean_drop_workspace structured result" "reason" "notFound"
+      repeatedDropStructured
+  finally
+    shutdownMcpRuntime state
+    try
+      if ← root.pathExists then
+        IO.FS.removeDirAll root
+    catch _ =>
+      pure ()
+
 private def checkDiagnosticLogForwarding : IO Unit := do
   let root ← mkTempProjectRoot "lean-beam-mcp-diagnostic-log"
   let state ← Beam.Mcp.Server.ServerState.create
@@ -1540,6 +1624,7 @@ def main : IO Unit := do
   checkRuntimeSetupErrors
   checkModernProtocol
   checkServerBasics
+  checkIdempotentLifecycleTools
   checkDiagnosticLogForwarding
 
 end BeamTest.Broker.McpProtocolTest

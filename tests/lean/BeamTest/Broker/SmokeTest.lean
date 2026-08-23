@@ -747,6 +747,13 @@ private def runHandleSmoke
   }
   let nextHandleJson ← IO.ofExcept <| proofNext.getObjVal? "handle"
   let nextHandle : Beam.Broker.Handle ← IO.ofExcept <| fromJson? nextHandleJson
+  discard <| expectOk <| ← runClient endpoint {
+    op := .runWith
+    root? := some root.toString
+    path? := some "tests/scenario/docs/BranchProof.lean"
+    handle? := some handle
+    text? := some "exact trivial"
+  }
   let proofDone ← expectOk <| ← runClient endpoint {
     op := .runWith
     root? := some root.toString

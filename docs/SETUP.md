@@ -368,8 +368,8 @@ this to `~/.claude/settings.json`:
 }
 ```
 
-Avoid a blanket `mcp__lean-beam__*` allow rule unless save, synchronization, handle, and workspace
-eviction calls should also run without approval.
+Avoid a blanket `mcp__lean-beam__*` allow rule unless save, synchronization, feedback-bundle,
+document-lifecycle, handle, and workspace-eviction calls should also run without approval.
 
 ### OpenCode
 

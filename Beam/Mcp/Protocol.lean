@@ -523,10 +523,9 @@ def toolDescriptorJson (desc : ToolDescriptor) : Json :=
       ("name", toJson desc.name),
       ("description", toJson desc.description),
       ("inputSchema", desc.inputSchema)
-    ] ++ if desc.name.readOnlyHint then
-      [("annotations", Json.mkObj [("readOnlyHint", toJson true)])]
-    else
-      []
+    ] ++ match desc.annotations.toJson? with
+      | some annotations => [("annotations", annotations)]
+      | none => []
 
 def toolsListResult : Json :=
   Json.mkObj [

@@ -204,6 +204,10 @@ undeclared fields, and typed save/close-save results reject incomplete or extend
   `supports_parallel_tool_calls = true`, allowing Codex to schedule independent probes
   concurrently. The annotation describes Beam-managed state and artifacts; it is not an OS sandbox
   for arbitrary Lean metaprogramming.
+- Additive retained-handle tools advertise `annotations.destructiveHint = false`, while idempotent
+  workspace-drop and document-close tools advertise `annotations.idempotentHint = true`. These
+  remain non-read-only operations; the hints describe Beam-managed effects rather than client
+  approval or scheduling policy.
 - Tool calls that include `_meta.progressToken` receive concise live MCP progress notifications.
   Updates for one request remain strictly ordered before its final response, while different
   requests may interleave; clients should use distinct tokens for concurrently active requests.

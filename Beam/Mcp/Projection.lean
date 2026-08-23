@@ -68,11 +68,36 @@ instance : FromJson ToolName where
     | j => .error s!"expected Lean MCP tool name, got {j.compress}"
 
 /--
-Advisory MCP classification for tools whose Beam contract is observational: they do not retain or
-update Beam semantic state and do not write Beam-managed artifacts. This is not an OS sandbox for
-user-supplied Lean code.
+Effective MCP tool effect annotations, including the protocol defaults. Serialization emits only
+fields whose values differ from those defaults.
 -/
-def ToolName.readOnlyHint : ToolName → Bool
+structure ToolEffectAnnotations where
+  readOnlyHint : Bool := false
+  destructiveHint : Bool := true
+  idempotentHint : Bool := false
+  deriving BEq, Repr
+
+def ToolEffectAnnotations.toJson? (annotations : ToolEffectAnnotations) : Option Json :=
+  let fields :=
+    (if annotations.readOnlyHint then
+      [("readOnlyHint", toJson true)]
+    else
+      []) ++
+    (if !annotations.destructiveHint then
+      [("destructiveHint", toJson false)]
+    else
+      []) ++
+    (if annotations.idempotentHint then
+      [("idempotentHint", toJson true)]
+    else
+      [])
+  if fields.isEmpty then none else some <| Json.mkObj fields
+
+/--
+Advisory MCP classification of each tool's Beam-managed effects. Speculative execution is not an OS
+sandbox for user-supplied Lean code.
+-/
+def ToolName.annotations : ToolName → ToolEffectAnnotations
   | .beamVersion
   | .beamStats
   | .leanOperation .runAt
@@ -84,8 +109,19 @@ def ToolName.readOnlyHint : ToolName → Bool
   | .leanOperation .workspaceSymbols
   | .leanOperation .goals
   | .leanOperation .todo
-  | .leanOperation .codeActionResolve => true
-  | _ => false
+  | .leanOperation .codeActionResolve => { readOnlyHint := true }
+  | .leanOperation .runAtHandle
+  | .leanOperation .runWith => { destructiveHint := false }
+  | .leanDropWorkspace
+  | .leanOperation .close => { idempotentHint := true }
+  | .beamFeedbackReport
+  | .leanOperation .runWithLinear
+  | .leanOperation .release
+  | .leanOperation .update
+  | .leanOperation .sync
+  | .leanOperation .refresh
+  | .leanOperation .save
+  | .leanOperation .closeSave => {}
 
 def leanOperationToBrokerRequest
     (operation : Beam.Lean.Operation)
@@ -195,6 +231,7 @@ structure ToolDescriptor where
   name : ToolName
   description : String
   inputSchema : Json
+  annotations : ToolEffectAnnotations
 
 def toolNames : Array ToolName :=
   ToolName.all
@@ -207,7 +244,7 @@ def ToolName.descriptor (tool : ToolName) : ToolDescriptor :=
     | .beamFeedbackReport => (beamFeedbackReportDescription, feedbackReportInputSchema)
     | .leanOperation op => (op.description, schemaWithWorkspace op.inputSchema)
     | .leanDropWorkspace => (dropWorkspaceDescription, dropWorkspaceInputSchema)
-  { name := tool, description, inputSchema }
+  { name := tool, description, inputSchema, annotations := tool.annotations }
 
 def toolDescriptors : Array ToolDescriptor :=
   toolNames.map ToolName.descriptor
