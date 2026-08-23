@@ -7,15 +7,18 @@ Author: Emilio J. Gallego Arias
 import Beam.Broker.Errors
 import Beam.Cli.Args
 import Beam.Cli.Broker
+import Beam.Daemon.Ownership
 import Beam.Cli.Info
 import Beam.Cli.LeanOperation
 import Beam.Cli.Lock
 import Beam.Cli.RuntimeBundle
 import Beam.Daemon.Debug
+import Beam.Daemon.Paths
 import Beam.Path
 import BeamTest.Broker.JsonAssert
 
 open Lean
+open Beam.Daemon.Ownership
 open BeamTest.Broker.JsonAssert (requireJsonNull requireJsonString)
 
 namespace BeamTest.Broker.CliDaemonTest
@@ -23,6 +26,15 @@ namespace BeamTest.Broker.CliDaemonTest
 private def require (label : String) (cond : Bool) : IO Unit := do
   unless cond do
     throw <| IO.userError label
+
+private def projectDaemonClientForTest
+    (endpoint : Beam.Broker.Transport.Endpoint) : Beam.Cli.ProjectDaemonClient := {
+  endpoint
+  wrapperLease := {
+    daemonId := "test-daemon"
+    leaseFile := "test-wrapper.lease"
+  }
+}
 
 private def checkDaemonDebugWarnings : IO Unit := do
   let debug := Json.mkObj [
@@ -68,11 +80,8 @@ private def requireJsonStringContains (label field needle : String) (json : Json
   let actual ← IO.ofExcept <| json.getObjValAs? String field
   require s!"{label}: expected {field} to contain {needle}, got {actual}" (actual.contains needle)
 
-private def daemonFailureIncidentDir (root : System.FilePath) : IO System.FilePath := do
-  pure ((← Beam.Cli.controlDir root) / "daemon-failures")
-
 private def sortedIncidentEntries (root : System.FilePath) : IO (Array IO.FS.DirEntry) := do
-  let dir ← daemonFailureIncidentDir root
+  let dir ← Beam.Daemon.daemonFailureIncidentDir root
   unless ← dir.pathExists do
     return #[]
   let entries ← dir.readDir
@@ -80,7 +89,7 @@ private def sortedIncidentEntries (root : System.FilePath) : IO (Array IO.FS.Dir
     (fun a b => a.fileName < b.fileName)
 
 private def readSingleDaemonFailureIncidentJson (root : System.FilePath) : IO Json := do
-  let incidentDir ← daemonFailureIncidentDir root
+  let incidentDir ← Beam.Daemon.daemonFailureIncidentDir root
   require "daemon failure should write incident directory" (← incidentDir.pathExists)
   let incidentEntries ← sortedIncidentEntries root
   require s!"expected one daemon failure incident, got {incidentEntries.size}" (incidentEntries.size == 1)
@@ -120,6 +129,74 @@ private partial def withClosingBrokerEndpoint
     discard <| IO.wait acceptTask
     match result with
     | .ok value => pure value
+    | .error err => throw err
+
+private partial def withBrokerListener
+    (act : Beam.Broker.Transport.Listener → Beam.Broker.Transport.Endpoint → IO α)
+    (tries : Nat := 20) : IO α := do
+  let stamp ← IO.monoNanosNow
+  let portNat := 30000 + ((stamp + tries) % 20000)
+  let endpoint := Beam.Broker.Transport.Endpoint.tcp portNat.toUInt16
+  try
+    let listener ← Beam.Broker.Transport.bindAndListen endpoint 2
+    act listener endpoint
+  catch err =>
+    if tries == 0 then
+      throw err
+    else
+      withBrokerListener act (tries - 1)
+
+private def serveCancelablePlainRequest
+    (listener : Beam.Broker.Transport.Listener)
+    (requestObserved : IO.Promise Unit) : IO Unit := do
+  let requestConn ← Beam.Broker.Transport.accept listener
+  try
+    let requestText ← Beam.Broker.Transport.recvMsg requestConn
+    let requestJson ← IO.ofExcept <| Json.parse requestText
+    let request : Beam.Broker.Request ← IO.ofExcept <| fromJson? requestJson
+    let some requestId := request.clientRequestId?
+      | throw <| IO.userError "plain wrapper request omitted its synthesized clientRequestId"
+    requestObserved.resolve ()
+    let cancelConn ← Beam.Broker.Transport.accept listener
+    try
+      let cancelText ← Beam.Broker.Transport.recvMsg cancelConn
+      let cancelJson ← IO.ofExcept <| Json.parse cancelText
+      let cancelRequest : Beam.Broker.Request ← IO.ofExcept <| fromJson? cancelJson
+      unless cancelRequest.op == .cancel && cancelRequest.cancelRequestId? == some requestId do
+        throw <| IO.userError "plain wrapper cancellation did not target the admitted request"
+      let cancelResponse := Beam.Broker.Response.success <|
+        Json.mkObj [("cancelled", toJson true)]
+      Beam.Broker.Transport.sendMsg cancelConn
+        (toJson (Beam.Broker.StreamMessage.response
+          cancelRequest.clientRequestId? cancelResponse)).compress
+    finally
+      Beam.Broker.Transport.closeConnection cancelConn
+    let response := Beam.Broker.errorResponseFor
+      .requestCancelled "cancelled by wrapper lease loss"
+    Beam.Broker.Transport.sendMsg requestConn
+      (toJson (Beam.Broker.StreamMessage.response (some requestId) response)).compress
+  finally
+    Beam.Broker.Transport.closeConnection requestConn
+
+private def checkPlainBrokerTaskCancellation : IO Unit := do
+  withBrokerListener fun listener endpoint => do
+    let requestObserved ← IO.Promise.new
+    let serverTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      serveCancelablePlainRequest listener requestObserved
+    let requestTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      Beam.Cli.requestBroker (System.FilePath.mk "/tmp")
+        (projectDaemonClientForTest endpoint) { op := .stats }
+    let some _ ← IO.wait requestObserved.result?
+      | throw <| IO.userError "plain wrapper request observation promise dropped"
+    IO.cancel requestTask
+    let response ←
+      match ← IO.wait requestTask with
+      | .ok response => pure response
+      | .error err => throw err
+    require "a cancelled plain wrapper request should receive broker requestCancelled"
+      (response.error?.any fun err => err.code == "requestCancelled")
+    match ← IO.wait serverTask with
+    | .ok () => pure ()
     | .error err => throw err
 
 private def requireRequestJson
@@ -442,12 +519,14 @@ private def checkDaemonFailureContext : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-daemon-failure-context-{← IO.monoNanosNow}"
   try
     IO.FS.createDirAll root
-    let registryPath ← Beam.Cli.registryPath root
+    let registryPath ← Beam.Daemon.registryPath root
     if let some parent := registryPath.parent then
       IO.FS.createDirAll parent
+    let pidDomain? ← Beam.currentPidDomain?
     let entry : Beam.Daemon.RegistryEntry := {
       daemonId := "daemon-test"
       pid := 999999999
+      pidDomain?
       port? := some 42424
       root := root.toString
       configHash := "config-test"
@@ -456,7 +535,7 @@ private def checkDaemonFailureContext : IO Unit := do
       startedAt := "2026-07-02T00:00:00Z"
     }
     IO.FS.writeFile registryPath ((toJson entry).pretty ++ "\n")
-    let startupLog := (← Beam.Cli.controlDir root) / "beam-daemon-startup.log"
+    let startupLog ← Beam.Daemon.daemonStartupLogPath root
     IO.FS.writeFile startupLog "line 1\nline 2\n"
     let msg ← Beam.Cli.daemonFailureMessage root "Beam daemon connection closed"
     requireSubstring "daemon failure context should include registry path" "Beam daemon registry" msg
@@ -493,7 +572,7 @@ private def checkDaemonFailureContext : IO Unit := do
       "startupLogTail" "line 1\nline 2" incidentJson
   finally
     try
-      let control ← Beam.Cli.controlDir root
+      let control ← Beam.Daemon.controlDir root
       if ← control.pathExists then
         IO.FS.removeDirAll control
     catch _ =>
@@ -522,7 +601,7 @@ private def checkNoLiveDaemonFailureIncident : IO Unit := do
       "root" root.toString incidentJson
   finally
     try
-      let control ← Beam.Cli.controlDir root
+      let control ← Beam.Daemon.controlDir root
       if ← control.pathExists then
         IO.FS.removeDirAll control
     catch _ =>
@@ -537,7 +616,7 @@ private def checkDaemonFailureUnreadableStartupLog : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-daemon-unreadable-startup-log-{← IO.monoNanosNow}"
   try
     IO.FS.createDirAll root
-    let startupLog := (← Beam.Cli.controlDir root) / "beam-daemon-startup.log"
+    let startupLog ← Beam.Daemon.daemonStartupLogPath root
     IO.FS.createDirAll startupLog
     let msg ← Beam.Cli.daemonFailureMessage root "Beam daemon connection closed"
     requireSubstring "unreadable startup log should preserve original daemon failure"
@@ -556,7 +635,7 @@ private def checkDaemonFailureUnreadableStartupLog : IO Unit := do
       "startupLogTail" incidentJson
   finally
     try
-      let control ← Beam.Cli.controlDir root
+      let control ← Beam.Daemon.controlDir root
       if ← control.pathExists then
         IO.FS.removeDirAll control
     catch _ =>
@@ -570,7 +649,7 @@ private def checkDaemonFailureUnreadableStartupLog : IO Unit := do
 private def writeTestRegistryEntry
     (root : System.FilePath)
     (port? : Option Nat := none) : IO Unit := do
-  let registryPath ← Beam.Cli.registryPath root
+  let registryPath ← Beam.Daemon.registryPath root
   if let some parent := registryPath.parent then
     IO.FS.createDirAll parent
   let entry : Beam.Daemon.RegistryEntry := {
@@ -595,7 +674,7 @@ private def checkBrokerConnectionClosedIncident : IO Unit := do
         | .tcp port => some port.toNat
       writeTestRegistryEntry root port?
       let msg ← expectIoErrorMessage "broker connection close should surface daemon failure" <|
-        Beam.Cli.callBrokerQuiet root endpoint { op := .stats }
+        Beam.Cli.callBrokerQuiet root (projectDaemonClientForTest endpoint) { op := .stats }
       requireSubstring "broker connection close should preserve transport failure"
         "Beam daemon connection closed" msg
       requireSubstring "broker connection close should include incident path"
@@ -610,7 +689,7 @@ private def checkBrokerConnectionClosedIncident : IO Unit := do
         "registryEndpoint" (Beam.Daemon.endpointSummary endpoint) incidentJson
   finally
     try
-      let control ← Beam.Cli.controlDir root
+      let control ← Beam.Daemon.controlDir root
       if ← control.pathExists then
         IO.FS.removeDirAll control
     catch _ =>
@@ -625,7 +704,7 @@ private def checkDaemonFailureIncidentRetention : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-daemon-incident-retention-{← IO.monoNanosNow}"
   try
     IO.FS.createDirAll root
-    let incidentDir ← daemonFailureIncidentDir root
+    let incidentDir ← Beam.Daemon.daemonFailureIncidentDir root
     IO.FS.createDirAll incidentDir
     for i in [0:55] do
       IO.FS.writeFile (incidentDir / s!"000000000000000000{i}.json") "{}\n"
@@ -642,7 +721,7 @@ private def checkDaemonFailureIncidentRetention : IO Unit := do
       (newIncident.fileName.startsWith "incident-")
   finally
     try
-      let control ← Beam.Cli.controlDir root
+      let control ← Beam.Daemon.controlDir root
       if ← control.pathExists then
         IO.FS.removeDirAll control
     catch _ =>
@@ -673,7 +752,7 @@ private def checkDoctorDaemonFailureIncidentLines : IO Unit := do
       "daemon-failures" incidentLine
   finally
     try
-      let control ← Beam.Cli.controlDir root
+      let control ← Beam.Daemon.controlDir root
       if ← control.pathExists then
         IO.FS.removeDirAll control
     catch _ =>
@@ -756,6 +835,116 @@ private def createSymlink
   if out.exitCode != 0 then
     throw <| IO.userError s!"failed to create {label} symlink\n{out.stderr}"
 
+private def checkWrapperLeaseStaleness : IO Unit := do
+  let fresh : WrapperLeaseMetadata := {
+    pid := 42
+    pidDomain? := some "pid:[owner]"
+    heartbeatMonoNanos := 1000
+  }
+  let timeout := 500
+  require "a fresh cross-domain lease should not depend on an unrelated PID observation"
+    (!(wrapperLeaseStaleFromObservation .differentDomain 1200 timeout fresh))
+  require "a dead same-domain PID should make a fresh lease stale"
+    (wrapperLeaseStaleFromObservation (.local false) 1200 timeout fresh)
+  require "a live same-domain PID should preserve a fresh lease"
+    (!(wrapperLeaseStaleFromObservation (.local true) 1200 timeout fresh))
+  require "unknown domain identity should fall back to a fresh heartbeat"
+    (!(wrapperLeaseStaleFromObservation .unknownDomain 1200 timeout fresh))
+  require "heartbeat expiry should revoke even a same-domain live process lease"
+    (wrapperLeaseStaleFromObservation (.local true) 1501 timeout fresh)
+  require "heartbeat expiry should make a cross-domain lease stale"
+    (wrapperLeaseStaleFromObservation .differentDomain 1501 timeout fresh)
+  require "a heartbeat from a previous monotonic clock epoch should be stale"
+    (wrapperLeaseStaleFromObservation .differentDomain 999 timeout fresh)
+  require "pid zero should never hold daemon ownership"
+    (wrapperLeaseStaleFromObservation .differentDomain 1000 timeout { fresh with pid := 0 })
+
+private def checkCurrentPidDomain : IO Unit := do
+  let selfPid := (← IO.Process.getPID).toNat
+  let domain? ← Beam.currentPidDomain?
+  match domain? with
+  | some domain =>
+      require "a known PID domain should not be empty" (!domain.isEmpty)
+      let recordedLocal : Beam.RecordedPid := { pid := selfPid, domain? := some domain }
+      require "a matching PID domain should permit a local liveness observation"
+        ((← recordedLocal.observe) == .local true)
+      let different : Beam.RecordedPid := {
+        pid := selfPid
+        domain? := some (domain ++ "-other")
+      }
+      require "a different PID domain should prevent a local liveness observation"
+        ((← different.observe) == .differentDomain)
+  | none =>
+      pure ()
+  let unknown : Beam.RecordedPid := { pid := selfPid, domain? := none }
+  require "an unknown recorded PID domain must fail closed"
+    ((← unknown.observe) == .unknownDomain)
+  let invalid : Beam.RecordedPid := { pid := 0, domain? }
+  require "PID zero should be classified before domain observation"
+    ((← invalid.observe) == .invalid)
+  let system ← Beam.readCmdTrim "uname" #["-s"]
+  if system == "Darwin" then
+    require "Darwin processes should share the explicit host PID domain"
+      (domain? == some "host:Darwin")
+
+private def checkCrossDomainRegistryPidGuard : IO Unit := do
+  let child ← IO.Process.spawn {
+    cmd := "sleep"
+    args := #["30"]
+    stdin := .null
+    stdout := .null
+    stderr := .null
+  }
+  try
+    let entry : Beam.Daemon.RegistryEntry := {
+      daemonId := "cross-domain-pid-guard"
+      pid := child.pid.toNat
+      pidDomain? := some "beam-test-other-pid-domain"
+      root := "/tmp/beam-cross-domain-pid-guard"
+      configHash := "cross-domain-pid-guard"
+      startedAt := "2026-08-25T00:00:00Z"
+    }
+    Beam.Cli.finishRegistryDaemonShutdown entry
+    require "a cross-domain registry PID must not be waited on or killed"
+      (← child.tryWait).isNone
+  finally
+    try
+      child.kill
+    catch _ =>
+      pure ()
+    try
+      discard <| child.wait
+    catch _ =>
+      pure ()
+
+private def checkDaemonRetirementPolicy : IO Unit := do
+  require "a drained current generation should commit retirement"
+    (retirementDecision (.current .drained .drained) == .commit)
+  require "an active current generation sibling should keep the owner alive"
+    (retirementDecision (.current .activeOrUnreadable .drained) == .wait)
+  require "an admitted broker request should keep the current generation owner alive"
+    (retirementDecision (.current .drained .activeOrUnreadable) == .wait)
+  require "a provably dead current daemon should release its starter without fencing"
+    (retirementDecision (.current .drained .provenGone) == .obsolete)
+  require "a proven replacement generation should make the old owner obsolete immediately"
+    (retirementDecision .replacement == .obsolete)
+  require "unavailable registry state with active or unreadable siblings should fail closed"
+    (retirementDecision (.unavailable .activeOrUnreadable) == .wait)
+  require "unavailable registry state may release an owner only after siblings drain"
+    (retirementDecision (.unavailable .drained) == .obsolete)
+
+private def checkWrapperLeaseFileNames : IO Unit := do
+  require "a generated-style lease basename should be accepted"
+    (validWrapperLeaseFileName "123-42-99.lease")
+  require "a parent-relative retirement lease path should be rejected"
+    (!(validWrapperLeaseFileName "../outside.lease"))
+  require "an absolute retirement lease path should be rejected"
+    (!(validWrapperLeaseFileName "/tmp/outside.lease"))
+  require "a nested retirement lease path should be rejected"
+    (!(validWrapperLeaseFileName "nested/outside.lease"))
+  require "a non-lease retirement basename should be rejected"
+    (!(validWrapperLeaseFileName "owner.json"))
+
 private def checkPathCanonicalization : IO Unit := do
   let stamp ← IO.monoNanosNow
   let root := System.FilePath.mk s!"/tmp/beam-path-canonical-root-{stamp}"
@@ -782,24 +971,40 @@ private def checkPathCanonicalization : IO Unit := do
 private def checkLockLifecycle : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-cli-lock-test-{← IO.monoNanosNow}"
   let lockDir := root / "lock"
+  let some pidDomain := ← Beam.currentPidDomain?
+    | throw <| IO.userError "lock lifecycle test requires a known PID domain"
+  let writeOwner := fun (pid : Nat) (domain : String) => do
+    IO.FS.writeFile (lockDir / "pid") s!"{pid}\n"
+    IO.FS.writeFile (lockDir / "pid-domain") s!"{domain}\n"
   try
     Beam.Cli.withLock lockDir do
       require "lock directory should exist while lock is held" (← lockDir.pathExists)
       require "lock pid file should exist while lock is held" (← (lockDir / "pid").pathExists)
+      require "lock PID domain file should exist while lock is held"
+        (← (lockDir / "pid-domain").pathExists)
     require "lock directory should be removed after release" (!(← lockDir.pathExists))
 
     IO.FS.createDirAll lockDir
-    IO.FS.writeFile (lockDir / "pid") "999999999\n"
+    writeOwner 999999999 pidDomain
     Beam.Cli.withLock lockDir do
       let pidText := (← IO.FS.readFile (lockDir / "pid")).trimAscii.toString
       require "stale lock should be replaced with this process lock" (pidText != "999999999")
 
     IO.FS.createDirAll lockDir
     let selfPid ← IO.Process.getPID
-    IO.FS.writeFile (lockDir / "pid") s!"{selfPid}\n"
+    writeOwner selfPid.toNat pidDomain
     expectIoErrorContains "live lock timeout" s!"lock owner: pid {selfPid}" <|
       Beam.Cli.withLockTimeout lockDir 100 do
         pure ()
+    IO.FS.removeDirAll lockDir
+
+    IO.FS.createDirAll lockDir
+    writeOwner 999999999 (pidDomain ++ "-other")
+    expectIoErrorContains "cross-domain dead lock timeout" "lock owner: pid 999999999" <|
+      Beam.Cli.withLockTimeout lockDir 100 do
+        pure ()
+    require "a dead PID from another domain should not make a lock stale"
+      (← lockDir.pathExists)
     IO.FS.removeDirAll lockDir
 
     let deadPidTarget := root / "dead-pid"
@@ -1105,11 +1310,17 @@ def main : IO Unit := do
   checkDaemonFailureContext
   checkNoLiveDaemonFailureIncident
   checkDaemonFailureUnreadableStartupLog
+  checkPlainBrokerTaskCancellation
   checkBrokerConnectionClosedIncident
   checkDaemonFailureIncidentRetention
   checkDoctorDaemonFailureIncidentLines
   checkPathRelativeToRoot
   checkLeanModuleNamePathHelpers
+  checkWrapperLeaseStaleness
+  checkCurrentPidDomain
+  checkCrossDomainRegistryPidGuard
+  checkDaemonRetirementPolicy
+  checkWrapperLeaseFileNames
   checkPathCanonicalization
   checkLockLifecycle
   checkLeanToolchainPolicyParsing

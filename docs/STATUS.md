@@ -132,13 +132,17 @@ reuse matching speculative execution rather than replaying it from scratch. Beam
 apply the source edit.
 
 For programmatic local consumers, the preferred machine-readable surface is the JSON stream exposed
-by `beam-client request-stream`; wrapper stderr should be treated as human-facing. Broker responses
-require an explicit top-level `ok` boolean, giving projection layers an unambiguous success/error
-discriminator. A successful response always includes `result`; response and stream envelopes reject
-undeclared fields, and typed save/close-save results reject incomplete or extended artifact shapes.
-All raw stream variants use the same `kind`, `payload`, and optional outer `clientRequestId` fields;
-the terminal response payload does not duplicate transport correlation. Exact event ordering and
-examples live in [SYNC_AND_DIAGNOSTICS.md](SYNC_AND_DIAGNOSTICS.md#raw-broker-stream).
+by `beam-client request-stream`; wrapper stderr should be treated as human-facing. When that client
+targets a wrapper-managed daemon in a PID-reaping command runner, keep `lean-beam ensure --hold`
+active for the duration; the wrapper retirement fence does not close admission for unfenced raw
+broker clients. A separately launched standalone daemon has its own explicit process owner. Broker
+responses require an explicit top-level `ok` boolean, giving projection layers an unambiguous
+success/error discriminator. A successful response always includes `result`; response and stream
+envelopes reject undeclared fields, and typed save/close-save results reject incomplete or extended
+artifact shapes. All raw stream variants use the same `kind`, `payload`, and optional outer
+`clientRequestId` fields; the terminal response payload does not duplicate transport correlation.
+Exact event ordering and examples live in
+[SYNC_AND_DIAGNOSTICS.md](SYNC_AND_DIAGNOSTICS.md#raw-broker-stream).
 
 `lean-beam-mcp` is the experimental stdio MCP entry point. User setup lives in
 [SETUP.md](SETUP.md#mcp-setup); implementation, protocol, tool-list, and conformance notes live in
@@ -177,6 +181,16 @@ examples live in [SYNC_AND_DIAGNOSTICS.md](SYNC_AND_DIAGNOSTICS.md#raw-broker-st
 
 - In sandboxed agent environments, Beam daemon startup itself may require elevated permissions even
   when the installed bundle and project-local `.beam` paths resolve correctly.
+- PID-isolated wrapper calls acquire heartbeat leases before observing a project daemon. A wrapper
+  that starts a daemon remains alive until overlapping calls drain, while a killed cross-namespace
+  wrapper lease normally becomes recoverable after about five seconds. Use `lean-beam ensure --hold`
+  when separate sandbox commands need one explicit foreground daemon owner. A wrapper reusing an
+  existing daemon fails or cancels its request if it cannot continue renewing that lease. Lease
+  expiry writes a persistent revocation fence: already-admitted broker work keeps the owner alive
+  until it drains, while a suspended wrapper resumed after revocation cannot re-admit work through
+  the old lease. Retirement stats probes are bounded; an owner releases a dead current generation
+  only when same-PID-domain liveness or zombie state proves that the exact registered daemon process
+  is gone.
 - A startup failure that reports `operation not permitted` through `.beam/beam-daemon-startup.log` is
   usually an environment restriction, not a bundle-resolution mismatch.
 - Beam daemon disappearance errors include registry/log context and write a JSON incident record under

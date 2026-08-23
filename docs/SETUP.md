@@ -164,8 +164,9 @@ not currently in use.
 Restart active agent and MCP client sessions before any `prune --apply`; otherwise a process may
 still be running from a runtime selected for removal. A later request rebuilds any needed bundle
 that was pruned. Pruning uses the same install lock as the installer and each selected bundle's
-build lock, and refuses symlinked installed bundle-cache roots or symlinked and unmarked runtime
-directories.
+build lock. Lock owner metadata includes a PID-domain identity, so cleanup never interprets a
+same-numbered PID from an isolated process domain as the local owner. Pruning also refuses symlinked
+installed bundle-cache roots or symlinked and unmarked runtime directories.
 
 Apply is incremental rather than transactional: Beam validates and removes one displayed path at a
 time and reports each successful removal immediately. If a later path fails validation or its lock

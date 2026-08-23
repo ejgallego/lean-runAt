@@ -5,26 +5,13 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Lean
+import Beam.Daemon.Paths
 import Beam.Daemon.Protocol
 import Beam.System
 
 open Lean
 
 namespace Beam.Daemon
-
-private def beamStateDir (root : System.FilePath) : System.FilePath :=
-  root / ".beam"
-
-def controlDir (root : System.FilePath) : IO System.FilePath := do
-  match ← IO.getEnv "BEAM_CONTROL_DIR" with
-  | some dir =>
-      let tag := toString (hash root.toString)
-      pure (System.FilePath.mk dir / tag)
-  | none =>
-      pure (beamStateDir root)
-
-def registryPath (root : System.FilePath) : IO System.FilePath := do
-  pure ((← controlDir root) / "beam-daemon.json")
 
 def readRegistry? (root : System.FilePath) : IO (Option RegistryEntry) := do
   let path ← registryPath root
@@ -37,12 +24,6 @@ def readRegistry? (root : System.FilePath) : IO (Option RegistryEntry) := do
     pure (some entry)
   catch _ =>
     pure none
-
-def daemonStartupLogPath (root : System.FilePath) : IO System.FilePath := do
-  pure ((← controlDir root) / "beam-daemon-startup.log")
-
-def daemonFailureIncidentDir (root : System.FilePath) : IO System.FilePath := do
-  pure ((← controlDir root) / "daemon-failures")
 
 def daemonFailureIncidentEntries (root : System.FilePath) : IO (Array IO.FS.DirEntry) := do
   try
@@ -96,16 +77,16 @@ def registryEndpointSummary (entry : RegistryEntry) : String :=
   | none => "invalid"
 
 def registryPidStatus (entry : RegistryEntry) : IO String := do
-  if entry.pid == 0 then
-    pure "unknown"
-  else
-    try
-      if ← Beam.pidAlive entry.pid then
-        pure "alive"
-      else
-        pure "not alive"
-    catch _ =>
-      pure "unavailable"
+  let recorded : Beam.RecordedPid := { pid := entry.pid, domain? := entry.pidDomain? }
+  try
+    match ← recorded.observe with
+    | .invalid => pure "unknown"
+    | .local true => pure "alive"
+    | .local false => pure "not alive"
+    | .differentDomain => pure "different PID domain"
+    | .unknownDomain => pure "unavailable"
+  catch _ =>
+    pure "unavailable"
 
 def startupLogTail? (root : System.FilePath) : IO (Option (System.FilePath × String)) := do
   try
@@ -174,7 +155,7 @@ def daemonRegistryContext? (root : System.FilePath) : IO (Option String) := do
         ] ++
           (optionLine "toolchain" entry.toolchain?).toList ++
           (optionLine "bundleId" entry.bundleId?).toList ++
-          (optionLine "pidNamespace" entry.pidNamespace?).toList)
+          (optionLine "pidDomain" entry.pidDomain?).toList)
         pure <| some <| String.intercalate "\n" lines
   catch _ =>
     pure none

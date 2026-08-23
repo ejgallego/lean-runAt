@@ -56,6 +56,23 @@ write_runtime_manifest() {
   "$beam_cli" install-manifest "$payload" - fixture-toolchain >"$path"
 }
 
+case "$(uname -s)" in
+  Linux) test_pid_domain="$(readlink /proc/self/ns/pid 2>/dev/null || true)" ;;
+  Darwin) test_pid_domain="host:Darwin" ;;
+  *) test_pid_domain="" ;;
+esac
+if [ -z "$test_pid_domain" ]; then
+  echo "prune lock tests require a known PID domain" >&2
+  exit 1
+fi
+
+write_lock_owner() {
+  local lock_dir="$1"
+  local pid="$2"
+  printf '%s\n' "$pid" >"$lock_dir/pid"
+  printf '%s\n' "$test_pid_domain" >"$lock_dir/pid-domain"
+}
+
 mkdir -p \
   "$current_runtime/bin" \
   "$current_runtime/libexec" \
@@ -220,7 +237,7 @@ race_err="$tmp_root/race.err"
 lock_writer_pid="$!"
 wait_for_file "$race_lock_held" "prune install-lock holder" 10
 mkdir "$race_lock"
-printf '%s\n' "$lock_writer_pid" >"$race_lock/pid"
+write_lock_owner "$race_lock" "$lock_writer_pid"
 BEAM_HOME="$current_runtime" "$beam_cli" install-prune --apply > /dev/null 2>"$race_err" &
 race_pid="$!"
 sleep 0.3
@@ -244,14 +261,14 @@ rm -f "$install_root/current"
 ln -s "$current_runtime" "$install_root/current"
 
 mkdir "$install_root/.install-lock"
-printf '%s\n' "$$" >"$install_root/.install-lock/pid"
+write_lock_owner "$install_root/.install-lock" "$$"
 install_lock_err="$tmp_root/install-lock.err"
 if "$install_root/current/bin/lean-beam" prune --apply > /dev/null 2>"$install_lock_err"; then
   echo "expected prune to respect the active install lock" >&2
   exit 1
 fi
 assert_contains_literal "$install_lock_err" 'timed out after 1000 ms waiting for Beam lock'
-rm -f "$install_root/.install-lock/pid"
+rm -f "$install_root/.install-lock/pid" "$install_root/.install-lock/pid-domain"
 rmdir "$install_root/.install-lock"
 assert_file "$old_runtime/manifest.json"
 
@@ -287,7 +304,7 @@ resolved_partial_runtime="$(beam_test_realpath "$partial_runtime")"
 
 stale_bundle_lock="$bundle_root/.locks/200"
 mkdir -p "$stale_bundle_lock"
-printf '%s\n' "$$" >"$stale_bundle_lock/pid"
+write_lock_owner "$stale_bundle_lock" "$$"
 bundle_lock_out="$tmp_root/bundle-lock.out"
 bundle_lock_err="$tmp_root/bundle-lock.err"
 if "$install_root/current/bin/lean-beam" prune --apply --bundles \
@@ -303,7 +320,7 @@ assert_contains_literal "$bundle_lock_err" \
 assert_contains_literal "$bundle_lock_err" \
   'rerun `lean-beam prune --bundles` to preview the remaining paths'
 assert_not_exists "$partial_runtime"
-rm -f "$stale_bundle_lock/pid"
+rm -f "$stale_bundle_lock/pid" "$stale_bundle_lock/pid-domain"
 rmdir "$stale_bundle_lock"
 assert_file "$stale_bundle/metadata.json"
 

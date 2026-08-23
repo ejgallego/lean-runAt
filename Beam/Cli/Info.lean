@@ -10,6 +10,8 @@ import Beam.Cli.InstallLayout
 import Beam.Cli.Output
 import Beam.Cli.Project
 import Beam.Cli.RuntimeBundle
+import Beam.Daemon.Debug
+import Beam.Daemon.Paths
 import Beam.Version
 
 open Lean
@@ -144,7 +146,7 @@ private def printRocqDoctorInfo (home root : System.FilePath) : IO Unit := do
   IO.println s!"client binary: {paths.client}"
 
 def daemonFailureIncidentDoctorLines (root : System.FilePath) : IO (List String) := do
-  let incidents ← recentDaemonFailureIncidentPaths root
+  let incidents ← Beam.Daemon.recentDaemonFailureIncidentPaths root
   if incidents.isEmpty then
     pure ["daemon incidents: none"]
   else
@@ -163,14 +165,14 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
   match backend with
   | .lean => printLeanDoctorInfo home root
   | .rocq => printRocqDoctorInfo home root
-  let registry ← registryPath root
+  let registry ← Beam.Daemon.registryPath root
   IO.println s!"registry: {registry}"
   match ← registryLiveFor root with
   | some entry =>
       IO.println "daemon status: live"
       IO.println s!"daemon pid: {entry.pid}"
-      if let some pidNamespace := entry.pidNamespace? then
-        IO.println s!"daemon pid namespace: {pidNamespace}"
+      if let some pidDomain := entry.pidDomain? then
+        IO.println s!"daemon pid domain: {pidDomain}"
       if let some endpoint := Beam.Daemon.registryEndpoint? entry then
         IO.println s!"daemon endpoint: {Beam.Daemon.endpointSummary endpoint}"
       else

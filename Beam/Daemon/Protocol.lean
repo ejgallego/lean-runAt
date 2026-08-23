@@ -18,7 +18,7 @@ open Beam.Broker
 structure RegistryEntry where
   daemonId : String
   pid : Nat
-  pidNamespace? : Option String := none
+  pidDomain? : Option String := none
   port? : Option Nat := none
   root : String
   configHash : String

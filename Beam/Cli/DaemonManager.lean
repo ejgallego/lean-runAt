@@ -11,10 +11,15 @@ import Beam.Cli.Args
 import Beam.Cli.Lock
 import Beam.Cli.Project
 import Beam.Daemon.Debug
+import Beam.Daemon.Ownership
+import Beam.Daemon.Paths
+import Std.Internal.UV.Timer
 
 open Lean
 
 namespace Beam.Cli
+
+open Beam.Daemon.Ownership
 
 open Beam.Broker
 open Beam.Daemon
@@ -22,9 +27,6 @@ open Beam.Daemon
 /-- Private broker workspace used by the one-project daemon managed by the CLI. -/
 def projectDaemonWorkspaceId : WorkspaceId :=
   "beam-cli-project"
-
-def controlDir (root : System.FilePath) : IO System.FilePath := do
-  Beam.Daemon.controlDir root
 
 private def defaultProjectControlLockTimeoutMs : Nat :=
   60000
@@ -54,12 +56,6 @@ unbounded lock helper.
 -/
 def withProjectControlLock (root : System.FilePath) (act : IO α) : IO α := do
   withLockTimeout (← projectControlLockDir root) (← projectControlLockTimeoutMs) act
-
-def registryPath (root : System.FilePath) : IO System.FilePath := do
-  Beam.Daemon.registryPath root
-
-private def readRegistry? (root : System.FilePath) : IO (Option RegistryEntry) :=
-  Beam.Daemon.readRegistry? root
 
 private def computeConfigHash
     (root : System.FilePath)
@@ -91,21 +87,31 @@ def removeRegistry (root : System.FilePath) : IO Unit := do
   if ← path.pathExists then
     IO.FS.removeFile path
 
-def killPid (pid : Nat) : IO Unit := do
-  try
-    let _ ← IO.Process.output { cmd := (← killCommand), args := #[toString pid] }
-    pure ()
-  catch _ =>
-    pure ()
-
-partial def waitForPidGone (pid : Nat) (tries : Nat := 20) : IO Unit := do
+private partial def waitForRecordedPidGone
+    (recorded : Beam.RecordedPid)
+    (tries : Nat := 20) : IO Unit := do
   if tries == 0 then
-    pure ()
-  else if ← pidAlive pid then
-    IO.sleep 100
-    waitForPidGone pid (tries - 1)
-  else
-    pure ()
+    return
+  match ← recorded.observe with
+  | .local true =>
+      IO.sleep 100
+      waitForRecordedPidGone recorded (tries - 1)
+  | .invalid | .local false | .differentDomain | .unknownDomain =>
+      pure ()
+
+/--
+Finish a graceful daemon shutdown with a PID fallback only when the registry PID belongs to the
+current process domain. A PID from another or unknown domain must never be probed or killed.
+-/
+def finishRegistryDaemonShutdown (entry : RegistryEntry) : IO Unit := do
+  let recorded : Beam.RecordedPid := { pid := entry.pid, domain? := entry.pidDomain? }
+  waitForRecordedPidGone recorded
+  match ← recorded.observe with
+  | .local true =>
+      if ← recorded.terminateIfLocal then
+        waitForRecordedPidGone recorded
+  | .invalid | .local false | .differentDomain | .unknownDomain =>
+      pure ()
 
 private def stopDaemonEntry (entry : RegistryEntry) : IO Unit := do
   let mayKillPid ←
@@ -126,9 +132,8 @@ private def stopDaemonEntry (entry : RegistryEntry) : IO Unit := do
             pure true
     | none =>
         pure true
-  if mayKillPid && entry.pid > 0 && (← pidAlive entry.pid) then
-    killPid entry.pid
-    waitForPidGone entry.pid
+  if mayKillPid then
+    finishRegistryDaemonShutdown entry
 
 def stopRegisteredDaemon (root : System.FilePath) : IO Unit := do
   match ← readRegistry? root with
@@ -179,18 +184,8 @@ private partial def selectUnoccupiedEndpoint
   else
     pure endpoint
 
-private def daemonStartupLogPath (root : System.FilePath) : IO System.FilePath := do
-  Beam.Daemon.daemonStartupLogPath root
-
-private def daemonFailureIncidentDir (root : System.FilePath) : IO System.FilePath := do
-  Beam.Daemon.daemonFailureIncidentDir root
-
 private def daemonFailureIncidentRetainCount : Nat :=
   50
-
-def recentDaemonFailureIncidentPaths (root : System.FilePath) (limit : Nat := 5) :
-    IO (Array System.FilePath) :=
-  Beam.Daemon.recentDaemonFailureIncidentPaths root limit
 
 private def pruneDaemonFailureIncidents (root : System.FilePath) : IO Unit := do
   let entries ← Beam.Daemon.daemonFailureIncidentEntries root
@@ -205,12 +200,6 @@ private def pruneDaemonFailureIncidents (root : System.FilePath) : IO Unit := do
 private def appendMaybeSection (msg : String) : Option String → String
   | none => msg
   | some context => msg ++ "\n" ++ context
-
-private def registryEndpointSummary (entry : RegistryEntry) : String :=
-  Beam.Daemon.registryEndpointSummary entry
-
-private def registryPidStatus (entry : RegistryEntry) : IO String :=
-  Beam.Daemon.registryPidStatus entry
 
 private structure DaemonFailureIncident where
   schemaVersion : Nat
@@ -237,9 +226,6 @@ private def daemonFailureKind? (detail : String) : Option String :=
     some "noLiveDaemon"
   else
     none
-
-private def startupLogTail? (root : System.FilePath) : IO (Option (System.FilePath × String)) :=
-  Beam.Daemon.startupLogTail? root
 
 private def daemonFailureIncidentTimestampLabel (timestamp : String) : String :=
   (timestamp.replace "-" "").replace ":" ""
@@ -268,7 +254,7 @@ private def writeDaemonFailureIncident?
       | some entry => some <$> registryPidStatus entry
     let endpoint := registry.map registryEndpointSummary
     let control ← controlDir root
-    let observedAt ← utcTimestamp
+    let observedAt ← Beam.utcTimestamp
     let incident : DaemonFailureIncident := {
       schemaVersion := daemonFailureIncidentSchemaVersion
       kind
@@ -295,12 +281,6 @@ private def writeDaemonFailureIncident?
   catch _ =>
     pure none
 
-private def daemonRegistryContext? (root : System.FilePath) : IO (Option String) :=
-  Beam.Daemon.daemonRegistryContext? root
-
-def daemonDebugContextJson (root : System.FilePath) : IO Json :=
-  Beam.Daemon.daemonDebugContextJson root
-
 def daemonFailureMessage (root : System.FilePath) (detail : String) : IO String := do
   match daemonFailureKind? detail with
   | none =>
@@ -323,7 +303,7 @@ private def startupFailureMessage (endpoint : Transport.Endpoint) (logPath : Sys
   else
     s!"failed to start Beam daemon on {endpointSummary endpoint}\n{detail}"
   if ← logPath.pathExists then
-    let logText := trimLine (← IO.FS.readFile logPath)
+    let logText := Beam.trimLine (← IO.FS.readFile logPath)
     if logText.isEmpty then
       pure msg
     else
@@ -331,11 +311,36 @@ private def startupFailureMessage (endpoint : Transport.Endpoint) (logPath : Sys
   else
     pure msg
 
-private def startDaemon (desired : DesiredConfig) (endpoint : Transport.Endpoint) (logPath : System.FilePath) :
-    IO Nat := do
+private abbrev daemonStdio : IO.Process.StdioConfig where
+  stdin := .null
+  stdout := .null
+  stderr := .null
+
+private partial def waitForDaemonChildExit
+    (child : IO.Process.Child daemonStdio)
+    (tries : Nat := 20) : IO Unit := do
+  if tries == 0 || (← child.tryWait).isSome then
+    return
+  IO.sleep 100
+  waitForDaemonChildExit child (tries - 1)
+
+private def terminateDaemonChild (child : IO.Process.Child daemonStdio) : IO Unit := do
+  try
+    if (← child.tryWait).isNone then
+      child.kill
+    waitForDaemonChildExit child
+  catch _ =>
+    pure ()
+
+private def startDaemon
+    (desired : DesiredConfig)
+    (endpoint : Transport.Endpoint)
+    (logPath : System.FilePath)
+    (daemonId : String) : IO (IO.Process.Child daemonStdio) := do
   let mut args : List String := [
     "--root", desired.root.toString,
-    "--workspace-id", projectDaemonWorkspaceId
+    "--workspace-id", projectDaemonWorkspaceId,
+    "--daemon-id", daemonId
   ]
   match endpoint with
   | .tcp port =>
@@ -352,18 +357,15 @@ private def startDaemon (desired : DesiredConfig) (endpoint : Transport.Endpoint
   let cmd := String.intercalate " " ((desired.daemonBin.toString :: args).map shellQuote)
   let shell := s!"exec {cmd} >{shellQuote logPath.toString} 2>&1 < /dev/null"
   let child ← IO.Process.spawn {
+    toStdioConfig := daemonStdio
     cmd := "sh"
     args := #["-c", shell]
     cwd := some desired.root
-    stdin := .null
-    stdout := .null
-    stderr := .null
   }
-  let pid := child.pid.toNat
-  pure pid
+  pure child
 
 private partial def waitForDaemon
-    (pid : Nat)
+    (child : IO.Process.Child daemonStdio)
     (endpoint : Transport.Endpoint)
     (logPath : System.FilePath)
     (root : System.FilePath)
@@ -375,23 +377,33 @@ private partial def waitForDaemon
       else
         throw <| IO.userError (endpointOccupancyError endpoint (System.FilePath.mk daemonRoot) root)
   | none =>
-      if !(← pidAlive pid) then
+      if (← child.tryWait).isSome then
         throw <| IO.userError (← startupFailureMessage endpoint logPath "Beam daemon process exited before responding")
       else if tries == 0 then
         throw <| IO.userError (← startupFailureMessage endpoint logPath "Beam daemon did not become ready before timeout")
       else
         IO.sleep 100
-        waitForDaemon pid endpoint logPath root (tries - 1)
+        waitForDaemon child endpoint logPath root (tries - 1)
 
-private def registryEntryFor (desired : DesiredConfig) (pid : Nat) (endpoint : Transport.Endpoint) (opts : CliOptions) :
-    IO RegistryEntry := do
+private def newDaemonGenerationId (configHash : String) : IO String := do
+  let startedMonoNanos ← IO.monoNanosNow
+  let nonce := ByteArray.toUInt64LE! (← IO.getRandomBytes 8)
+  pure s!"{configHash.take 12}-{startedMonoNanos}-{nonce}"
+
+private def registryEntryFor
+    (desired : DesiredConfig)
+    (daemonId : String)
+    (pid : Nat)
+    (endpoint : Transport.Endpoint)
+    (opts : CliOptions) : IO RegistryEntry := do
   let port? :=
     match endpoint with
     | .tcp port => some port.toNat
+  let pidDomain? ← Beam.currentPidDomain?
   pure {
-    daemonId := s!"{desired.configHash.take 12}-{pid}"
+    daemonId
     pid
-    pidNamespace? := ← currentPidNamespace?
+    pidDomain?
     port?
     root := desired.root.toString
     configHash := desired.configHash
@@ -402,7 +414,7 @@ private def registryEntryFor (desired : DesiredConfig) (pid : Nat) (endpoint : T
     clientBin? := some desired.clientBin.toString
     daemonBin? := some desired.daemonBin.toString
     bundleId? := some desired.bundleId
-    startedAt := ← utcTimestamp
+    startedAt := ← Beam.utcTimestamp
     requestedPort? := requestedPortNat? opts
   }
 
@@ -412,19 +424,19 @@ private partial def startDaemonEntry
     (tries : Nat := 10) : IO (Transport.Endpoint × RegistryEntry) := do
   let endpoint ← selectUnoccupiedEndpoint desired opts
   let logPath ← daemonStartupLogPath desired.root
-  let pid ← startDaemon desired endpoint logPath
+  let daemonId ← newDaemonGenerationId desired.configHash
+  let child ← startDaemon desired endpoint logPath daemonId
   try
-    waitForDaemon pid endpoint logPath desired.root
+    waitForDaemon child endpoint logPath desired.root
   catch err =>
-    if pid > 0 && (← pidAlive pid) then
-      killPid pid
-      waitForPidGone pid
+    terminateDaemonChild child
     let endpointOccupied ← endpointAcceptsConnection endpoint
     let startupAddressInUse := startupFailureSuggestsEndpointInUse (toString err)
     if shouldRetryAutomaticStartup (usesAutomaticTcpEndpoint opts) tries endpointOccupied startupAddressInUse then
       return ← startDaemonEntry desired opts (tries - 1)
     throw err
-  let entry ← registryEntryFor desired pid endpoint opts
+  let pid := child.pid.toNat
+  let entry ← registryEntryFor desired daemonId pid endpoint opts
   pure (endpoint, entry)
 
 def desiredConfig (home root : System.FilePath) (required : Backend) : IO DesiredConfig := do
@@ -487,151 +499,524 @@ def registryLiveFor (root : System.FilePath) (expectedHash? : Option String := n
       if !rootOk || !hashOk then
         pure none
       else if let some endpoint := registryEndpoint? entry then
-        -- In PID-isolated sandboxes, the recorded daemon pid can be meaningless outside
-        -- the namespace that started it. Prefer a root-matching endpoint over pid probes.
+        -- PID observations are not a liveness fallback across isolated sandboxes; only a
+        -- root-matching endpoint proves that this registry entry is live.
         if ← daemonServesRoot endpoint projectDaemonWorkspaceId root then
           pure (some entry)
-        else if entry.pid == 0 || !(← pidAlive entry.pid) then
-          pure none
         else
           pure none
-      else if entry.pid == 0 || !(← pidAlive entry.pid) then
-        pure none
       else
         pure none
 
-structure EnsuredProjectDaemon where
-  endpoint : Transport.Endpoint
-  startedNew : Bool := false
+private def wrapperLeaseHeartbeatIntervalMs : UInt32 :=
+  250
 
-def ensureProjectDaemon (home root : System.FilePath) (backend : Backend) (opts : CliOptions) :
-    IO EnsuredProjectDaemon := do
-  let desired ← desiredConfig home root backend
-  withProjectControlLock root do
-    if let some live ← registryLiveFor root desired.configHash then
-      if let some endpoint := registryEndpoint? live then
-        return { endpoint, startedNew := false }
-      removeRegistry root
-    let live? ← registryLiveFor root
-    if live?.isNone then
-      removeRegistry root
-    let (endpoint, entry) ← startDaemonEntry desired opts
-    writeRegistry root entry
-    if let some live := live? then
-      unless live.pid == entry.pid &&
-          live.port? == entry.port? do
-        stopDaemonEntry live
-    pure { endpoint, startedNew := true }
+private def wrapperLeaseHeartbeatTimeoutNanos : Nat :=
+  5000000000
+
+private def wrapperLeaseHeartbeatWriteRetryMs : UInt32 :=
+  50
+
+private def wrapperLeaseHeartbeatWriteRetries : Nat :=
+  3
+
+private def wrapperLifecyclePollMs : UInt32 :=
+  50
+
+private def daemonRequestProbeTimeoutMs : Nat :=
+  1000
+
+private def wrapperLeaseActionCancelWaitMs : Nat :=
+  5000
 
 private structure WrapperLease where
   root : System.FilePath
   path : System.FilePath
+  stopHeartbeat : IO.Ref Bool
+  heartbeatTimer : Std.Internal.UV.Timer
+  heartbeatTask : Task (Except IO.Error Unit)
 
-private structure WrapperLeaseMetadata where
-  pid : Nat
-  pidNamespace? : Option String := none
-  createdAt : String
+/-- Internal typed target for one wrapper request to a daemon generation. -/
+structure ProjectDaemonClient where
+  endpoint : Transport.Endpoint
+  wrapperLease : WrapperLeaseContext
+
+private structure DaemonRetirement where
+  daemonId : String
+  ownerLeaseFile : String
   deriving FromJson, ToJson
 
-private def wrapperLeaseDir (root : System.FilePath) : IO System.FilePath := do
-  pure ((← controlDir root) / "wrapper-leases")
+private inductive EnsuredProjectDaemon where
+  | reused (client : ProjectDaemonClient) (lease : WrapperLease)
+  | started (client : ProjectDaemonClient) (lease : WrapperLease)
 
-private def removeWrapperLeasePath (path : System.FilePath) : IO Unit := do
+private def projectDaemonClient
+    (endpoint : Transport.Endpoint)
+    (daemonId : String)
+    (lease : WrapperLease) : ProjectDaemonClient :=
+  {
+    endpoint
+    wrapperLease := {
+      daemonId
+      leaseFile := lease.path.fileName.getD lease.path.toString
+    }
+  }
+
+private def removeFileIfExists (path : System.FilePath) : IO Unit := do
+  if ← path.pathExists then
+    IO.FS.removeFile path
+
+private def removeFileIfExistsBestEffort (path : System.FilePath) : IO Unit := do
   try
-    if ← path.pathExists then
-      IO.FS.removeFile path
+    removeFileIfExists path
   catch _ =>
     pure ()
+
+private def ensureWrapperLeaseNotRevoked (path : System.FilePath) : IO Unit := do
+  if ← (wrapperLeaseRevocationPath path).pathExists then
+    throw <| IO.userError s!"wrapper daemon-lifetime lease was revoked: {path}"
+
+private def writeWrapperLeaseMetadata
+    (path : System.FilePath)
+    (metadata : WrapperLeaseMetadata) : IO Unit := do
+  ensureWrapperLeaseNotRevoked path
+  let tmp := path.withExtension "tmp"
+  IO.FS.writeFile tmp ((toJson metadata).pretty ++ "\n")
+  try
+    ensureWrapperLeaseNotRevoked path
+  catch err =>
+    removeFileIfExistsBestEffort tmp
+    throw err
+  IO.FS.rename tmp path
+  try
+    ensureWrapperLeaseNotRevoked path
+  catch err =>
+    removeFileIfExistsBestEffort path
+    throw err
+
+private partial def writeWrapperLeaseHeartbeat
+    (path : System.FilePath)
+    (metadata : WrapperLeaseMetadata)
+    (retries : Nat := wrapperLeaseHeartbeatWriteRetries) : IO Unit := do
+  try
+    writeWrapperLeaseMetadata path metadata
+  catch err =>
+    if retries == 0 then
+      throw err
+    IO.sleep wrapperLeaseHeartbeatWriteRetryMs
+    writeWrapperLeaseHeartbeat path metadata (retries - 1)
+
+private partial def wrapperLeaseHeartbeatLoop
+    (path : System.FilePath)
+    (metadata : WrapperLeaseMetadata)
+    (stop : IO.Ref Bool)
+    (timer : Std.Internal.UV.Timer)
+    (tick : IO.Promise Unit) : IO Unit := do
+  let tickResult ← IO.wait tick.result?
+  if ← stop.get then
+    return
+  let some _ := tickResult
+    | return
+  let heartbeatMonoNanos ← IO.monoNanosNow
+  let metadata := { metadata with heartbeatMonoNanos }
+  writeWrapperLeaseHeartbeat path metadata
+  wrapperLeaseHeartbeatLoop path metadata stop timer (← timer.next)
 
 private def acquireWrapperLease (root : System.FilePath) : IO WrapperLease := do
   let dir ← wrapperLeaseDir root
   IO.FS.createDirAll dir
   let pid ← IO.Process.getPID
   let stamp ← IO.monoNanosNow
-  let path := dir / s!"{stamp}-{pid}.lease"
-  let tmp := dir / s!"{stamp}-{pid}.lease.tmp"
+  let nonce := ByteArray.toUInt64LE! (← IO.getRandomBytes 8)
+  let path := dir / s!"{stamp}-{pid}-{nonce}.lease"
   let metadata : WrapperLeaseMetadata := {
     pid := pid.toNat
-    pidNamespace? := ← currentPidNamespace?
-    createdAt := ← utcTimestamp
+    pidDomain? := ← Beam.currentPidDomain?
+    heartbeatMonoNanos := stamp
   }
-  IO.FS.writeFile tmp ((toJson metadata).pretty ++ "\n")
-  IO.FS.rename tmp path
-  pure { root, path }
+  writeWrapperLeaseMetadata path metadata
+  let stopHeartbeat ← IO.mkRef false
+  let heartbeatTimer ← Std.Internal.UV.Timer.mk wrapperLeaseHeartbeatIntervalMs.toUInt64 true
+  let firstTick ← heartbeatTimer.next
+  let heartbeatTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+    wrapperLeaseHeartbeatLoop path metadata stopHeartbeat heartbeatTimer firstTick
+  pure { root, path, stopHeartbeat, heartbeatTimer, heartbeatTask }
+
+private def stopWrapperLeaseHeartbeat (lease : WrapperLease) : IO Unit := do
+  lease.stopHeartbeat.set true
+  Std.Internal.UV.Timer.stop lease.heartbeatTimer
+  match ← IO.wait lease.heartbeatTask with
+  | .ok () => pure ()
+  | .error err => throw err
 
 private def releaseWrapperLease (lease : WrapperLease) : IO Unit := do
-  removeWrapperLeasePath lease.path
+  try
+    stopWrapperLeaseHeartbeat lease
+  finally
+    removeFileIfExistsBestEffort lease.path
+    removeFileIfExistsBestEffort (wrapperLeaseRevocationPath lease.path)
 
 private def readWrapperLeaseMetadata? (path : System.FilePath) : IO (Option WrapperLeaseMetadata) := do
+  unless ← path.pathExists do
+    return none
+  let text ←
+    try
+      IO.FS.readFile path
+    catch err =>
+      if ← path.pathExists then
+        throw err
+      else
+        return none
+  match Json.parse text with
+  | .error _ => pure none
+  | .ok json =>
+      match fromJson? json with
+      | .error _ => pure none
+      | .ok metadata => pure (some metadata)
+
+private def staleWrapperLease? (path : System.FilePath) : IO Bool := do
+  if ← (wrapperLeaseRevocationPath path).pathExists then
+    return true
+  match ← readWrapperLeaseMetadata? path with
+  | none => pure true
+  | some metadata =>
+      let now ← IO.monoNanosNow
+      let pidObservation ←
+        (Beam.RecordedPid.mk metadata.pid metadata.pidDomain?).observe
+      pure <| wrapperLeaseStaleFromObservation pidObservation now
+        wrapperLeaseHeartbeatTimeoutNanos metadata
+
+private def revokeWrapperLease (path : System.FilePath) : IO Unit := do
+  let revocationPath := wrapperLeaseRevocationPath path
+  unless ← revocationPath.pathExists do
+    let tmp := revocationPath.withExtension "revoking"
+    let revocation : WrapperLeaseRevocation := { revokedMonoNanos := ← IO.monoNanosNow }
+    IO.FS.writeFile tmp ((toJson revocation).pretty ++ "\n")
+    IO.FS.rename tmp revocationPath
+  removeFileIfExists path
+
+private def reapAndObserveOtherWrapperLeases (lease : WrapperLease) :
+    IO OtherWrapperLeasesObservation := do
   try
-    let text ← IO.FS.readFile path
-    let json ← IO.ofExcept <| Json.parse text
-    let metadata ← IO.ofExcept <| fromJson? json
-    pure (some metadata)
+    let dir ← wrapperLeaseDir lease.root
+    unless ← dir.pathExists do
+      return .drained
+    let entries ← dir.readDir
+    for entry in entries do
+      if entry.path != lease.path && entry.fileName.endsWith ".lease" then
+        let stale? ←
+          try
+            pure <| some (← staleWrapperLease? entry.path)
+          catch _ =>
+            pure none
+        match stale? with
+        | none => return .activeOrUnreadable
+        | some true =>
+            try
+              revokeWrapperLease entry.path
+            catch _ =>
+              return .activeOrUnreadable
+        | some false => return .activeOrUnreadable
+    pure .drained
   catch _ =>
+    pure .activeOrUnreadable
+
+private def removeDaemonRetirement (root : System.FilePath) : IO Unit := do
+  removeFileIfExists (← daemonRetirementPath root)
+
+private inductive OwnershipRegistryRead where
+  | missing
+  | invalid
+  | unreadable (error : IO.Error)
+  | present (entry : RegistryEntry)
+
+private def readOwnershipRegistry (root : System.FilePath) : IO OwnershipRegistryRead := do
+  let path ← registryPath root
+  try
+    unless ← path.pathExists do
+      return .missing
+    let text ← IO.FS.readFile path
+    match Json.parse text with
+    | .error _ => pure .invalid
+    | .ok json =>
+        match fromJson? json with
+        | .error _ => pure .invalid
+        | .ok entry => pure (.present entry)
+  catch err =>
+    pure (.unreadable err)
+
+private def readOrDiscardInvalidDaemonRetirement?
+    (root : System.FilePath) : IO (Option DaemonRetirement) := do
+  let path ← daemonRetirementPath root
+  unless ← path.pathExists do
+    return none
+  let text ← IO.FS.readFile path
+  let retirement? := do
+    let json ← Json.parse text
+    fromJson? json
+  match retirement? with
+  | .ok retirement => pure (some retirement)
+  | .error _ =>
+      removeDaemonRetirement root
+      pure none
+
+private def writeDaemonRetirement
+    (root : System.FilePath)
+    (retirement : DaemonRetirement) : IO Unit := do
+  let path ← daemonRetirementPath root
+  if let some parent := path.parent then
+    IO.FS.createDirAll parent
+  let tmp := path.withExtension "tmp"
+  IO.FS.writeFile tmp ((toJson retirement).pretty ++ "\n")
+  IO.FS.rename tmp path
+
+/-- Reconcile stale or invalid retirement state and report whether it still blocks admission. -/
+private def reconcileRetirementAdmission (lease : WrapperLease) : IO Bool := do
+  let some retirement ← readOrDiscardInvalidDaemonRetirement? lease.root
+    | return false
+  let registry ←
+    match ← readOwnershipRegistry lease.root with
+    | .missing | .invalid =>
+        removeDaemonRetirement lease.root
+        return false
+    | .unreadable err => throw err
+    | .present registry => pure registry
+  if registry.daemonId != retirement.daemonId then
+    removeDaemonRetirement lease.root
+    return false
+  unless validWrapperLeaseFileName retirement.ownerLeaseFile do
+    removeDaemonRetirement lease.root
+    return false
+  let ownerPath := (← wrapperLeaseDir lease.root) / retirement.ownerLeaseFile
+  if ← staleWrapperLease? ownerPath then
+    revokeWrapperLease ownerPath
+    removeDaemonRetirement lease.root
+    pure false
+  else
+    pure true
+
+private partial def ensureProjectDaemonUnderLease
+    (desired : DesiredConfig)
+    (opts : CliOptions)
+    (lease : WrapperLease) : IO EnsuredProjectDaemon := do
+  let admitted? ← withProjectControlLock desired.root do
+    if ← reconcileRetirementAdmission lease then
+      pure none
+    else
+      if let some live ← registryLiveFor desired.root desired.configHash then
+        if let some endpoint := registryEndpoint? live then
+          return some <| EnsuredProjectDaemon.reused
+            (projectDaemonClient endpoint live.daemonId lease) lease
+        removeRegistry desired.root
+      let live? ← registryLiveFor desired.root
+      if live?.isNone then
+        removeRegistry desired.root
+      let (endpoint, entry) ← startDaemonEntry desired opts
+      writeRegistry desired.root entry
+      if let some live := live? then
+        unless live.pid == entry.pid && live.port? == entry.port? do
+          stopDaemonEntry live
+      pure <| some <| EnsuredProjectDaemon.started
+        (projectDaemonClient endpoint entry.daemonId lease) lease
+  match admitted? with
+  | some daemon => pure daemon
+  | none =>
+      IO.sleep wrapperLifecyclePollMs
+      ensureProjectDaemonUnderLease desired opts lease
+
+private def acquireWrapperLeaseForAdmission (root : System.FilePath) : IO WrapperLease :=
+  withProjectControlLock root do
+    acquireWrapperLease root
+
+private def admitProjectDaemon
+    (home root : System.FilePath)
+    (backend : Backend)
+    (opts : CliOptions) : IO EnsuredProjectDaemon := do
+  let lease ← acquireWrapperLeaseForAdmission root
+  try
+    let desired ← desiredConfig home root backend
+    ensureProjectDaemonUnderLease desired opts lease
+  catch err =>
+    releaseWrapperLease lease
+    throw err
+
+private def requestDaemonStatsWithin
+    (endpoint : Transport.Endpoint) : IO (Option Response) := do
+  let task ← IO.asTask (prio := Task.Priority.dedicated) <|
+    sendRequest endpoint { op := .stats }
+  let mut remainingMs := daemonRequestProbeTimeoutMs
+  while !(← IO.hasFinished task) && remainingMs > 0 do
+    IO.sleep wrapperLifecyclePollMs
+    remainingMs := remainingMs - min remainingMs wrapperLifecyclePollMs.toNat
+  if ← IO.hasFinished task then
+    match ← IO.wait task with
+    | .ok response => pure (some response)
+    | .error _ => pure none
+  else
+    IO.cancel task
     pure none
 
-private def staleWrapperLease? (currentNamespace? : Option String) (path : System.FilePath) :
-    IO Bool := do
-  match ← readWrapperLeaseMetadata? path with
-  | none => pure false
-  | some metadata =>
-      if metadata.pid == 0 then
-        pure true
-      else if metadata.pidNamespace? == currentNamespace? then
-        pure (!(← pidAlive metadata.pid))
-      else
-        -- The PID may be meaningful only inside a different sandbox namespace.
-        pure false
+private def registryDaemonProvenGone (registry : RegistryEntry) : IO Bool := do
+  let recorded : Beam.RecordedPid := { pid := registry.pid, domain? := registry.pidDomain? }
+  match ← recorded.observe with
+  | .local false => pure true
+  | .local true => pure <| (← recorded.zombieIfLocal?).getD false
+  | .invalid | .differentDomain | .unknownDomain => pure false
 
-private def activeOtherWrapperLeases (lease : WrapperLease) : IO (Array IO.FS.DirEntry) := do
-  let dir ← wrapperLeaseDir lease.root
-  unless ← dir.pathExists do
-    return #[]
-  let currentNamespace? ← currentPidNamespace?
-  let entries ← dir.readDir
-  let mut active := #[]
-  for entry in entries do
-    if entry.path != lease.path && entry.fileName.endsWith ".lease" then
-      if ← staleWrapperLease? currentNamespace? entry.path then
-        removeWrapperLeasePath entry.path
-      else
-        active := active.push entry
-  pure active
+private def observeDaemonRequests
+    (registry : RegistryEntry)
+    (endpoint : Transport.Endpoint) : IO DaemonRequestsObservation := do
+  try
+    let some resp ← requestDaemonStatsWithin endpoint
+      | return if ← registryDaemonProvenGone registry then .provenGone else .activeOrUnreadable
+    unless resp.ok do
+      return .activeOrUnreadable
+    let some result := resp.result?
+      | return .activeOrUnreadable
+    let activeRequestCount ← IO.ofExcept <| result.getObjValAs? Nat "activeRequestCount"
+    pure <| if activeRequestCount == 0 then .drained else .activeOrUnreadable
+  catch _ =>
+    pure .activeOrUnreadable
 
-private partial def waitForOtherWrapperLeases (lease : WrapperLease) (tries : Nat := 600) : IO Unit := do
-  let others ← activeOtherWrapperLeases lease
-  if others.isEmpty then
-    pure ()
-  else if tries == 0 then
-    pure ()
+private def tryCommitDaemonRetirement
+    (client : ProjectDaemonClient)
+    (lease : WrapperLease) : IO RetirementDecision := do
+  withProjectControlLock lease.root do
+    let observation ←
+      match ← readOwnershipRegistry lease.root with
+      | .present registry =>
+          if registry.daemonId != client.wrapperLease.daemonId then
+            pure RetirementObservation.replacement
+          else
+            let otherLeases ← reapAndObserveOtherWrapperLeases lease
+            let daemonRequests ←
+              match otherLeases with
+              | .drained => observeDaemonRequests registry client.endpoint
+              | .activeOrUnreadable => pure .activeOrUnreadable
+            pure <| RetirementObservation.current otherLeases daemonRequests
+      | .missing | .invalid | .unreadable _ =>
+          pure <| RetirementObservation.unavailable (← reapAndObserveOtherWrapperLeases lease)
+    match retirementDecision observation with
+    | .wait => pure .wait
+    | .obsolete => pure .obsolete
+    | .commit =>
+        let ownerLeaseFile := lease.path.fileName.getD lease.path.toString
+        writeDaemonRetirement lease.root {
+          daemonId := client.wrapperLease.daemonId
+          ownerLeaseFile
+        }
+        pure .commit
+
+private partial def retireStartedProjectDaemon
+    (client : ProjectDaemonClient)
+    (lease : WrapperLease) : IO Bool := do
+  match ← tryCommitDaemonRetirement client lease with
+  | .commit => pure true
+  | .obsolete => pure false
+  | .wait =>
+      IO.sleep wrapperLifecyclePollMs
+      retireStartedProjectDaemon client lease
+
+private def finishStartedProjectDaemonAdmission
+    (client : ProjectDaemonClient)
+    (lease : WrapperLease) : IO Unit := do
+  if ← retireStartedProjectDaemon client lease then
+    -- Leave the final heartbeat on disk. A successor with matching PID-domain identity can
+    -- prove this process exited by PID; an unknown or different domain waits for the heartbeat
+    -- to expire before it clears the retirement fence and observes the daemon endpoint.
+    stopWrapperLeaseHeartbeat lease
   else
-    IO.sleep 50
-    waitForOtherWrapperLeases lease (tries - 1)
+    releaseWrapperLease lease
 
-def withWrapperLease (root : System.FilePath) (startedNew : Bool) (act : IO α) : IO α := do
-  let lease ← acquireWrapperLease root
+private partial def awaitWrapperLeaseAction
+    (lease : WrapperLease)
+    (actionTask : Task (Except IO.Error α)) : IO α := do
+  if ← IO.hasFinished actionTask then
+    match ← IO.wait actionTask with
+    | .ok value => pure value
+    | .error err => throw err
+  else if ← IO.hasFinished lease.heartbeatTask then
+    let heartbeatResult ← IO.wait lease.heartbeatTask
+    IO.cancel actionTask
+    let mut remainingMs := wrapperLeaseActionCancelWaitMs
+    while !(← IO.hasFinished actionTask) && remainingMs > 0 do
+      IO.sleep wrapperLifecyclePollMs
+      remainingMs := remainingMs - min remainingMs wrapperLifecyclePollMs.toNat
+    match heartbeatResult with
+    | .ok () => throw <| IO.userError "wrapper lease heartbeat stopped unexpectedly"
+    | .error err => throw err
+  else
+    IO.sleep wrapperLifecyclePollMs
+    awaitWrapperLeaseAction lease actionTask
+
+private def runWhileWrapperLeaseHealthy
+    (lease : WrapperLease)
+    (act : IO α) : IO α := do
+  let actionTask ← IO.asTask (prio := Task.Priority.dedicated) act
+  awaitWrapperLeaseAction lease actionTask
+
+def withProjectDaemon
+    (home root : System.FilePath)
+    (backend : Backend)
+    (opts : CliOptions)
+    (act : ProjectDaemonClient → IO α) : IO α := do
+  match ← admitProjectDaemon home root backend opts with
+  | .reused client lease =>
+      let result ←
+        try
+          pure <| Except.ok (← runWhileWrapperLeaseHealthy lease (act client))
+        catch err =>
+          pure <| Except.error err
+      releaseWrapperLease lease
+      match result with
+      | .ok value => pure value
+      | .error err => throw err
+  | .started client lease =>
+      -- The starter owns this daemon generation for its process lifetime. Unlike a reuser, it
+      -- must finish already-admitted work even if its filesystem heartbeat becomes unhealthy,
+      -- then retain ownership through broker draining and retirement.
+      let result ←
+        try
+          pure <| Except.ok (← act client)
+        catch err =>
+          pure <| Except.error err
+      finishStartedProjectDaemonAdmission client lease
+      match result with
+      | .ok value => pure value
+      | .error err => throw err
+
+private partial def lookupProjectDaemonUnderLease (lease : WrapperLease) : IO ProjectDaemonClient := do
+  let endpoint? ← withProjectControlLock lease.root do
+    if ← reconcileRetirementAdmission lease then
+      pure none
+    else
+      match ← registryLiveFor lease.root with
+      | some entry =>
+          let endpoint ← Beam.Daemon.endpointFromEntry entry
+          pure <| some <| projectDaemonClient endpoint entry.daemonId lease
+      | none =>
+          let msg ← daemonFailureMessage lease.root s!"no live Beam daemon registered for {lease.root}"
+          stopRegisteredDaemon lease.root
+          throw <| IO.userError msg
+  match endpoint? with
+  | some endpoint => pure endpoint
+  | none =>
+      IO.sleep wrapperLifecyclePollMs
+      lookupProjectDaemonUnderLease lease
+
+def withExistingProjectDaemon
+    (root : System.FilePath)
+    (act : ProjectDaemonClient → IO α) : IO α := do
+  let lease ← acquireWrapperLeaseForAdmission root
   let result ←
     try
-      pure <| Except.ok (← act)
+      let client ← lookupProjectDaemonUnderLease lease
+      pure <| Except.ok (← runWhileWrapperLeaseHealthy lease (act client))
     catch err =>
       pure <| Except.error err
-  if startedNew then
-    -- The wrapper invocation that started the daemon must not exit early while sibling
-    -- wrapper requests for the same root are still in flight, or its sandbox can kill the daemon.
-    waitForOtherWrapperLeases lease
   releaseWrapperLease lease
   match result with
   | .ok value => pure value
   | .error err => throw err
-
-def lookupProjectDaemon (root : System.FilePath) : IO RegistryEntry := do
-  withProjectControlLock root do
-    match ← registryLiveFor root with
-    | some entry => pure entry
-    | none =>
-        let msg ← daemonFailureMessage root s!"no live Beam daemon registered for {root}"
-        stopRegisteredDaemon root
-        throw <| IO.userError msg
 
 end Beam.Cli

@@ -5,9 +5,9 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Lean
-import Beam.Cli.Lock
 import Beam.Cli.RuntimeBundle.Source
 import Beam.Cli.RuntimeBundle.ToolchainPolicy
+import Beam.System
 
 open Lean
 
@@ -21,12 +21,12 @@ structure ToolchainFingerprint where
   deriving BEq, Repr, FromJson, ToJson
 
 def bundlePlatform : IO String := do
-  let system := ← readCmdTrim "uname" #["-s"]
-  let machine := ← readCmdTrim "uname" #["-m"]
+  let system := ← Beam.readCmdTrim "uname" #["-s"]
+  let machine := ← Beam.readCmdTrim "uname" #["-m"]
   pure s!"{system.toLower}-{machine.toLower}"
 
 def ensureElan : IO Unit := do
-  unless ← commandAvailable "elan" do
+  unless ← Beam.commandAvailable "elan" do
     throw <| IO.userError "missing elan on PATH"
 
 private def readRequiredToolchainCmdTrim (toolchain exe : String) (args : Array String := #[]) :
@@ -46,7 +46,7 @@ private def readRequiredToolchainCmdTrim (toolchain exe : String) (args : Array 
       "stderr:",
       if out.stderr.trimAscii.isEmpty then "(empty)" else out.stderr
     ]
-  let text := trimLine out.stdout
+  let text := Beam.trimLine out.stdout
   if text.isEmpty then
     throw <| IO.userError
       s!"failed to fingerprint Lean toolchain {toolchain}: `elan run {toolchain} {exe}` returned empty stdout"

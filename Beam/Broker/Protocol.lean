@@ -182,6 +182,30 @@ structure Handle where
   raw : Json
   deriving Inhabited, FromJson, ToJson
 
+/--
+Internal wrapper-to-daemon fencing identity. It is attached by `lean-beam`, not supplied by normal
+broker or MCP clients.
+-/
+structure WrapperLeaseContext where
+  daemonId : String
+  leaseFile : String
+  deriving Inhabited, ToJson, BEq, Repr
+
+instance : FromJson WrapperLeaseContext where
+  fromJson? json := do
+    match json with
+    | .obj fields =>
+        let allowed := #["daemonId", "leaseFile"]
+        let unexpected := fields.foldl (init := #[]) fun unexpected field _ =>
+          if allowed.contains field then unexpected else unexpected.push field
+        unless unexpected.isEmpty do
+          throw s!"wrapper lease accepts no undeclared fields: {String.intercalate ", " unexpected.toList}"
+    | other => throw s!"wrapper lease must be an object, got {other.compress}"
+    pure {
+      daemonId := ← json.getObjValAs? String "daemonId"
+      leaseFile := ← json.getObjValAs? String "leaseFile"
+    }
+
 /-- Select which user-facing Lean diagnostic severities a request may display. -/
 inductive DiagnosticScope where
   | errors
@@ -207,6 +231,7 @@ structure Request where
   workspaceId? : Option WorkspaceId := none
   workspaceMode? : Option Beam.Workspace.InitMode := none
   clientRequestId? : Option String := none
+  wrapperLease? : Option WrapperLeaseContext := none
   cancelRequestId? : Option String := none
   root? : Option String := none
   path? : Option String := none
@@ -250,8 +275,16 @@ def Op.workspaceScope : Op → WorkspaceScope
   | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release
   | .initWorkspace | .dropWorkspace => .required
 
+/-- Whether an operation participates in wrapper lease fencing and active-request tracking. -/
+def Op.acceptsWrapperLease : Op → Bool
+  | .cancel | .shutdown => false
+  | .ensure | .openDocs | .updateFile | .syncFile | .refreshFile | .close | .runAt | .hover
+  | .signatureHelp | .definition | .references | .documentSymbols | .workspaceSymbols
+  | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release | .initWorkspace
+  | .listWorkspaces | .dropWorkspace | .stats | .resetStats => true
+
 private def Op.optionalRequestFields (op : Op) : Array String :=
-  #["clientRequestId"] ++
+  #["clientRequestId", "wrapperLease"] ++
   (match op.workspaceScope with
   | .none => #[]
   | .optional | .required => #["workspaceId"]) ++
@@ -306,6 +339,7 @@ private def Request.optionalJsonFields (req : Request) : List (String × Json) :
   optionalJsonField "workspaceId" req.workspaceId? ++
   optionalJsonField "workspaceMode" req.workspaceMode? ++
   optionalJsonField "clientRequestId" req.clientRequestId? ++
+  optionalJsonField "wrapperLease" req.wrapperLease? ++
   optionalJsonField "cancelRequestId" req.cancelRequestId? ++
   optionalJsonField "root" req.root? ++
   optionalJsonField "path" req.path? ++
@@ -360,6 +394,10 @@ def Request.validateFields (req : Request) : Except String Unit := do
     throw s!"broker op '{req.op.key}' accepts no unrelated fields: {String.intercalate ", " unexpected.toList}"
   if !req.op.usesBackend && req.backend != .lean then
     throw s!"broker op '{req.op.key}' does not select a backend"
+  if req.wrapperLease?.isSome && req.clientRequestId?.isNone then
+    throw "broker requests carrying 'wrapperLease' require 'clientRequestId'"
+  if req.wrapperLease?.isSome && !req.op.acceptsWrapperLease then
+    throw s!"broker op '{req.op.key}' does not accept 'wrapperLease'"
   if (req.op == .stats || req.op == .openDocs) && req.root?.isSome && req.workspaceId?.isNone then
     throw s!"broker op '{req.op.key}' requires 'workspaceId' when 'root' is present"
 
@@ -383,6 +421,7 @@ instance : FromJson Request where
     let workspaceId? ← optionalField? (α := WorkspaceId) j "workspaceId"
     let workspaceMode? ← optionalField? (α := Beam.Workspace.InitMode) j "workspaceMode"
     let clientRequestId? ← optionalField? (α := String) j "clientRequestId"
+    let wrapperLease? ← optionalField? (α := WrapperLeaseContext) j "wrapperLease"
     let cancelRequestId? ← optionalField? (α := String) j "cancelRequestId"
     let root? ← optionalField? (α := String) j "root"
     let path? ← optionalField? (α := String) j "path"
@@ -410,7 +449,7 @@ instance : FromJson Request where
     let handle? ← optionalField? (α := Handle) j "handle"
     let codeAction? ← optionalField? (α := Lsp.CodeAction) j "codeAction"
     let request : Request := {
-      op, backend, workspaceId?, workspaceMode?, clientRequestId?, cancelRequestId?,
+      op, backend, workspaceId?, workspaceMode?, clientRequestId?, wrapperLease?, cancelRequestId?,
       root?, path?, version?, line?, character?, endLine?, endCharacter?,
       text?, query?, includeDeclaration?, kinds?, suggest?, storeHandle?,
       linear?, mode?, compact?, ppFormat?, diagnosticScope?, diagnosticsInResult?,

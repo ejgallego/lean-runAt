@@ -12,55 +12,50 @@ open Lean
 
 namespace Beam.Cli
 
-def trimLine (text : String) : String :=
-  Beam.trimLine text
-
-def readCmdTrim (cmd : String) (args : Array String := #[]) (cwd? : Option System.FilePath := none) : IO String := do
-  Beam.readCmdTrim cmd args cwd?
-
-def commandAvailable (cmd : String) (args : Array String := #["--help"]) : IO Bool := do
-  Beam.commandAvailable cmd args
-
-def killCommand : IO String := do
-  Beam.killCommand
-
-def pidAlive (pid : Nat) : IO Bool := do
-  Beam.pidAlive pid
-
 private def lockPollMs : Nat :=
   100
 
-private def readLockPid? (lockDir : System.FilePath) : IO (Option Nat) := do
+private structure LockOwner where
+  pid : Nat
+  pidDomain? : Option String
+
+private def readRegularFile? (path : System.FilePath) : IO (Option String) := do
   try
-    let pidPath := lockDir / "pid"
-    if ← Beam.regularNonSymlinkFile pidPath then
-      let text ← IO.FS.readFile pidPath
-      pure <| trimLine text |>.toNat?
+    if ← Beam.regularNonSymlinkFile path then
+      pure <| some (Beam.trimLine (← IO.FS.readFile path))
     else
       pure none
   catch _ =>
     pure none
 
-private def lockOwnerDescription : Option Nat → String
-  | some pid => s!"pid {pid}"
+private def readLockOwner? (lockDir : System.FilePath) : IO (Option LockOwner) := do
+  let some pidText ← readRegularFile? (lockDir / "pid")
+    | return none
+  let some pid := pidText.toNat?
+    | return none
+  let pidDomain? ← readRegularFile? (lockDir / "pid-domain")
+  pure <| some { pid, pidDomain? := pidDomain?.filter (fun domain => !domain.isEmpty) }
+
+private def lockOwnerDescription : Option LockOwner → String
+  | some owner => s!"pid {owner.pid}"
   | none => "unknown owner"
 
 private def lockTimeoutMessage
     (lockDir : System.FilePath)
-    (ownerPid? : Option Nat)
+    (owner? : Option LockOwner)
     (waitedMs timeoutMs : Nat) : String :=
   s!"timed out after {waitedMs} ms waiting for Beam lock {lockDir}; " ++
-    s!"lock owner: {lockOwnerDescription ownerPid?}; timeout: {timeoutMs} ms"
+    s!"lock owner: {lockOwnerDescription owner?}; timeout: {timeoutMs} ms"
 
-private def removeStaleLock? (lockDir : System.FilePath) (ownerPid? : Option Nat) : IO Bool := do
-  match ownerPid? with
-  | some ownerPid =>
-      if !(← pidAlive ownerPid) then
+private def removeStaleLock? (lockDir : System.FilePath) (owner? : Option LockOwner) : IO Bool := do
+  match owner? with
+  | some owner =>
+      match ← (Beam.RecordedPid.mk owner.pid owner.pidDomain?).observe with
+      | .local false =>
         if ← lockDir.pathExists then
           IO.FS.removeDirAll lockDir
         pure true
-      else
-        pure false
+      | .invalid | .local true | .differentDomain | .unknownDomain => pure false
   | none =>
       pure false
 
@@ -83,6 +78,8 @@ private partial def acquireLockCore
   if acquired then
     try
       IO.FS.writeFile (lockDir / "pid") s!"{selfPid}\n"
+      if let some pidDomain := ← Beam.currentPidDomain? then
+        IO.FS.writeFile (lockDir / "pid-domain") s!"{pidDomain}\n"
       return
     catch error =>
       try
@@ -94,14 +91,14 @@ private partial def acquireLockCore
             s!"also failed to remove the acquired lock: {cleanupError}"
       throw error
   else
-    let ownerPid? ← readLockPid? lockDir
-    if ← removeStaleLock? lockDir ownerPid? then
+    let owner? ← readLockOwner? lockDir
+    if ← removeStaleLock? lockDir owner? then
       acquireLockCore lockDir timeoutMs? waitedMs
     else
       match timeoutMs? with
       | some timeoutMs =>
           if waitedMs >= timeoutMs then
-            throw <| IO.userError (lockTimeoutMessage lockDir ownerPid? waitedMs timeoutMs)
+            throw <| IO.userError (lockTimeoutMessage lockDir owner? waitedMs timeoutMs)
       | none =>
           pure ()
       IO.sleep lockPollMs.toUInt32
@@ -138,11 +135,5 @@ def withLockTimeout (lockDir : System.FilePath) (timeoutMs : Nat) (act : IO α) 
     act
   finally
     releaseLock lockDir
-
-def currentPidNamespace? : IO (Option String) := do
-  Beam.currentPidNamespace?
-
-def utcTimestamp : IO String := do
-  Beam.utcTimestamp
 
 end Beam.Cli

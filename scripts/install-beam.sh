@@ -453,19 +453,35 @@ ensure_install_root_ready() {
 release_install_lock() {
   if [ "$install_lock_owned" -eq 1 ]; then
     if [ -d "$install_lock_dir" ]; then
-      rm -f -- "$install_lock_dir/pid"
+      rm -f -- "$install_lock_dir/pid" "$install_lock_dir/pid-domain"
       rmdir "$install_lock_dir" 2>/dev/null || true
     fi
     install_lock_owned=0
   fi
 }
 
+current_pid_domain() {
+  case "$(uname -s)" in
+    Linux)
+      readlink /proc/self/ns/pid 2>/dev/null || true
+      ;;
+    Darwin)
+      printf '%s\n' 'host:Darwin'
+      ;;
+  esac
+}
+
 acquire_install_lock() {
+  local pid_domain=""
   require_path_within "$install_lock_dir" "$install_root" "install lock"
   if mkdir "$install_lock_dir"; then
     install_lock_owned=1
     trap 'release_install_lock' EXIT
     printf '%s\n' "$$" >"$install_lock_dir/pid"
+    pid_domain="$(current_pid_domain)"
+    if [ -n "$pid_domain" ]; then
+      printf '%s\n' "$pid_domain" >"$install_lock_dir/pid-domain"
+    fi
   else
     die "another Beam install appears to be running: $install_lock_dir"
   fi

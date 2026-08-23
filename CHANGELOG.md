@@ -93,6 +93,10 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 - Install and prune control-file reads now reject non-regular or symlinked paths, and a failed lock
   owner-PID write removes the lock directory acquired by that process.
 - `lean-beam ensure --hold` now exits cleanly and promptly after `SIGINT`.
+- Wrapper-managed daemons now remain alive for overlapping requests without a fixed 30-second
+  cutoff, fence retired leases against resurrection, and recover safely from killed or replacement
+  owners in PID-isolated runners
+  ([#241](https://github.com/leanprover/lean-beam/pull/241), @ejgallego).
 - `lean-save` and `lean-close-save` now stage and commit complete artifact sets, preserving prior
   outputs on reported failure or cancellation and preventing same-worker saves from mixing files
   ([#217](https://github.com/leanprover/lean-beam/pull/217), @ejgallego).

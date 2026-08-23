@@ -61,6 +61,7 @@ if [ -z "${BEAM_INSTALL_BUNDLE_DIR:-}" ]; then
 fi
 busy_pid=""
 hold_pid=""
+heartbeat_follower_pid=""
 removed_root_pid=""
 removed_root_err=""
 
@@ -69,6 +70,10 @@ cleanup() {
   if [ -n "$busy_pid" ]; then
     kill "$busy_pid" > /dev/null 2>&1 || true
     wait "$busy_pid" 2>/dev/null || true
+  fi
+  if [ -n "$heartbeat_follower_pid" ]; then
+    kill "$heartbeat_follower_pid" > /dev/null 2>&1 || true
+    wait "$heartbeat_follower_pid" 2>/dev/null || true
   fi
   if [ -n "$removed_root_pid" ]; then
     kill "$removed_root_pid" > /dev/null 2>&1 || true
@@ -133,20 +138,140 @@ if ! kill -0 "$hold_pid" 2>/dev/null; then
 fi
 hold_json="$(cat "$tmp9/hold.out")"
 assert_json_field_equals "ensure --hold response" "$hold_json" ok true "$tmp9/hold.err"
-stop_hold_process true
+
+lease_dir="$tmp9/.beam/wrapper-leases"
+retirement_path="$tmp9/.beam/daemon-retirement.json"
+
+# A retirement marker is local control state, but its lease field must still be constrained to the
+# wrapper-leases directory before cleanup code joins or removes that path.
+outside_lease="$tmp9/.beam/outside.lease"
+printf 'preserve\n' > "$outside_lease"
+retirement_daemon_id="$(read_json_field "$hold_registry" daemonId)"
+RETIREMENT_PATH="$retirement_path" DAEMON_ID="$retirement_daemon_id" python3 - <<'PY'
+import json, os
+
+with open(os.environ["RETIREMENT_PATH"], "w") as f:
+    json.dump({"daemonId": os.environ["DAEMON_ID"], "ownerLeaseFile": "../outside.lease"}, f)
+    f.write("\n")
+PY
+"$beam_script" --root "$tmp9" ensure lean > /dev/null
+if [ ! -f "$outside_lease" ]; then
+  echo "expected an invalid retirement owner path not to remove a file outside wrapper-leases" >&2
+  exit 1
+fi
+if [ -e "$retirement_path" ]; then
+  echo "expected an invalid retirement owner path to be discarded" >&2
+  cat "$retirement_path" >&2
+  exit 1
+fi
+rm -f "$outside_lease"
+
+# A reused-daemon request must stop if its heartbeat writer fails; otherwise the owner can prune its
+# expired lease while the request is still using the daemon. Block only the follower's atomic tmp
+# path so the starter heartbeat remains healthy.
+owner_lease="$(find "$lease_dir" -maxdepth 1 -type f -name '*.lease' -print | sed -n '1p')"
+if [ -z "$owner_lease" ]; then
+  echo "expected the foreground owner to hold a wrapper lease" >&2
+  exit 1
+fi
+"$beam_script" --root "$tmp9" ensure --hold \
+  > "$tmp9/heartbeat-follower.out" 2> "$tmp9/heartbeat-follower.err" &
+heartbeat_follower_pid="$!"
+heartbeat_follower_lease=""
+for _ in $(seq 1 100); do
+  heartbeat_follower_lease="$(find "$lease_dir" -maxdepth 1 -type f -name '*.lease' \
+    ! -path "$owner_lease" -print | sed -n '1p')"
+  if [ -s "$tmp9/heartbeat-follower.out" ] && [ -n "$heartbeat_follower_lease" ]; then
+    break
+  fi
+  sleep 0.05
+done
+if [ ! -s "$tmp9/heartbeat-follower.out" ] || [ -z "$heartbeat_follower_lease" ]; then
+  echo "expected the heartbeat-failure follower to acquire a lease and print ensure output" >&2
+  cat "$tmp9/heartbeat-follower.err" >&2
+  exit 1
+fi
+heartbeat_tmp="${heartbeat_follower_lease%.lease}.tmp"
+for _ in $(seq 1 100); do
+  if mkdir "$heartbeat_tmp" 2>/dev/null; then
+    break
+  fi
+  sleep 0.01
+done
+if [ ! -d "$heartbeat_tmp" ]; then
+  echo "could not block the follower heartbeat tmp path" >&2
+  exit 1
+fi
+if ! wait_for_exit "$heartbeat_follower_pid" "wrapper with failed heartbeat writer" 100 0.05; then
+  cat "$tmp9/heartbeat-follower.err" >&2
+  exit 1
+fi
+set +e
+wait "$heartbeat_follower_pid"
+heartbeat_follower_status="$?"
+set -e
+heartbeat_follower_pid=""
+rmdir "$heartbeat_tmp"
+if [ "$heartbeat_follower_status" -eq 0 ]; then
+  echo "expected a reused-daemon wrapper with a failed heartbeat writer to fail" >&2
+  cat "$tmp9/heartbeat-follower.err" >&2
+  exit 1
+fi
+
+# Neither an unreadable registry nor an unreadable sibling lease may make the starter leave its
+# retirement loop. Restore each observation independently and require the owner to remain alive
+# until the lease directory is provably drained.
+unreadable_lease="$lease_dir/unreadable-sibling.lease"
+mkdir "$unreadable_lease"
+mv "$hold_registry" "$hold_registry.saved"
+mkdir "$hold_registry"
+kill -INT "$hold_pid"
+sleep 0.5
+if ! kill -0 "$hold_pid" 2>/dev/null; then
+  echo "expected an owner to stay alive while registry state is unreadable" >&2
+  cat "$tmp9/hold.err" >&2
+  exit 1
+fi
+rmdir "$hold_registry"
+mv "$hold_registry.saved" "$hold_registry"
+sleep 0.5
+if ! kill -0 "$hold_pid" 2>/dev/null; then
+  echo "expected an owner to stay alive while a sibling lease is unreadable" >&2
+  cat "$tmp9/hold.err" >&2
+  exit 1
+fi
+rmdir "$unreadable_lease"
+if ! wait_for_exit "$hold_pid" "owner after registry and lease recovery" 100 0.05; then
+  cat "$tmp9/hold.err" >&2
+  exit 1
+fi
+set +e
+wait "$hold_pid"
+hold_status="$?"
+set -e
+hold_pid=""
+if [ "$hold_status" -ne 0 ]; then
+  echo "expected the owner to exit cleanly after registry and lease recovery, got $hold_status" >&2
+  cat "$tmp9/hold.err" >&2
+  exit 1
+fi
 "$beam_script" --root "$tmp9" shutdown > /dev/null
 
 stale_lease_dir="$tmp9/.beam/wrapper-leases"
 stale_lease="$stale_lease_dir/stale-dead-wrapper.lease"
 mkdir -p "$stale_lease_dir"
-pid_namespace="$(readlink /proc/self/ns/pid 2>/dev/null || true)"
-LEASE_PATH="$stale_lease" PID_NAMESPACE="$pid_namespace" python3 - <<'PY'
-import json, os
+case "$(uname -s)" in
+  Linux) pid_domain="$(readlink /proc/self/ns/pid 2>/dev/null || true)" ;;
+  Darwin) pid_domain="host:Darwin" ;;
+  *) pid_domain="" ;;
+esac
+LEASE_PATH="$stale_lease" PID_DOMAIN="$pid_domain" python3 - <<'PY'
+import json, os, time
 
 metadata = {
     "pid": 999999999,
-    "pidNamespace": os.environ["PID_NAMESPACE"] or None,
-    "createdAt": "test",
+    "pidDomain": os.environ["PID_DOMAIN"] or None,
+    "heartbeatMonoNanos": time.monotonic_ns(),
 }
 with open(os.environ["LEASE_PATH"], "w") as f:
     json.dump(metadata, f)
@@ -155,8 +280,99 @@ PY
 
 "$beam_script" --root "$tmp9" ensure lean > /dev/null
 if [ -e "$stale_lease" ]; then
-  echo "expected wrapper ensure to remove a stale same-namespace wrapper lease" >&2
+  echo "expected wrapper ensure to remove a stale same-domain wrapper lease" >&2
   cat "$stale_lease" >&2
+  exit 1
+fi
+"$beam_script" --root "$tmp9" shutdown > /dev/null
+
+malformed_lease="$stale_lease_dir/malformed-wrapper.lease"
+printf '{\n' > "$malformed_lease"
+"$beam_script" --root "$tmp9" ensure lean > /dev/null
+if [ -e "$malformed_lease" ]; then
+  echo "expected wrapper ensure to prune a malformed wrapper lease" >&2
+  cat "$malformed_lease" >&2
+  exit 1
+fi
+"$beam_script" --root "$tmp9" shutdown > /dev/null
+
+rm -f "$retirement_path"
+mkdir "$retirement_path"
+set +e
+"$beam_script" --root "$tmp9" ensure lean > "$tmp9/retirement-read.out" 2> "$tmp9/retirement-read.err"
+retirement_read_status="$?"
+set -e
+if [ "$retirement_read_status" -eq 0 ]; then
+  echo "expected an unreadable retirement fence to fail closed" >&2
+  cat "$tmp9/retirement-read.out" >&2
+  cat "$tmp9/retirement-read.err" >&2
+  exit 1
+fi
+if [ ! -d "$retirement_path" ]; then
+  echo "expected an unreadable retirement fence to remain in place" >&2
+  exit 1
+fi
+rmdir "$retirement_path"
+"$beam_script" --root "$tmp9" ensure lean > /dev/null
+"$beam_script" --root "$tmp9" shutdown > /dev/null
+
+# If the daemon started by a foreground owner dies before retirement, that wrapper must not poll
+# forever waiting for stats from a process that is provably gone. A later wrapper should replace
+# the dead registry generation normally.
+rm -f "$tmp9/dead-daemon-hold.out" "$tmp9/dead-daemon-hold.err"
+"$beam_script" --root "$tmp9" ensure --hold \
+  > "$tmp9/dead-daemon-hold.out" 2> "$tmp9/dead-daemon-hold.err" &
+hold_pid="$!"
+for _ in $(seq 1 200); do
+  if [ -s "$tmp9/dead-daemon-hold.out" ] && [ -f "$hold_registry" ]; then
+    break
+  fi
+  sleep 0.05
+done
+if [ ! -s "$tmp9/dead-daemon-hold.out" ] || [ ! -f "$hold_registry" ]; then
+  echo "expected the crash-retirement owner to start a daemon" >&2
+  cat "$tmp9/dead-daemon-hold.err" >&2
+  exit 1
+fi
+dead_daemon_pid="$(read_json_field "$hold_registry" pid)"
+dead_daemon_id="$(read_json_field "$hold_registry" daemonId)"
+kill -KILL "$dead_daemon_pid"
+dead_daemon_stopped="false"
+for _ in $(seq 1 100); do
+  if ! kill -0 "$dead_daemon_pid" 2>/dev/null; then
+    dead_daemon_stopped="true"
+    break
+  fi
+  if ps -o stat= -p "$dead_daemon_pid" 2>/dev/null | grep -Eq '^[[:space:]]*Z'; then
+    dead_daemon_stopped="true"
+    break
+  fi
+  sleep 0.05
+done
+if [ "$dead_daemon_stopped" != "true" ]; then
+  echo "expected daemon $dead_daemon_pid to stop before owner retirement" >&2
+  exit 1
+fi
+kill -INT "$hold_pid"
+if ! wait_for_exit "$hold_pid" "owner of a provably dead daemon" 100 0.05; then
+  cat "$tmp9/dead-daemon-hold.err" >&2
+  exit 1
+fi
+set +e
+wait "$hold_pid"
+dead_daemon_owner_status="$?"
+set -e
+hold_pid=""
+if [ "$dead_daemon_owner_status" -ne 0 ]; then
+  echo "expected the owner of a provably dead daemon to exit cleanly, got $dead_daemon_owner_status" >&2
+  cat "$tmp9/dead-daemon-hold.err" >&2
+  exit 1
+fi
+"$beam_script" --root "$tmp9" ensure lean > /dev/null
+replacement_daemon_id="$(read_json_field "$hold_registry" daemonId)"
+if [ "$replacement_daemon_id" = "$dead_daemon_id" ]; then
+  echo "expected the next wrapper to replace the dead daemon generation" >&2
+  cat "$hold_registry" >&2
   exit 1
 fi
 "$beam_script" --root "$tmp9" shutdown > /dev/null

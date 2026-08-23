@@ -110,8 +110,16 @@ Current Beam coverage includes:
   [tests/test-beam-fast.sh](../tests/test-beam-fast.sh)
 - wrapper coverage through [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh), which aggregates focused probe, runtime, sync/save, handle, and diagnostic slices
 - focused daemon lifecycle coverage in [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh),
-  including self-termination after the project worktree disappears
-- Linux-only PID-isolated sandbox wrapper coverage in [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)
+  including valid same-domain and malformed stale-lease cleanup, heartbeat-writer failure,
+  retirement-fence recovery, bounded recovery when the started daemon dies before retirement,
+  cross-domain shutdown PID non-interference, fail-closed unreadable registry, lease, and
+  retirement-fence observations, and
+  self-termination after the project worktree disappears
+- Linux-only PID-isolated sandbox wrapper coverage in [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh),
+  including followers active beyond 30 seconds, stop/resume across heartbeat revocation,
+  daemon-admitted request draining, killed-client disconnect cancellation, killed-follower heartbeat
+  expiry, retirement recovery, obsolete-owner release across daemon replacement, distinct
+  generation identity, and concurrent cold-start wrapper admission
 - zero-build save replay, structured-setup support, batch-only-argument rejection, and stale-save
   race coverage in
   [tests/test-beam-save-olean.sh](../tests/test-beam-save-olean.sh)

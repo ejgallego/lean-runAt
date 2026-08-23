@@ -84,6 +84,19 @@ def checkCancellationAndLifetime : IO Unit := do
     runOnce
     checkStaleHandleIsolation server req
 
+    let anonymousHandleRef ← IO.mkRef (none : Option Beam.Broker.RequestHandle)
+    let (anonymousResp, _) ← server.dispatchRequestWithHandle
+      { req with clientRequestId? := none } (fun handle => do
+        anonymousHandleRef.set (some handle)
+        unless ← handle.cancel do
+          throw <| IO.userError "anonymous broker request handle was not cancellable"
+        pure true)
+    checkCancelledResponse anonymousResp
+    let some anonymousHandle ← anonymousHandleRef.get
+      | throw <| IO.userError "anonymous broker request handle was not captured"
+    if ← anonymousHandle.cancel then
+      throw <| IO.userError "anonymous broker request handle remained active after dispatch"
+
     let rejectedHandleRef ← IO.mkRef (none : Option Beam.Broker.RequestHandle)
     let (rejectedResp, _) ← server.dispatchRequestWithHandle req (fun handle => do
       rejectedHandleRef.set (some handle)

@@ -8,12 +8,13 @@ import Lean
 import Beam.Broker.Client
 import Beam.Cli.Args
 import Beam.Cli.DaemonManager
-import Beam.Cli.Lock
 import Beam.Cli.Output
 import Beam.Cli.Project
 import Beam.Daemon.Debug
+import Beam.Daemon.Paths
 import Beam.Feedback
 import Beam.Feedback.Broker
+import Beam.System
 import Beam.Version
 
 open Lean
@@ -119,7 +120,7 @@ private def collectNonConfidential
     (home : System.FilePath)
     (root? : Option System.FilePath)
     (warnings : Array String) : IO Beam.Feedback.Collection := do
-  let generatedAt ← utcTimestamp
+  let generatedAt ← Beam.utcTimestamp
   let identity ← versionIdentityJson home
   let (stats, openDocs, daemon, warnings) ←
     match root? with
@@ -127,7 +128,7 @@ private def collectNonConfidential
         pure (Json.null, Json.null, Json.null,
           warnings.push "could not infer project root; daemon debug context was not collected")
     | some root => do
-        let daemon ← daemonDebugContextJson root
+        let daemon ← Beam.Daemon.daemonDebugContextJson root
         let warnings := warnings ++ Beam.Daemon.daemonDebugWarnings daemon
         let (stats, openDocs, warnings) ← collectDaemonPayload root warnings
         pure (stats, openDocs, daemon, warnings)
@@ -145,7 +146,7 @@ private def collectNonConfidential
 
 private def collectConfidential : IO Beam.Feedback.Collection := do
   pure {
-    generatedAt := ← utcTimestamp
+    generatedAt := ← Beam.utcTimestamp
     data := Json.mkObj [("identity", confidentialIdentityJson)]
   }
 
@@ -201,7 +202,7 @@ def run (home : System.FilePath) (cliOpts : CliOptions) (args : List String) : I
     if Beam.Feedback.Internal.needsEvidenceRoots input then
       match root? with
       | some root => do
-          let control ← controlDir root
+          let control ← Beam.Daemon.controlDir root
           pure #[root, control]
       | none => pure #[]
     else

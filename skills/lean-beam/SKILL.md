@@ -126,6 +126,9 @@ Core workflow contract:
   before the next command that uses the Lean server; `lean-beam refresh` does not restart it
 - treat wrapper `stderr` as human-facing only; use stdout JSON or `beam-client request-stream`
   for machine-readable automation
+- when `beam-client` targets a wrapper-managed daemon in a PID-reaping command runner, keep one
+  `lean-beam ensure --hold` process active for the raw request lifetime; raw broker requests do not
+  carry wrapper leases, while a separately launched standalone daemon has its own process owner
 - `lean-beam feedback-report` and `beam_feedback_report` return a report to the caller; Beam does not
   upload or submit it; before posting non-confidential output, review caller-authored narrative,
   request/response payloads, local paths, Beam stats, open-file data, daemon logs/incidents, and
@@ -308,8 +311,14 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 - wrapper commands talk to the per-project Beam daemon over localhost TCP; they are not direct in-process Lean calls
 - `lean-beam ensure --hold` prints the usual JSON ensure response on stdout, keeps the wrapper
   process alive until interrupted, and is only for environments that reap background daemons when
-  each command exits; later wrappers recover from same-namespace stale lease files left by killed
-  wrapper processes
+  each command exits; later wrappers with matching PID-domain identity recover killed leases from
+  PID liveness, while unknown or cross-namespace killed leases recover after their heartbeat
+  expires, normally after about five seconds; expiry revokes that lease, already-admitted broker work
+  keeps the daemon owner alive until it drains, and a resumed or heartbeat-failed wrapper fails or
+  cancels instead of reusing the revoked lease; if the exact daemon started by the foreground owner
+  dies, owner retirement releases after same-domain PID liveness or zombie state proves it is gone
+- the wrapper retirement fence closes wrapper admission; keep `lean-beam ensure --hold` active when
+  an unfenced `beam-client` targets that managed daemon in a PID-reaping command runner
 
 `lean-beam` is more than a one-shot probe:
 

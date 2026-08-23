@@ -159,6 +159,7 @@ private def fakeServerWithLeanSession
     lean := { nextEpoch := 1, session? := some session }
   }
   pure {
+    root
     state := ← Std.Mutex.new {
       bootstrapConfig := config
       workspaces := Std.TreeMap.empty.insert fixtureWorkspaceId workspace

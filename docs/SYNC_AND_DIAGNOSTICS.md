@@ -127,6 +127,12 @@ observed it. A request may produce any number of `fileProgress` and `diagnostic`
 by exactly one terminal `response`; the response is last and no later message belongs to that
 request.
 
+When `beam-client` targets the per-project daemon managed by `lean-beam` in a PID-reaping command
+runner, keep one `lean-beam ensure --hold` process active for the request lifetime. Raw broker
+requests do not carry wrapper leases, so the wrapper retirement fence does not own their admission.
+A separately launched standalone daemon has its own explicit process owner and does not need the
+wrapper hold.
+
 Every stream variant uses the same `kind`, `payload`, and optional correlation envelope. When the
 request supplies `clientRequestId`, each message repeats it on that outer stream envelope:
 

@@ -8,6 +8,7 @@ import Lean
 import Beam.Cli.RuntimeBundle.Fingerprint
 import Beam.Cli.RuntimeBundle.Paths
 import Beam.Path
+import Beam.System
 
 open Lean
 
@@ -121,6 +122,6 @@ def writeBundleMetadata (bundleDir : System.FilePath) (toolchain srcHash : Strin
   if let some parent := path.parent then
     IO.FS.createDirAll parent
   IO.FS.writeFile path
-    ((bundleMetadataJson toolchain srcHash fingerprint workspace (← utcTimestamp)).pretty ++ "\n")
+    ((bundleMetadataJson toolchain srcHash fingerprint workspace (← Beam.utcTimestamp)).pretty ++ "\n")
 
 end Beam.Cli
