@@ -379,6 +379,23 @@ private def runTodoCodeActionResolveSmoke
   expectErrCode staleResp "contentModified"
   expectVersionMismatchData "stale code_action_resolve" staleResp 0 version
 
+  let otherPath := "tests/scenario/docs/CommandA.lean"
+  let otherVersion ← updateVersion endpoint root otherPath
+  let mismatchedSourceResp ← runClient endpoint {
+    op := .codeActionResolve
+    root? := some root.toString
+    path? := some otherPath
+    version? := some otherVersion
+    codeAction? := some action
+  }
+  expectErrCode mismatchedSourceResp "invalidParams"
+  let mismatchMessage ←
+    requireErrorMessage "code_action_resolve source mismatch" mismatchedSourceResp
+  expectStringContains
+    "code_action_resolve source mismatch"
+    mismatchMessage
+    "not requested document"
+
 private def runReportedOnlyDiagnosticSmoke
     (endpoint : Beam.Broker.Endpoint)
     (root : System.FilePath) : IO Unit := do
@@ -608,6 +625,24 @@ private def runRequestAndGoalsSmoke
   let afterGoals := ← IO.ofExcept <| goalsAfter.getObjVal? "goals"
   if afterGoals != Json.arr #[] then
     throw <| IO.userError s!"expected no goals after trivial, got {afterGoals.compress}"
+
+  let speculativeGoalsResp ← runClient endpoint {
+    op := .goals
+    root? := some root.toString
+    path? := some proofPath
+    version? := some proofVersion
+    line? := some 1
+    character? := some 2
+    text? := some "exact trivial"
+    mode? := some .before
+  }
+  expectErrCode speculativeGoalsResp "invalidParams"
+  let speculativeGoalsMessage ←
+    requireErrorMessage "lean goals speculative text" speculativeGoalsResp
+  expectStringContains
+    "lean goals speculative text"
+    speculativeGoalsMessage
+    "does not accept speculative text"
 
 private def runCancelSmoke
     (endpoint : Beam.Broker.Endpoint)
