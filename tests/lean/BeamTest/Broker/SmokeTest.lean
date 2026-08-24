@@ -722,6 +722,12 @@ private def runWorkerExitSmoke
   killLeanServerForEndpoint endpoint root
   let (slowResp, slowEvents) ← awaitTask "worker-exit slow run_at" slowTask
   expectErrCode slowResp "workerExited"
+  let some workerExitError := slowResp.error?
+    | throw <| IO.userError s!"expected worker-exit error, got {(toJson slowResp).compress}"
+  unless workerExitError.message.contains "Lean backend failed after startup" do
+    throw <| IO.userError s!"expected worker-exit phase diagnostic, got {(toJson slowResp).compress}"
+  unless workerExitError.message.contains "backend stderr tail (last 16384 bytes):" do
+    throw <| IO.userError s!"expected worker-exit stderr diagnostic, got {(toJson slowResp).compress}"
   expectProgressIds "worker-exit run_at progress" slowEvents workerExitRequestId
 
   let commandPath := "tests/scenario/docs/CommandA.lean"

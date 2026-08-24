@@ -310,6 +310,8 @@ def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit := do
       printInstallLayout
   | "install-manifest" :: payloadHash :: sourceCommitArg :: createdWithToolchains =>
       printInstallManifest payloadHash sourceCommitArg createdWithToolchains
+  | "install-manifest-with-source-commit" :: manifestPath :: sourceCommitArg :: [] =>
+      printInstallManifestWithSourceCommit (System.FilePath.mk manifestPath) sourceCommitArg
   | "install-runtime-validate" :: path :: [] =>
       validateInstalledRuntimeForReuse (System.FilePath.mk path)
   | "mcp-config" :: [] =>

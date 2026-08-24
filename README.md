@@ -125,9 +125,9 @@ Setup details, validated and compatible toolchains, agent-skill installation, MC
 direct CLI examples, installer locations, overrides, and offline advice live in
 [docs/SETUP.md](docs/SETUP.md).
 
-Beam retains prior immutable runtimes so updates remain atomic. Use `lean-beam prune` to preview
-old installed state and follow the [prune guide](docs/SETUP.md#prune-old-installed-state) before
-applying cleanup.
+Beam retains prior immutable runtime payloads so updates remain atomic. Use `lean-beam prune` to
+preview old installed state and follow the [prune guide](docs/SETUP.md#prune-old-installed-state)
+before applying cleanup.
 
 Lean Beam fully validates exact toolchains listed in
 [`validated-lean-toolchains`](validated-lean-toolchains) and locally qualifies canonical RC/patch

@@ -978,6 +978,7 @@ private def stubbornSession
     ]
   }
   let pending ← Std.Mutex.new ({} : Std.TreeMap Lean.JsonRpc.RequestID PendingRequest)
+  let stderrCapture ← startBackendStderrCapture proc.stderr
   pure {
     workspaceId
     backend := .lean
@@ -987,6 +988,7 @@ private def stubbornSession
     proc
     stdin := IO.FS.Stream.ofHandle proc.stdin
     stdout := IO.FS.Stream.ofHandle proc.stdout
+    stderrCapture
     pending
   }
 

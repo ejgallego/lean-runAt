@@ -143,7 +143,8 @@ Current Beam coverage includes:
   [tests/test-beam-save-olean.sh](../tests/test-beam-save-olean.sh)
 - install flow, installed runtime layout, manifest metadata, exact/compatible toolchain selection,
   shell/Lean owned-root marker parity, required artifact and executable-mode validation,
-  content-addressed runtime reuse, schema-2 reuse rejection and cleanup compatibility,
+  content-addressed runtime reuse, reused-runtime source-commit refresh and clearing, schema-2 reuse
+  rejection and cleanup compatibility,
   `validated-toolchains`,
   `compatible-release-lines`, `doctor`, installed-state pruning, and installed MCP wrapper coverage
   in [tests/test-beam-install.sh](../tests/test-beam-install.sh), with focused prune safety and

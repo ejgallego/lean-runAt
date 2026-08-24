@@ -217,17 +217,25 @@ def printCompatibleReleaseLines (home : System.FilePath) : IO Unit := do
 def printInstallLayout : IO Unit := do
   printJsonLine (toJson installLayout)
 
+private def sourceCommitArg? (sourceCommitArg : String) : Option String :=
+  if sourceCommitArg == "-" then none else some sourceCommitArg
+
 def printInstallManifest (payloadHash : String) (sourceCommitArg : String)
     (createdWithToolchains : List String) : IO Unit := do
   if createdWithToolchains.isEmpty then
     throw <| IO.userError
       "usage: beam install-manifest <payload-hash> <source-commit|-> <creation-toolchain...>"
-  let sourceCommit? :=
-    if sourceCommitArg == "-" then
-      none
-    else
-      some sourceCommitArg
-  printJsonLine (installManifestJson payloadHash sourceCommit? createdWithToolchains)
+  printJsonLine (installManifestJson payloadHash (sourceCommitArg? sourceCommitArg)
+    createdWithToolchains)
+
+def printInstallManifestWithSourceCommit
+    (manifestPath : System.FilePath)
+    (sourceCommitArg : String) : IO Unit := do
+  let manifest ← readInstallManifest manifestPath
+  unless manifest.schemaVersion == installManifestSchemaVersion do
+    throw <| IO.userError
+      s!"cannot refresh source commit in install manifest schemaVersion {manifest.schemaVersion}"
+  printJsonLine <| toJson { manifest with sourceCommit := sourceCommitArg? sourceCommitArg }
 
 def printMcpConfig (home : System.FilePath) (opts : CliOptions) : IO Unit := do
   let root ← projectRoot opts .lean

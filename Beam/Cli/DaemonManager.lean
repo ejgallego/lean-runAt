@@ -1205,9 +1205,10 @@ def withProjectDaemonOwner
   -- `.beam` state for a previously unseen toolchain.
   preparePrivateControlDir controlDir
   let desired ← desiredConfig home root backend
+  -- Allocate all fallible owner bookkeeping before the child and registry generation exist.
+  let exitCodeRef ← IO.mkRef (none : Option UInt32)
   let owned ← withProjectControl root (explicitControlDir? := some controlDir) fun control =>
     startOwnedProjectDaemon control desired backend opts
-  let exitCodeRef ← IO.mkRef (none : Option UInt32)
   try
     act {
         client := owned.client

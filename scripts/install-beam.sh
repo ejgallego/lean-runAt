@@ -1275,6 +1275,30 @@ write_install_manifest() {
   "$beam_cli" install-manifest "$payload_id" "$source_commit_arg" "$@" >"$dest"
 }
 
+refresh_reused_install_manifest() {
+  local staging_root="$1"
+  local version_root="$2"
+  local source_commit="$3"
+  local staged_manifest="$staging_root/manifest.json"
+  local installed_manifest="$version_root/manifest.json"
+  local source_commit_arg="-"
+  require_owned_staging_dir "$staging_root"
+  require_path_within "$version_root" "$versions_root" "installed runtime version"
+  if [ -L "$staged_manifest" ] || [ ! -f "$staged_manifest" ]; then
+    die "staged runtime manifest must be a regular non-symlinked file: $staged_manifest"
+  fi
+  if [ -L "$installed_manifest" ] || [ ! -f "$installed_manifest" ]; then
+    die "installed runtime manifest must be a regular non-symlinked file: $installed_manifest"
+  fi
+  if [ -n "$source_commit" ]; then
+    source_commit_arg="$source_commit"
+  fi
+  "$beam_cli" install-manifest-with-source-commit \
+    "$installed_manifest" "$source_commit_arg" >"$staged_manifest"
+  confirm_path_edit "refresh reused runtime provenance" "$installed_manifest"
+  mv "$staged_manifest" "$installed_manifest"
+}
+
 prebuild_bundle() {
   local runtime_home="$1"
   local toolchain="$2"
@@ -1402,6 +1426,9 @@ prepare_install_version() {
     "$prepared_source_commit" \
     ${prepared_selected_toolchains[@]+"${prepared_selected_toolchains[@]}"}
   if [ -d "$prepared_version_root" ]; then
+    validate_runtime_version_for_reuse "$prepared_version_root" "$prepared_payload_id"
+    refresh_reused_install_manifest \
+      "$staging_root" "$prepared_version_root" "$prepared_source_commit"
     validate_runtime_version_for_reuse "$prepared_version_root" "$prepared_payload_id"
     remove_owned_staging_dir "$staging_root"
     return 0
