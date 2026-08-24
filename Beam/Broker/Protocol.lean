@@ -935,9 +935,6 @@ instance : FromJson StreamMessage where
 def Response.success (result : Json) : Response :=
   .successResult result none
 
-def Response.error (code : String) (message : String := "") (data? : Option Json := none) : Response :=
-  .errorResult { error := { code, message, data? } }
-
 def ResponseFailure.toResponse (failure : ResponseFailure) : Response :=
   .errorResult failure
 

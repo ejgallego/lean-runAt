@@ -27,6 +27,7 @@ private def mkPending
     (cancelRef? : Option (IO.Ref Bool) := none)
     (progress? : Option SyncFileProgress := none)
     (tracked? : Option (DocumentUri × Nat) := none)
+    (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
     (diagnosticScope : DiagnosticScope := .errors)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
     IO (PendingRequest × IO.Promise (Except ResponseFailure PendingResult)) := do
@@ -43,6 +44,7 @@ private def mkPending
     diagnosticsRef
     diagnosticsSeenRef
     seenDiagnosticKeysRef
+    emitProgress?
     diagnosticScope
     emitDiagnostic?
   }, promise)
@@ -357,6 +359,21 @@ private def checkDiagnosticEmitterFailureIsolation : IO Unit := do
   require "diagnostic sink failure still records current diagnostics"
     ((← pending.diagnosticsRef.get).map (·.message) == #[diagnostic.message])
 
+private def checkProgressEmitterFailureIsolation : IO Unit := do
+  let (pending, _) ← mkPending
+    (progress? := some {})
+    (tracked? := some ("file:///workspace/Foo.lean", 1))
+    (emitProgress? := some fun _ =>
+      throw <| IO.userError "progress sink failed")
+  PendingRequest.observeProgress pending (mkFileProgress #[mkRange 0 0 2 0])
+  require "progress sink failure still records the latest progress"
+    ((← pending.progressRef.get) == some {
+      updates := 1
+      done := false
+      rangeStartLine? := some 1
+      rangeEndLine? := some 2
+    })
+
 private def checkSetupFileProgressStreamsByScope : IO Unit := do
   let setupProgress :=
     mkDiagnosticWithSeverity
@@ -396,6 +413,7 @@ def main : IO Unit := do
   checkSyncFileProgressLines
   checkDiagnosticLineCanExceedProgressRange
   checkDiagnosticEmitterFailureIsolation
+  checkProgressEmitterFailureIsolation
   checkSetupFileProgressStreamsByScope
 
 end BeamTest.Broker.PendingTest

@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Author: Emilio J. Gallego Arias
 -/
 
+import Beam.Broker.Errors
 import Beam.Mcp.Projection
 import BeamTest.Broker.JsonAssert
 
@@ -614,7 +615,7 @@ private def checkSyncAndSaveNormalization : IO Unit := do
 private def checkTransportErrorNormalization : IO Unit := do
   let err ← expectToolError "normalize transport error" "invalidParams" <|
     Beam.Mcp.normalizeBrokerResponse (.leanOperation .runAt) <|
-      Beam.Broker.Response.error "invalidParams" "bad position"
+      Beam.Broker.errorResponseFor .invalidParams "bad position"
   require "transport error message" (err.message == "bad position")
 
 private def checkTodoNormalization : IO Unit := do

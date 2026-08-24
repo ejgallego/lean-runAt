@@ -1598,8 +1598,8 @@ private def handleSyncFileOp
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
     HandlerM (Response × Bool) := do
   if req.backend != .lean then
-    return (errorResponseFor .invalidParams
-      "sync_file diagnostics barrier is only supported for Lean", false)
+    throw <| responseFailureFor .invalidParams
+      "sync_file diagnostics barrier is only supported for Lean"
   let path ← requestArg req.pathArg
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let started ← liftHandlerIO <| startTrackedDiagnosticsBarrierIO server req path emitProgress?
@@ -1629,9 +1629,9 @@ private def handleSyncFileOp
     liftHandlerIO <| mergeFileProgressIfCurrent server started.session started.uri fileProgress?
   if barrierOutcome.incomplete then
     let targetPath := trackedPathLabel started.session.root started.uri
-    return (syncBarrierIncompleteResponse
+    throw <| syncBarrierIncompleteFailure
       started.uri started.version targetPath barrierOutcome.hints
-      barrierOutcome.completionDiagnostics fileProgress?, false)
+      barrierOutcome.completionDiagnostics fileProgress?
   let replyDiagnostics? :=
     if req.diagnosticsInResult?.getD false then
       some <| streamDiagnosticsForReply started.session.root started.uri started.version
@@ -1894,10 +1894,8 @@ private def handleCodeActionResolveOp
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
   let sourceUri ← requestArg <| codeActionResolveSourceUri args.codeAction
   if sourceUri != snapshot.uri then
-    return (
-      errorResponseFor .invalidParams
-        s!"codeAction.data targets {sourceUri}, not requested document {snapshot.uri}",
-      false)
+    throw <| responseFailureFor .invalidParams
+      s!"codeAction.data targets {sourceUri}, not requested document {snapshot.uri}"
   let started ← liftFailureIO <| server.withState do
     let session ← ensureSession req.workspaceId req.backend
     startSyncedDocumentRequest session snapshot args.method
@@ -1935,8 +1933,8 @@ private def handleGoalsOp
     HandlerM (Response × Bool) := do
   let args ← requestArg req.goalsArgs
   if req.backend == .lean && req.text?.isSome then
-    return (errorResponseFor .invalidParams
-      "lean goals does not accept speculative text; use lean-beam run-at for execution", false)
+    throw <| responseFailureFor .invalidParams
+      "lean goals does not accept speculative text; use lean-beam run-at for execution"
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
   let started ← liftFailureIO <| server.withState do

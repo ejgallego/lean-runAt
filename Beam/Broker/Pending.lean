@@ -90,7 +90,7 @@ def resolveError
     (data? : Option Json := none) : IO Unit := do
   let progress? ← pending.progressRef.get
   let failure :=
-    (responseFailure (errorCodeName code) message data?).withOptionalFileProgress progress?
+    (backendResponseFailure code message data?).withOptionalFileProgress progress?
   try
     pending.promise.resolve (.error failure)
   catch _ =>

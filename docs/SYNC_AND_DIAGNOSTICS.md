@@ -32,7 +32,8 @@ the failure uses `contentModified` and includes `error.data.reason = "documentVe
 The same payload reports `expectedVersion`, the currently accepted `acceptedVersion`, and
 `currentVersion` when the broker can name the current tracked document version.
 
-Example stale-version response:
+Example stale-version semantic response, as printed by the wrapper on stdout or carried in the
+`payload` of a terminal broker stream message:
 
 ```json
 {
@@ -114,7 +115,7 @@ Their transport types differ by surface.
 | Progress | Request-scoped operation movement, not diagnostics and not final readiness. | MCP `notifications/progress`; Beam stream `fileProgress` events; CLI progress text. |
 | Status | Best-effort notice that a no-token MCP request is doing setup or remains pending. | MCP `notifications/message` with logger `beam.status`. |
 | Streamed diagnostics | Lean-published events observed while a request is pending. | MCP `notifications/message` with logger `lean.diagnostic`; Beam stream `diagnostic` events; CLI stderr diagnostics. |
-| Current result | Stable synced-state verdict for one document version. | Final `diagnostics`, `readiness`, and `document_progress` fields. |
+| Current result | Stable synced-state verdict for one document version. | Final broker/CLI `diagnostics`, `readiness`, and `fileProgress` fields; MCP spells the progress field `document_progress`. |
 
 Wrapper stderr is the human-facing surface. Machine consumers should use final stdout JSON or the
 broker JSON stream exposed by `beam-client request-stream`.
@@ -133,6 +134,13 @@ request supplies `clientRequestId`, each message repeats it on that outer stream
 {"clientRequestId":"sync-7","kind":"fileProgress","payload":{"done":false,"updates":2}}
 {"clientRequestId":"sync-7","kind":"diagnostic","payload":{"completionBlocking":false,"message":"unused variable","path":"Demo.lean","range":{"end":{"character":1,"line":0},"start":{"character":0,"line":0}},"severity":2,"uri":"file:///workspace/Demo.lean","version":3}}
 {"clientRequestId":"sync-7","kind":"response","payload":{"fileProgress":{"done":true,"updates":3},"ok":true,"result":{"diagnostics":{"counts":{"error":0,"hint":0,"information":0,"total":1,"unknown":0,"warning":1}},"path":"Demo.lean","readiness":{"blockingDiagnostics":[],"blockingErrorCount":0,"blockingMessages":[],"reason":"ok","saveReady":true},"version":3}}}
+```
+
+A failed terminal response uses the same envelope and preserves the latest progress observation in
+its semantic `payload`:
+
+```jsonl
+{"clientRequestId":"sync-8","kind":"response","payload":{"error":{"code":"syncBarrierIncomplete","data":{"completionBlockingDiagnostics":[],"recoveryPlan":["lean-beam refresh \"Demo.lean\"","lake build"],"saveDeps":[],"staleDirectDeps":[],"targetPath":"Demo.lean"},"message":"Lean diagnostics barrier did not complete for file:///workspace/Demo.lean at version 3; fileProgress={\"done\":false,\"updates\":3}. An imported target may be stale or broken, or the Lean worker may have exited. Run `lake build` or fix the upstream module first."},"fileProgress":{"done":false,"updates":3},"ok":false}}
 ```
 
 The response `payload` is the semantic result and never repeats `clientRequestId`. The ordinary

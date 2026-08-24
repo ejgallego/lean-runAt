@@ -134,7 +134,7 @@ private def checkResponseJsonShape : IO Unit := do
   requireFieldPresent "success response" "result" successJson
   requireFieldAbsent "success response" "error" successJson
 
-  let errorJson := toJson <| Response.error "invalidParams" "bad request"
+  let errorJson := toJson <| (responseFailureFor .invalidParams "bad request").toResponse
   requireJsonBool "error response" "ok" false errorJson
   requireFieldPresent "error response" "error" errorJson
   requireFieldAbsent "error response" "result" errorJson
@@ -197,12 +197,17 @@ private def checkStreamMessageDecode : IO Unit := do
 
   let responseJson := toJson response
   let progressJson := toJson progress
+  let diagnosticJson := toJson diagnostic
   expectDecodeFailure StreamMessage "response stream missing payload" <|
     Json.mkObj [("kind", toJson "response")]
   expectDecodeFailure StreamMessage "progress stream with response payload" <|
     Json.mkObj [("kind", toJson "fileProgress"), ("payload", responseJson)]
   expectDecodeFailure StreamMessage "response stream with legacy variant payload field" <|
     Json.mkObj [("kind", toJson "response"), ("response", responseJson)]
+  expectDecodeFailure StreamMessage "progress stream with legacy variant payload field" <|
+    Json.mkObj [("kind", toJson "fileProgress"), ("fileProgress", progressJson)]
+  expectDecodeFailure StreamMessage "diagnostic stream with legacy variant payload field" <|
+    Json.mkObj [("kind", toJson "diagnostic"), ("diagnostic", diagnosticJson)]
   expectDecodeFailure StreamMessage "response stream with nested request id" <|
     Json.mkObj [
       ("kind", toJson "response"),
@@ -445,8 +450,8 @@ private def checkReadinessBoundary : IO Unit := do
     needsSave := true
   }]
   let incompleteResp :=
-    syncBarrierIncompleteResponse uri 7 "SaveSmoke/A.lean" hints #[incompleteDiagnostic]
-      diagnosticBarrier.fileProgress?
+    (syncBarrierIncompleteFailure uri 7 "SaveSmoke/A.lean" hints #[incompleteDiagnostic]
+      diagnosticBarrier.fileProgress?).toResponse
   let err ← requireError
     "readiness incomplete response"
     syncBarrierIncompleteCode

@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Author: Emilio J. Gallego Arias
 -/
 
+import Beam.Broker.Errors
 import Beam.Cli.Args
 import Beam.Cli.Broker
 import Beam.Cli.Info
@@ -173,8 +174,8 @@ private def checkCliRecoveryHints : IO Unit := do
       "lake build"
     ])
   ]
-  let syncBarrierResp := Beam.Broker.Response.error
-    Beam.Broker.syncBarrierIncompleteCode
+  let syncBarrierResp := Beam.Broker.errorResponseFor
+    .syncBarrierIncomplete
     "Lean diagnostics barrier did not complete"
     (some staleData)
   let some hint := Beam.Cli.responseRecoveryHint? syncBarrierResp
@@ -183,8 +184,8 @@ private def checkCliRecoveryHints : IO Unit := do
   requireSubstring "syncBarrier recovery hint" "lean-beam refresh \"SaveSmoke/A.lean\"" hint
   requireSubstring "syncBarrier recovery hint" "lake build" hint
 
-  let fallbackResp := Beam.Broker.Response.error
-    Beam.Broker.syncBarrierIncompleteCode
+  let fallbackResp := Beam.Broker.errorResponseFor
+    .syncBarrierIncomplete
     "Lean diagnostics barrier did not complete"
     (some <| Json.mkObj [("targetPath", toJson "SaveSmoke/A.lean")])
   let some fallbackHint := Beam.Cli.responseRecoveryHint? fallbackResp
@@ -192,7 +193,7 @@ private def checkCliRecoveryHints : IO Unit := do
   requireSubstring "syncBarrier fallback hint" "lean-beam refresh \"SaveSmoke/A.lean\"" fallbackHint
   requireSubstring "syncBarrier fallback hint" "lake build" fallbackHint
 
-  let invalidResp := Beam.Broker.Response.error "invalidParams" "bad input"
+  let invalidResp := Beam.Broker.errorResponseFor .invalidParams "bad input"
   require "invalidParams should not produce a sync recovery hint"
     (Beam.Cli.responseRecoveryHint? invalidResp).isNone
 
@@ -273,7 +274,7 @@ private def checkCancelAcknowledgementDecoding : IO Unit := do
   require "missing cancel acknowledgement should decode none"
     (Beam.Cli.decodeCancelAcknowledged? missing).isNone
 
-  let failed := Beam.Broker.Response.error "invalidParams" "bad cancel"
+  let failed := Beam.Broker.errorResponseFor .invalidParams "bad cancel"
   require "failed cancel response should decode none"
     (Beam.Cli.decodeCancelAcknowledged? failed).isNone
 

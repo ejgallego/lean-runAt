@@ -58,15 +58,6 @@ def syncBarrierIncompleteFailure
     (some <| staleSyncErrorData targetPath hints (completionBlockingDiagnostics diagnostics)))
   |>.withOptionalFileProgress fileProgress?
 
-def syncBarrierIncompleteResponse
-    (uri : DocumentUri)
-    (version : Nat)
-    (targetPath : String)
-    (hints : Array StaleDirectDepHint)
-    (diagnostics : Array Diagnostic)
-    (fileProgress? : Option SyncFileProgress) : Response :=
-  (syncBarrierIncompleteFailure uri version targetPath hints diagnostics fileProgress?).toResponse
-
 def syncFileSuccessResponse
     (result : SyncFileResult)
     (fileProgress? : Option SyncFileProgress)

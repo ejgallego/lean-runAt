@@ -11,12 +11,6 @@ open Lean
 
 namespace Beam.Broker
 
-def responseFailure
-    (code : String)
-    (message : String := "")
-    (data? : Option Json := none) : ResponseFailure :=
-  { error := { code, message, data? } }
-
 inductive BrokerFailureCode where
   | invalidParams
   | requestCancelled
@@ -47,7 +41,13 @@ structure BrokerFailure where
   deriving Inhabited
 
 def BrokerFailure.toResponseFailure (failure : BrokerFailure) : ResponseFailure :=
-  responseFailure failure.code.name failure.message failure.data?
+  {
+    error := {
+      code := failure.code.name
+      message := failure.message
+      data? := failure.data?
+    }
+  }
 
 def BrokerFailure.toResponse (failure : BrokerFailure) : Response :=
   failure.toResponseFailure.toResponse
@@ -94,5 +94,12 @@ def errorCodeName : JsonRpc.ErrorCode → String
   | .rpcNeedsReconnect => "rpcNeedsReconnect"
   | .workerExited => "workerExited"
   | .workerCrashed => "workerCrashed"
+
+/-- Preserve a typed error received from an underlying JSON-RPC backend. -/
+def backendResponseFailure
+    (code : JsonRpc.ErrorCode)
+    (message : String := "")
+    (data? : Option Json := none) : ResponseFailure :=
+  { error := { code := errorCodeName code, message, data? } }
 
 end Beam.Broker
