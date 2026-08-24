@@ -26,13 +26,12 @@ private def buildLakeTarget (root : System.FilePath) (target : String) : IO Unit
     throw <| IO.userError s!"failed to build {target} in {root}\n{out.stderr}"
 
 private def expectErrorCode (label code : String) (resp : Beam.Broker.Response) : IO Unit := do
-  if resp.ok then
-    throw <| IO.userError s!"expected {label} error {code}, got success {(toJson resp).compress}"
-  let actual := resp.error?.map (·.code)
-  if actual != some code then
-    throw <| IO.userError s!"expected {label} error {code}, got {(toJson resp).compress}"
-  if resp.result?.isSome then
-    throw <| IO.userError s!"expected {label} error response to omit result payload, got {(toJson resp).compress}"
+  match resp with
+  | .successResult .. =>
+      throw <| IO.userError s!"expected {label} error {code}, got success {(toJson resp).compress}"
+  | .errorResult failure =>
+      if failure.error.code != code then
+        throw <| IO.userError s!"expected {label} error {code}, got {(toJson resp).compress}"
 
 private def expectTodoKindOnly
     (label : String)
@@ -79,7 +78,6 @@ def main : IO Unit := do
       kinds? := some #[.sorry]
       suggest? := some .none
     }
-    expectStreamKindsOnly "todo" todoMessages
     let todoResp ← requireFinalStreamResponse "todo" todoMessages
     let todoPayload ← expectOk todoResp
     let todoResult : Beam.LSP.Todo.TodoResult ← IO.ofExcept <| fromJson? todoPayload
@@ -89,14 +87,17 @@ def main : IO Unit := do
         s!"expected todo runAtPosition at {BeamTest.Fixtures.TodoFixture.sorryPosition}, got {(toJson todoSorry).compress}"
 
     writeSaveWarningFile root "-- request-stream sync"
+    let syncRequestId := some "request-stream-sync"
     let syncMessages ← requireSuccessStream "sync_file" <| ← runRequestStream port {
       op := .syncFile
+      clientRequestId? := syncRequestId
       root? := some root.toString
       path? := some "SaveSmoke/B.lean"
       diagnosticScope? := some .all
     }
-    expectStreamKindsOnly "sync_file" syncMessages
+    expectStreamClientRequestId "sync_file" syncMessages syncRequestId
     let syncResp ← requireFinalStreamResponse "sync_file" syncMessages
+    discard <| requireFileProgress "sync_file terminal response" syncResp
     let syncPayload ← expectOk syncResp
     expectNoReplayDiagnosticsField "sync_file" syncPayload
     let syncResult ← requireSyncFileResult "sync_file" syncPayload
@@ -122,7 +123,6 @@ def main : IO Unit := do
       diagnosticScope? := some .all
       diagnosticsInResult? := some true
     }
-    expectStreamKindsOnly "sync_file include diagnostics" syncReplyMessages
     let syncReplyResp ← requireFinalStreamResponse "sync_file include diagnostics" syncReplyMessages
     let syncReplyPayload ← expectOk syncReplyResp
     let syncReplyResult ← requireSyncFileResult "sync_file include diagnostics" syncReplyPayload
@@ -141,7 +141,6 @@ def main : IO Unit := do
       path? := some "SaveSmoke/B.lean"
       diagnosticScope? := some .all
     }
-    expectStreamKindsOnly "save_olean" saveMessages
     let saveResp ← requireFinalStreamResponse "save_olean" saveMessages
     let savePayload ← expectOk saveResp
     expectNoReplayDiagnosticsField "save_olean" savePayload
@@ -159,7 +158,6 @@ def main : IO Unit := do
       saveArtifacts? := some true
       diagnosticScope? := some .all
     }
-    expectStreamKindsOnly "close-save" closeMessages
     let closeResp ← requireFinalStreamResponse "close-save" closeMessages
     let closePayload ← expectOk closeResp
     expectNoReplayDiagnosticsField "close-save" closePayload
@@ -180,7 +178,6 @@ def main : IO Unit := do
       root? := some root.toString
       path? := some "StandaloneSaveSmoke.lean"
     }
-    expectStreamKindsOnly "standalone sync_file" standaloneSyncMessages
     let standaloneSyncResp ← requireFinalStreamResponse "standalone sync_file" standaloneSyncMessages
     discard <| expectOk standaloneSyncResp
 
@@ -189,7 +186,6 @@ def main : IO Unit := do
       root? := some root.toString
       path? := some "StandaloneSaveSmoke.lean"
     }
-    expectStreamKindsOnly "standalone save_olean" standaloneSaveMessages
     let standaloneSaveResp ← requireFinalStreamResponse "standalone save_olean" standaloneSaveMessages
     expectErrorCode "standalone save_olean" Beam.Broker.saveTargetNotModuleCode standaloneSaveResp
 
@@ -201,18 +197,18 @@ def main : IO Unit := do
       root? := some root.toString
       path? := some "SaveSmoke/A.lean"
     }
-    expectStreamKindsOnly "stale sync_file" staleSyncMessages
     let staleSyncResp ← requireFinalStreamResponse "stale sync_file" staleSyncMessages
     expectErrorCode "stale sync_file" Beam.Broker.syncBarrierIncompleteCode staleSyncResp
+    discard <| requireFileProgress "stale sync_file terminal response" staleSyncResp
 
     let staleSaveMessages ← requireFailedStream "stale save_olean" <| ← runRequestStream port {
       op := .saveOlean
       root? := some root.toString
       path? := some "SaveSmoke/A.lean"
     }
-    expectStreamKindsOnly "stale save_olean" staleSaveMessages
     let staleSaveResp ← requireFinalStreamResponse "stale save_olean" staleSaveMessages
     expectErrorCode "stale save_olean" Beam.Broker.syncBarrierIncompleteCode staleSaveResp
+    discard <| requireFileProgress "stale save_olean terminal response" staleSaveResp
 
     let staleCloseMessages ← requireFailedStream "stale close-save" <| ← runRequestStream port {
       op := .close
@@ -220,9 +216,9 @@ def main : IO Unit := do
       path? := some "SaveSmoke/A.lean"
       saveArtifacts? := some true
     }
-    expectStreamKindsOnly "stale close-save" staleCloseMessages
     let staleCloseResp ← requireFinalStreamResponse "stale close-save" staleCloseMessages
     expectErrorCode "stale close-save" Beam.Broker.syncBarrierIncompleteCode staleCloseResp
+    discard <| requireFileProgress "stale close-save terminal response" staleCloseResp
 
     IO.FS.writeFile (root / "SaveSmoke" / "B.lean") "def bVal : Nat := 1\n"
     buildLakeTarget root "SaveSmoke/A.lean"
@@ -244,7 +240,6 @@ def main : IO Unit := do
       root? := some root.toString
       path? := some "SaveSmoke/A.lean"
     }
-    expectStreamKindsOnly "stale trace save_olean" staleTraceSaveMessages
     let staleTraceSaveResp ← requireFinalStreamResponse "stale trace save_olean" staleTraceSaveMessages
     expectErrorCode "stale trace save_olean" Beam.Broker.saveTraceStaleCode staleTraceSaveResp
     discard <| expectOk (← runClient endpoint { op := .stats })

@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Author: Emilio J. Gallego Arias
 -/
 
+import Beam.Broker.Errors
 import Beam.Mcp.Projection
 import BeamTest.Broker.JsonAssert
 
@@ -222,6 +223,14 @@ private def checkBrokerRequestAdapters : IO Unit := do
         require s!"{tool.key} undeclared field error names the closed input boundary"
           (err.contains "undeclared input fields")
 
+  for operation in Beam.Lean.Operation.all do
+    let input := Json.mkObj [("__undeclared", toJson true)]
+    match operation.toBrokerRequest root input with
+    | .ok _ => throw <| IO.userError s!"{operation.key} accepted an undeclared operation field"
+    | .error err =>
+        require s!"{operation.key} undeclared field error names the operation input boundary"
+          (err.contains "undeclared input fields")
+
   let runAtInput : Beam.Mcp.RunAtInput := {
     path := "Demo.lean"
     version := 12
@@ -437,14 +446,18 @@ private def checkBrokerRequestAdapters : IO Unit := do
   require "refresh op" (refreshReq.op == .refreshFile)
   require "refresh diagnostic scope" (refreshReq.diagnosticScope? == some .all)
   require "refresh diagnostics in result" (refreshReq.diagnosticsInResult? == some true)
+  let saveInput : Beam.Mcp.SaveInput := {
+    path := "Demo.lean",
+    diagnosticScope? := some .all
+  }
   let saveReq ← expectOk "save tool request" <|
-    Beam.Mcp.leanOperationToBrokerRequest .save root workspaceId (inWorkspace <| toJson syncInput)
+    Beam.Mcp.leanOperationToBrokerRequest .save root workspaceId (inWorkspace <| toJson saveInput)
   require "save op" (saveReq.op == .saveOlean)
   require "save diagnostic scope" (saveReq.diagnosticScope? == some .all)
   require "save should not request reply diagnostics" saveReq.diagnosticsInResult?.isNone
   let closeSaveReq ← expectOk "close-save tool request" <|
     Beam.Mcp.leanOperationToBrokerRequest .closeSave root workspaceId
-      (inWorkspace <| toJson syncInput)
+      (inWorkspace <| toJson saveInput)
   require "close-save op" (closeSaveReq.op == .close)
   require "close-save requests artifact save" (closeSaveReq.saveArtifacts? == some true)
   require "close-save diagnostic scope" (closeSaveReq.diagnosticScope? == some .all)
@@ -458,14 +471,21 @@ private def checkBrokerRequestAdapters : IO Unit := do
   let decodedSync ← expectOk "decode sync input" <| fromJson? (α := Beam.Mcp.SyncInput) syncJson
   require "decoded sync diagnostic scope" (decodedSync.diagnosticScope? == some .all)
   require "decoded sync diagnostics in result" (decodedSync.diagnosticsInResult? == some true)
+  let saveJson := toJson saveInput
+  requireFieldAbsent "save input json" "diagnostics_in_result" saveJson
+  let decodedSave ← expectOk "decode save input" <| fromJson? (α := Beam.Mcp.SaveInput) saveJson
+  require "decoded save diagnostic scope" (decodedSave.diagnosticScope? == some .all)
+  match Beam.Mcp.leanOperationToBrokerRequest .save root workspaceId (inWorkspace syncJson) with
+  | .ok _ => throw <| IO.userError "save tool accepted sync-only diagnostics_in_result"
+  | .error err =>
+      require "save tool rejection identifies diagnostics_in_result"
+        (err.contains "diagnostics_in_result")
 
 private def checkRunAtNormalization : IO Unit := do
   let semanticFailure := Json.mkObj [("success", toJson false)]
   let normalizedFailure ← expectToolOk "normalize semantic failure" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .runAt) {
-      ok := true
-      result? := some semanticFailure
-    }
+    Beam.Mcp.normalizeBrokerResponse (.leanOperation .runAt)
+      (Beam.Broker.Response.success semanticFailure)
   requireJsonBool "semantic failure result" "success" false normalizedFailure
   requireJsonNull "semantic failure result" "next_handle" normalizedFailure
   requireJsonNull "semantic failure result" "proof_state" normalizedFailure
@@ -480,12 +500,9 @@ private def checkRunAtNormalization : IO Unit := do
     ("handle", toJson sampleBrokerHandle)
   ]
   let normalizedHandle ← expectToolOk "normalize handle result" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .runAtHandle) {
-      ok := true
-      result? := some successWithHandle
-      fileProgress? := some { updates := 2, done := true }
-      clientRequestId? := some "req-1"
-    }
+    Beam.Mcp.normalizeBrokerResponse (.leanOperation .runAtHandle) <|
+      ((Beam.Broker.Response.success successWithHandle).withFileProgress
+        { updates := 2, done := true })
   let nextHandle ← requireObjVal "handle result" "next_handle" normalizedHandle
   requireJsonString "next handle" "session" "session" nextHandle
   let rawHandle ← requireObjVal "next handle" "raw" nextHandle
@@ -499,7 +516,7 @@ private def sampleSyncResult : Beam.Broker.SyncFileResult := {
   path := "Demo.lean"
   version := 7
   diagnostics := {
-    counts := { error := 1, warning := 1, total := 2 }
+    counts := { error := 1, warning := 1 }
     items? := some #[{
       path := "Demo.lean"
       uri := "file:///repo/Demo.lean"
@@ -522,16 +539,13 @@ private def sampleSyncResult : Beam.Broker.SyncFileResult := {
 
 private def checkSyncAndSaveNormalization : IO Unit := do
   let normalizedSync ← expectToolOk "normalize sync result" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .sync) {
-      ok := true
-      result? := some <| toJson sampleSyncResult
-      fileProgress? := some {
+    Beam.Mcp.normalizeBrokerResponse (.leanOperation .sync) <|
+      (Beam.Broker.Response.success <| toJson sampleSyncResult).withFileProgress {
         updates := 4
         done := true
         rangeStartLine? := some 1
         rangeEndLine? := some 20
       }
-    }
   requireJsonString "sync result" "path" "Demo.lean" normalizedSync
   requireJsonInt "sync result" "version" 7 normalizedSync
   let diagnostics ← requireObjVal "sync result" "diagnostics" normalizedSync
@@ -568,11 +582,8 @@ private def checkSyncAndSaveNormalization : IO Unit := do
     ("sync", toJson sampleSyncResult)
   ]
   let normalizedSave ← expectToolOk "normalize save result" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .save) {
-      ok := true
-      result? := some rawSave
-      fileProgress? := some { updates := 4, done := true }
-    }
+    Beam.Mcp.normalizeBrokerResponse (.leanOperation .save) <|
+      (Beam.Broker.Response.success rawSave).withFileProgress { updates := 4, done := true }
   requireJsonString "save result" "source_hash" "abc" normalizedSave
   requireJsonString "save result" "olean_server" "/tmp/Demo.olean.server" normalizedSave
   requireFieldAbsent "save result" "sourceHash" normalizedSave
@@ -581,38 +592,30 @@ private def checkSyncAndSaveNormalization : IO Unit := do
   discard <| requireObjVal "save result" "document_progress" normalizedSave
 
   let normalizedCloseSave ← expectToolOk "normalize close-save result" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .closeSave) {
-      ok := true
-      result? := some <| Json.mkObj [
+    Beam.Mcp.normalizeBrokerResponse (.leanOperation .closeSave) <| Beam.Broker.Response.success <|
+      Json.mkObj [
         ("closed", toJson true),
         ("saved", rawSave)
       ]
-    }
   requireJsonBool "close-save result" "closed" true normalizedCloseSave
   let saved ← requireObjVal "close-save result" "saved" normalizedCloseSave
   discard <| requireObjVal "close-save saved result" "sync" saved
 
   discard <| expectToolError "save result with undeclared field" "invalidResult" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .save) {
-      ok := true
-      result? := some <| rawSave.setObjVal! "extra" (toJson true)
-    }
+    Beam.Mcp.normalizeBrokerResponse (.leanOperation .save) <| Beam.Broker.Response.success <|
+      rawSave.setObjVal! "extra" (toJson true)
   discard <| expectToolError "close-save result with undeclared field" "invalidResult" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .closeSave) {
-      ok := true
-      result? := some <| Json.mkObj [
+    Beam.Mcp.normalizeBrokerResponse (.leanOperation .closeSave) <| Beam.Broker.Response.success <|
+      Json.mkObj [
         ("closed", toJson true),
         ("saved", rawSave),
         ("extra", toJson true)
       ]
-    }
 
 private def checkTransportErrorNormalization : IO Unit := do
   let err ← expectToolError "normalize transport error" "invalidParams" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .runAt) {
-      ok := false
-      error? := some { code := "invalidParams", message := "bad position" }
-    }
+    Beam.Mcp.normalizeBrokerResponse (.leanOperation .runAt) <|
+      Beam.Broker.errorResponseFor .invalidParams "bad position"
   require "transport error message" (err.message == "bad position")
 
 private def checkTodoNormalization : IO Unit := do
@@ -639,10 +642,8 @@ private def checkTodoNormalization : IO Unit := do
     ])
   ]
   let normalized ← expectToolOk "normalize todo result" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .todo) {
-      ok := true
-      result? := some rawTodo
-    }
+    Beam.Mcp.normalizeBrokerResponse (.leanOperation .todo)
+      (Beam.Broker.Response.success rawTodo)
   let items ← requireObjVal "todo result" "items" normalized
   let item ←
     match items with
@@ -676,25 +677,10 @@ private def checkCodeActionResolveNormalization : IO Unit := do
     ])
   ]
   let normalized ← expectToolOk "normalize code_action_resolve result" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .codeActionResolve) {
-      ok := true
-      result? := some rawResult
-    }
+    Beam.Mcp.normalizeBrokerResponse (.leanOperation .codeActionResolve)
+      (Beam.Broker.Response.success rawResult)
   discard <| requireObjVal "code_action_resolve result" "code_action" normalized
   requireFieldAbsent "code_action_resolve result" "codeAction" normalized
-
-private def checkInvalidEnvelopeRejection : IO Unit := do
-  discard <| expectToolError "missing success result" "invalidEnvelope" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .runAt) { ok := true }
-
-  discard <| expectToolError "missing error envelope" "invalidEnvelope" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .runAt) { ok := false }
-
-  discard <| expectToolError "ok envelope with error" "invalidEnvelope" <|
-    Beam.Mcp.normalizeBrokerResponse (.leanOperation .runAt) {
-      ok := true
-      error? := some { code := "internalError", message := "bad envelope" }
-    }
 
 def main : IO Unit := do
   checkToolNames
@@ -705,7 +691,6 @@ def main : IO Unit := do
   checkTransportErrorNormalization
   checkTodoNormalization
   checkCodeActionResolveNormalization
-  checkInvalidEnvelopeRejection
 
 end BeamTest.Broker.McpProjectionTest
 

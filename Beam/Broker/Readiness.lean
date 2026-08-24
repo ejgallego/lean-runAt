@@ -5,6 +5,7 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Lean
+import Beam.Broker.Errors
 import Beam.Broker.Protocol
 import Beam.Broker.StaleDirectDeps
 import Beam.Broker.SyncSaveSupport
@@ -44,30 +45,24 @@ def decideSyncBarrier
         none
   }
 
-def responseWithFileProgress
-    (resp : Response)
-    (fileProgress? : Option SyncFileProgress) : Response :=
-  match fileProgress? with
-  | some progress => { resp with fileProgress? := some progress }
-  | none => resp
-
-def syncBarrierIncompleteResponse
+def syncBarrierIncompleteFailure
     (uri : DocumentUri)
     (version : Nat)
     (targetPath : String)
     (hints : Array StaleDirectDepHint)
     (diagnostics : Array Diagnostic)
-    (fileProgress? : Option SyncFileProgress) : Response :=
-  Response.error
-    syncBarrierIncompleteCode
+    (fileProgress? : Option SyncFileProgress) : ResponseFailure :=
+  (responseFailureFor
+    .syncBarrierIncomplete
     (syncBarrierIncompleteMessage uri version fileProgress?)
-    (some <| staleSyncErrorData targetPath hints (completionBlockingDiagnostics diagnostics))
+    (some <| staleSyncErrorData targetPath hints (completionBlockingDiagnostics diagnostics)))
+  |>.withOptionalFileProgress fileProgress?
 
 def syncFileSuccessResponse
     (result : SyncFileResult)
     (fileProgress? : Option SyncFileProgress)
     : Response :=
-  responseWithFileProgress
+  Response.withOptionalFileProgress
     (Response.success <| toJson result)
     fileProgress?
 

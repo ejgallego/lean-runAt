@@ -96,29 +96,34 @@ def requireFinalStreamResponse
   if messages.isEmpty then
     throw <| IO.userError s!"expected {label} stream messages"
   let responseCount := messages.foldl (init := 0) fun acc msg =>
-    acc + if msg.kind == .response then 1 else 0
+    acc + match msg with
+      | .response .. => 1
+      | _ => 0
   if responseCount != 1 then
     throw <| IO.userError s!"expected exactly one {label} response message, got {(toJson messages).compress}"
   let some last := messages.back?
     | throw <| IO.userError s!"expected {label} final response"
-  if last.kind != .response then
-    throw <| IO.userError s!"expected {label} response to arrive last, got {(toJson messages).compress}"
-  let some resp := last.response?
-    | throw <| IO.userError s!"expected {label} final response payload"
-  pure resp
+  match last with
+  | .response _ resp => pure resp
+  | _ =>
+      throw <| IO.userError
+        s!"expected {label} response to arrive last, got {(toJson messages).compress}"
 
-def expectStreamKindsOnly
+def expectStreamClientRequestId
     (label : String)
-    (messages : Array Beam.Broker.StreamMessage) : IO Unit := do
-  unless messages.all (fun msg =>
-      msg.kind == .diagnostic || msg.kind == .fileProgress || msg.kind == .response) do
-    throw <| IO.userError
-      s!"expected {label} kinds to stay within diagnostic/fileProgress/response, got {(toJson messages).compress}"
+    (messages : Array Beam.Broker.StreamMessage)
+    (expected : Option String) : IO Unit := do
+  messages.forM fun message =>
+    unless message.clientRequestId? == expected do
+      throw <| IO.userError
+        s!"expected every {label} stream envelope to carry request id {expected}, got {(toJson message).compress}"
 
 def requireAnyStreamDiagnostics
     (label : String)
     (messages : Array Beam.Broker.StreamMessage) : IO (Array Beam.Broker.StreamDiagnostic) := do
-  let diagnostics := messages.filterMap (·.diagnostic?)
+  let diagnostics := messages.filterMap fun
+    | .diagnostic _ diagnostic => some diagnostic
+    | _ => none
   if diagnostics.isEmpty then
     throw <| IO.userError s!"expected {label} to stream diagnostics, got {(toJson messages).compress}"
   pure diagnostics
@@ -126,7 +131,9 @@ def requireAnyStreamDiagnostics
 def requireAnyStreamFileProgress
     (label : String)
     (messages : Array Beam.Broker.StreamMessage) : IO (Array Beam.Broker.SyncFileProgress) := do
-  let progress := messages.filterMap (·.fileProgress?)
+  let progress := messages.filterMap fun
+    | .fileProgress _ progress => some progress
+    | _ => none
   if progress.isEmpty then
     throw <| IO.userError s!"expected {label} to stream fileProgress, got {(toJson messages).compress}"
   pure progress
@@ -153,16 +160,18 @@ def expectWarningDiagnosticPresent
       s!"expected {label} diagnostics to include at least one warning, got {(toJson diagnostics).compress}"
 
 def expectOk (resp : Beam.Broker.Response) : IO Json := do
-  if !resp.ok then
-    throw <| IO.userError s!"unexpected Beam daemon error: {(toJson resp).compress}"
-  return resp.result?.getD Json.null
+  match resp with
+  | .successResult result .. => pure result
+  | .errorResult .. =>
+      throw <| IO.userError s!"unexpected Beam daemon error: {(toJson resp).compress}"
 
 def expectErrCode (resp : Beam.Broker.Response) (code : String) : IO Unit := do
-  if resp.ok then
-    throw <| IO.userError s!"expected error {code}, got success {(toJson resp).compress}"
-  let actual := resp.error?.map (·.code)
-  if actual != some code && actual != some "-32602" then
-    throw <| IO.userError s!"expected error {code}, got {(toJson resp).compress}"
+  match resp with
+  | .successResult .. =>
+      throw <| IO.userError s!"expected error {code}, got success {(toJson resp).compress}"
+  | .errorResult failure =>
+      if failure.error.code != code && failure.error.code != "-32602" then
+        throw <| IO.userError s!"expected error {code}, got {(toJson resp).compress}"
 
 def expectOpCountAtLeast (payload : Json) (backend op : String) (minCount : Nat) : IO Unit := do
   let byBackend ← IO.ofExcept <| payload.getObjVal? "byBackend"

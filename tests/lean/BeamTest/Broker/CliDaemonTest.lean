@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Author: Emilio J. Gallego Arias
 -/
 
+import Beam.Broker.Errors
 import Beam.Cli.Args
 import Beam.Cli.Broker
 import Beam.Cli.Info
@@ -153,6 +154,17 @@ private def checkProjectDaemonWorkspaceRouting : IO Unit := do
   require "CLI routing should preserve an explicitly selected workspace"
     (explicitReq.workspaceId? == some "maintenance-fixture")
 
+private def checkClientResponsePresentation : IO Unit := do
+  let semantic := Beam.Broker.Response.success Json.null
+  let presented :=
+    Beam.Broker.responseOutputJson semantic (some "visible-request")
+  requireJsonString "presented response" "clientRequestId" "visible-request" presented
+  match fromJson? (α := Beam.Broker.Response) presented with
+  | .ok response =>
+      throw <| IO.userError
+        s!"presentation-decorated response decoded as semantic response: {(toJson response).compress}"
+  | .error _ => pure ()
+
 private def checkCliRecoveryHints : IO Unit := do
   let staleData := Json.mkObj [
     ("targetPath", toJson "SaveSmoke/A.lean"),
@@ -162,50 +174,36 @@ private def checkCliRecoveryHints : IO Unit := do
       "lake build"
     ])
   ]
-  let syncBarrierResp : Beam.Broker.Response := {
-    ok := false
-    error? := some {
-      code := Beam.Broker.syncBarrierIncompleteCode
-      message := "Lean diagnostics barrier did not complete"
-      data? := some staleData
-    }
-  }
+  let syncBarrierResp := Beam.Broker.errorResponseFor
+    .syncBarrierIncomplete
+    "Lean diagnostics barrier did not complete"
+    (some staleData)
   let some hint := Beam.Cli.responseRecoveryHint? syncBarrierResp
     | throw <| IO.userError "syncBarrierIncomplete should produce a CLI recovery hint"
   requireSubstring "syncBarrier recovery hint" "lean-beam save \"SaveSmoke/B.lean\"" hint
   requireSubstring "syncBarrier recovery hint" "lean-beam refresh \"SaveSmoke/A.lean\"" hint
   requireSubstring "syncBarrier recovery hint" "lake build" hint
 
-  let fallbackResp : Beam.Broker.Response := {
-    ok := false
-    error? := some {
-      code := Beam.Broker.syncBarrierIncompleteCode
-      message := "Lean diagnostics barrier did not complete"
-      data? := some <| Json.mkObj [("targetPath", toJson "SaveSmoke/A.lean")]
-    }
-  }
+  let fallbackResp := Beam.Broker.errorResponseFor
+    .syncBarrierIncomplete
+    "Lean diagnostics barrier did not complete"
+    (some <| Json.mkObj [("targetPath", toJson "SaveSmoke/A.lean")])
   let some fallbackHint := Beam.Cli.responseRecoveryHint? fallbackResp
     | throw <| IO.userError "syncBarrierIncomplete fallback should produce a CLI recovery hint"
   requireSubstring "syncBarrier fallback hint" "lean-beam refresh \"SaveSmoke/A.lean\"" fallbackHint
   requireSubstring "syncBarrier fallback hint" "lake build" fallbackHint
 
-  let invalidResp : Beam.Broker.Response := {
-    ok := false
-    error? := some { code := "invalidParams", message := "bad input" }
-  }
+  let invalidResp := Beam.Broker.errorResponseFor .invalidParams "bad input"
   require "invalidParams should not produce a sync recovery hint"
     (Beam.Cli.responseRecoveryHint? invalidResp).isNone
 
 private def checkSyncWaitSpecs : IO Unit := do
-  let okResp : Beam.Broker.Response := {
-    ok := true
-    result? := some <| toJson ({
+  let okResp :=
+    (Beam.Broker.Response.success <| toJson ({
       path := "Demo.lean"
       version := 5
       : Beam.Broker.SyncFileResult
-    })
-    fileProgress? := some { updates := 2, done := true }
-  }
+    })).withFileProgress { updates := 2, done := true }
   require "sync complete message should include version and progress"
     ((Beam.Cli.syncWaitSpec "Demo.lean").completeMsg okResp ==
       "beam: sync complete for Demo.lean (version 5, fp updates=2)")
@@ -246,9 +244,7 @@ private def checkSyncWaitSpecs : IO Unit := do
     "beam: running goals on Demo.lean:1:2"
     publicGoalsSpec.startMsg
 
-  let notReadyResp : Beam.Broker.Response := {
-    ok := true
-    result? := some <| toJson ({
+  let notReadyResp := Beam.Broker.Response.success <| toJson ({
       path := "Demo.lean"
       version := 6
       readiness := {
@@ -258,37 +254,27 @@ private def checkSyncWaitSpecs : IO Unit := do
       }
       : Beam.Broker.SyncFileResult
     })
-  }
   requireSubstring "sync not-ready message"
     "saveReady=false (documentErrors, blockingErrorCount=1)"
     ((Beam.Cli.syncWaitSpec "Demo.lean").completeMsg notReadyResp)
 
 private def checkCancelAcknowledgementDecoding : IO Unit := do
-  let acknowledged : Beam.Broker.Response := {
-    ok := true
-    result? := some <| Json.mkObj [("cancelled", toJson true)]
-  }
+  let acknowledged := Beam.Broker.Response.success <|
+    Json.mkObj [("cancelled", toJson true)]
   require "cancel acknowledgement should decode true"
     (Beam.Cli.decodeCancelAcknowledged? acknowledged == some true)
 
-  let notAcknowledged : Beam.Broker.Response := {
-    ok := true
-    result? := some <| Json.mkObj [("cancelled", toJson false)]
-  }
+  let notAcknowledged := Beam.Broker.Response.success <|
+    Json.mkObj [("cancelled", toJson false)]
   require "cancel acknowledgement should decode false"
     (Beam.Cli.decodeCancelAcknowledged? notAcknowledged == some false)
 
-  let missing : Beam.Broker.Response := {
-    ok := true
-    result? := some <| Json.mkObj [("other", toJson true)]
-  }
+  let missing := Beam.Broker.Response.success <|
+    Json.mkObj [("other", toJson true)]
   require "missing cancel acknowledgement should decode none"
     (Beam.Cli.decodeCancelAcknowledged? missing).isNone
 
-  let failed : Beam.Broker.Response := {
-    ok := false
-    error? := some { code := "invalidParams", message := "bad cancel" }
-  }
+  let failed := Beam.Broker.errorResponseFor .invalidParams "bad cancel"
   require "failed cancel response should decode none"
     (Beam.Cli.decodeCancelAcknowledged? failed).isNone
 
@@ -397,6 +383,7 @@ private def checkLeanOperationRequests : IO Unit := do
     (pathInput.toCloseBrokerRequest rootText)
 
   let syncInput : Beam.Lean.SyncInput := { path, diagnosticScope? := some .all }
+  let saveInput : Beam.Lean.SaveInput := { path, diagnosticScope? := some .all }
   requireRequestJson "sync request should share the Lean operation adapter"
     (Beam.Cli.leanSyncRequest root path .all)
     (syncInput.toSyncBrokerRequest rootText)
@@ -405,10 +392,10 @@ private def checkLeanOperationRequests : IO Unit := do
     (syncInput.toRefreshBrokerRequest rootText)
   requireRequestJson "save request should share the Lean operation adapter"
     (Beam.Cli.leanSaveRequest root path .all)
-    (syncInput.toSaveBrokerRequest rootText)
+    (saveInput.toSaveBrokerRequest rootText)
   requireRequestJson "close-save request should share the Lean operation adapter"
     (Beam.Cli.leanCloseSaveRequest root path .all)
-    (syncInput.toCloseSaveBrokerRequest rootText)
+    (saveInput.toCloseSaveBrokerRequest rootText)
 
   let closeSave := Beam.Cli.leanCloseSaveRequest root path .all
   require "close-save should use close broker op" (closeSave.op == .close)
@@ -1106,6 +1093,7 @@ private def checkRuntimeBundleMetadataAcceptance : IO Unit := do
 
 def main : IO Unit := do
   checkProjectDaemonWorkspaceRouting
+  checkClientResponsePresentation
   checkCliRecoveryHints
   checkSyncWaitSpecs
   checkCancelAcknowledgementDecoding

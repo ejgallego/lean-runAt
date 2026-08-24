@@ -34,52 +34,35 @@ def BrokerFailureCode.name : BrokerFailureCode → String
   | .saveTargetNotModule => saveTargetNotModuleCode
   | .internalError => "internalError"
 
-instance : ToJson BrokerFailureCode where
-  toJson code := toJson code.name
-
-instance : FromJson BrokerFailureCode where
-  fromJson? j :=
-    match j with
-    | .str "invalidParams" => .ok .invalidParams
-    | .str "requestCancelled" => .ok .requestCancelled
-    | .str "contentModified" => .ok .contentModified
-    | .str "workerExited" => .ok .workerExited
-    | .str s =>
-        if s == syncBarrierIncompleteCode then
-          .ok .syncBarrierIncomplete
-        else if s == saveTraceStaleCode then
-          .ok .saveTraceStale
-        else if s == saveUnsupportedSetupCode then
-          .ok .saveUnsupportedSetup
-        else if s == saveTargetNotModuleCode then
-          .ok .saveTargetNotModule
-        else if s == "internalError" then
-          .ok .internalError
-        else
-          .error s!"expected broker failure code, got {j.compress}"
-    | _ => .error s!"expected broker failure code, got {j.compress}"
-
-def BrokerFailureCode.ofName? (name : String) : Option BrokerFailureCode :=
-  fromJson? (toJson name) |>.toOption
-
 structure BrokerFailure where
   code : BrokerFailureCode
   message : String := ""
   data? : Option Json := none
-  deriving Inhabited, FromJson, ToJson
+  deriving Inhabited
 
-def BrokerFailure.toResponse (failure : BrokerFailure) : Response :=
+def BrokerFailure.toResponseFailure (failure : BrokerFailure) : ResponseFailure :=
   {
-    ok := false
-    error? := some {
+    error := {
       code := failure.code.name
       message := failure.message
       data? := failure.data?
     }
   }
 
-def reqError (code : String) (message : String := "") (data? : Option Json := none) : Response :=
-  Response.error code message data?
+def BrokerFailure.toResponse (failure : BrokerFailure) : Response :=
+  failure.toResponseFailure.toResponse
+
+def responseFailureFor
+    (code : BrokerFailureCode)
+    (message : String := "")
+    (data? : Option Json := none) : ResponseFailure :=
+  ({ code, message, data? } : BrokerFailure).toResponseFailure
+
+def errorResponseFor
+    (code : BrokerFailureCode)
+    (message : String := "")
+    (data? : Option Json := none) : Response :=
+  (responseFailureFor code message data?).toResponse
 
 def documentVersionMismatchErrorData
     (expectedVersion acceptedVersion : Nat)
@@ -112,21 +95,11 @@ def errorCodeName : JsonRpc.ErrorCode → String
   | .workerExited => "workerExited"
   | .workerCrashed => "workerCrashed"
 
-private def responseFromJsonRpcErrorObject? (json : Json) : Option Response :=
-  match json.getObjVal? "code", json.getObjVal? "message" with
-  | .ok code, .ok (.str message) =>
-      let data? := (json.getObjVal? "data").toOption
-      match code with
-      | .str codeName => some <| reqError codeName message data?
-      | _ =>
-          match fromJson? code with
-          | .ok (errCode : JsonRpc.ErrorCode) => some <| reqError (errorCodeName errCode) message data?
-          | .error _ => some <| reqError code.compress message data?
-  | _, _ => none
-
-def responseForJsonRpcErrorObject (errJson : Json) : Response :=
-  match responseFromJsonRpcErrorObject? errJson with
-  | some resp => resp
-  | none => reqError "internalError" s!"invalid JSON-RPC error object: {errJson.compress}"
+/-- Preserve a typed error received from an underlying JSON-RPC backend. -/
+def backendResponseFailure
+    (code : JsonRpc.ErrorCode)
+    (message : String := "")
+    (data? : Option Json := none) : ResponseFailure :=
+  { error := { code := errorCodeName code, message, data? } }
 
 end Beam.Broker

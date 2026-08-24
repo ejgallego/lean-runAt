@@ -24,35 +24,27 @@ private def usage : String :=
     "",
     "request prints the final response on stdout and formats streamed diagnostics for humans on stderr.",
     "request-stream is the preferred machine interface: it prints one compact StreamMessage JSON line",
-    "per event on stdout, with kinds diagnostic | fileProgress | response, and the final response last."
+    "per event on stdout using kind + payload + optional clientRequestId; kinds are",
+    "diagnostic | fileProgress | response, and the final response is last."
   ]
+
+private def parseRequestArg (json : String) : IO Request := do
+  if json == "-" then
+    readRequestFromStdin
+  else
+    match Json.parse json with
+    | .error err => throw <| IO.userError s!"invalid request json: {err}"
+    | .ok j =>
+        match fromJson? j with
+        | .ok req => pure req
+        | .error err => throw <| IO.userError s!"invalid request payload: {err}"
 
 private def parseRequest (args : List String) : IO (ClientMode × Request) := do
   match args with
   | "request" :: json :: _ =>
-      let req ←
-        if json == "-" then
-          readRequestFromStdin
-        else
-          match Json.parse json with
-          | .error err => throw <| IO.userError s!"invalid request json: {err}"
-          | .ok j =>
-              match fromJson? j with
-              | .ok req => pure req
-              | .error err => throw <| IO.userError s!"invalid request payload: {err}"
-      pure (.request, req)
+      pure (.request, ← parseRequestArg json)
   | "request-stream" :: json :: _ =>
-      let req ←
-        if json == "-" then
-          readRequestFromStdin
-        else
-          match Json.parse json with
-          | .error err => throw <| IO.userError s!"invalid request json: {err}"
-          | .ok j =>
-              match fromJson? j with
-              | .ok req => pure req
-              | .error err => throw <| IO.userError s!"invalid request payload: {err}"
-      pure (.requestStream, req)
+      pure (.requestStream, ← parseRequestArg json)
   | _ =>
       throw <| IO.userError usage
 
@@ -74,7 +66,7 @@ def main (args : List String) : IO Unit := do
             | none => msg
           IO.eprintln msg
       }
-      printResponse resp
+      printResponse resp req.clientRequestId?
       failOnError resp
   | .requestStream =>
       let resp ← sendRequestWithStream endpoint req fun stream =>

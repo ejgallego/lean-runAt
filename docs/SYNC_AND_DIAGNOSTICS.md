@@ -32,7 +32,8 @@ the failure uses `contentModified` and includes `error.data.reason = "documentVe
 The same payload reports `expectedVersion`, the currently accepted `acceptedVersion`, and
 `currentVersion` when the broker can name the current tracked document version.
 
-Example stale-version response:
+Example stale-version semantic response, as printed by the wrapper on stdout or carried in the
+`payload` of a terminal broker stream message:
 
 ```json
 {
@@ -114,10 +115,43 @@ Their transport types differ by surface.
 | Progress | Request-scoped operation movement, not diagnostics and not final readiness. | MCP `notifications/progress`; Beam stream `fileProgress` events; CLI progress text. |
 | Status | Best-effort notice that a no-token MCP request is doing setup or remains pending. | MCP `notifications/message` with logger `beam.status`. |
 | Streamed diagnostics | Lean-published events observed while a request is pending. | MCP `notifications/message` with logger `lean.diagnostic`; Beam stream `diagnostic` events; CLI stderr diagnostics. |
-| Current result | Stable synced-state verdict for one document version. | Final `diagnostics`, `readiness`, and `document_progress` fields. |
+| Current result | Stable synced-state verdict for one document version. | Final broker/CLI `diagnostics`, `readiness`, and `fileProgress` fields; MCP spells the progress field `document_progress`. |
 
 Wrapper stderr is the human-facing surface. Machine consumers should use final stdout JSON or the
 broker JSON stream exposed by `beam-client request-stream`.
+
+### Raw Broker Stream
+
+`beam-client request-stream` prints one compact JSON object per line, in the order the broker
+observed it. A request may produce any number of `fileProgress` and `diagnostic` messages, followed
+by exactly one terminal `response`; the response is last and no later message belongs to that
+request.
+
+Every stream variant uses the same `kind`, `payload`, and optional correlation envelope. When the
+request supplies `clientRequestId`, each message repeats it on that outer stream envelope:
+
+```jsonl
+{"clientRequestId":"sync-7","kind":"fileProgress","payload":{"done":false,"updates":2}}
+{"clientRequestId":"sync-7","kind":"diagnostic","payload":{"completionBlocking":false,"message":"unused variable","path":"Demo.lean","range":{"end":{"character":1,"line":0},"start":{"character":0,"line":0}},"severity":2,"uri":"file:///workspace/Demo.lean","version":3}}
+{"clientRequestId":"sync-7","kind":"response","payload":{"fileProgress":{"done":true,"updates":3},"ok":true,"result":{"diagnostics":{"counts":{"error":0,"hint":0,"information":0,"total":1,"unknown":0,"warning":1}},"path":"Demo.lean","readiness":{"blockingDiagnostics":[],"blockingErrorCount":0,"blockingMessages":[],"reason":"ok","saveReady":true},"version":3}}}
+```
+
+A failed terminal response uses the same envelope and preserves the latest progress observation in
+its semantic `payload`:
+
+```jsonl
+{"clientRequestId":"sync-8","kind":"response","payload":{"error":{"code":"syncBarrierIncomplete","data":{"completionBlockingDiagnostics":[],"recoveryPlan":["lean-beam refresh \"Demo.lean\"","lake build"],"saveDeps":[],"staleDirectDeps":[],"targetPath":"Demo.lean"},"message":"Lean diagnostics barrier did not complete for file:///workspace/Demo.lean at version 3; fileProgress={\"done\":false,\"updates\":3}. An imported target may be stale or broken, or the Lean worker may have exited. Run `lake build` or fix the upstream module first."},"fileProgress":{"done":false,"updates":3},"ok":false}}
+```
+
+The response `payload` is the semantic result and never repeats `clientRequestId`. The ordinary
+wrapper's final stdout object may echo a caller-supplied `BEAM_REQUEST_ID` as a presentation
+convenience; internally generated wrapper cancellation IDs remain hidden. This decoration is not
+part of the broker `Response` type.
+
+The terminal response's `fileProgress` is the latest observation available when the result was
+constructed. It can be newer than the last live broker `fileProgress` event because the barrier can
+adjust or reuse a prior observation, and it does not imply that the current request itself emitted
+every preceding update. Raw broker events are not throttled; MCP progress notifications are.
 
 ## MCP Diagnostics
 
@@ -174,12 +208,12 @@ report `rangeStartLine` and/or `rangeEndLine`; MCP spells these `range_start_lin
 `range_end_line`. The range end is the upper line bound reported by
 Lean's progress ranges, not the source file's line count; diagnostics may legitimately refer to
 lines beyond it. The final response contains the latest observation available when that response is
-constructed, so it may be newer than the last throttled live notification. An operation can also
-reuse a previously observed value without emitting live file progress; `updates` is not a count of
-work performed by the current request. Use these fields for coarse UI progress only. Final machine
-decisions should use the readiness and diagnostic result fields. MCP includes final
-`document_progress` only for `lean_sync`, `lean_refresh`, `lean_save`, and `lean_close_save`; it is
-not inherited by `runAt` or unrelated tools.
+constructed, so it may be newer than the last live broker event or throttled MCP notification. An
+operation can also reuse a previously observed value without emitting live file progress; `updates`
+is not a count of work performed by the current request. Use these fields for coarse UI progress
+only. Final machine decisions should use the readiness and diagnostic result fields. MCP includes
+final `document_progress` only for `lean_sync`, `lean_refresh`, `lean_save`, and
+`lean_close_save`; it is not inherited by `runAt` or unrelated tools.
 
 For `sync`, `refresh`, `save`, and `close-save`, completed Lean file progress is one input to the
 diagnostics-complete barrier. For non-barrier calls, file progress may be partial because the

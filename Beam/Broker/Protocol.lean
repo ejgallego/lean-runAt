@@ -476,8 +476,20 @@ structure SyncDiagnosticCounts where
   information : Nat := 0
   hint : Nat := 0
   unknown : Nat := 0
-  total : Nat := 0
-  deriving Inhabited, ToJson, BEq, Repr
+  deriving Inhabited, BEq, Repr
+
+def SyncDiagnosticCounts.total (counts : SyncDiagnosticCounts) : Nat :=
+  counts.error + counts.warning + counts.information + counts.hint + counts.unknown
+
+instance : ToJson SyncDiagnosticCounts where
+  toJson counts := Json.mkObj [
+    ("error", toJson counts.error),
+    ("warning", toJson counts.warning),
+    ("information", toJson counts.information),
+    ("hint", toJson counts.hint),
+    ("unknown", toJson counts.unknown),
+    ("total", toJson counts.total)
+  ]
 
 instance : FromJson SyncDiagnosticCounts where
   fromJson? json := do
@@ -498,7 +510,6 @@ instance : FromJson SyncDiagnosticCounts where
       information
       hint
       unknown
-      total
     }
 
 structure SyncBlockingDiagnostic where
@@ -674,9 +685,7 @@ instance : FromJson SyncFileResult where
 
 /-- Stable broker result for a successfully published Lean checkpoint. -/
 structure SaveOleanResult where
-  path : String
   module : String
-  version : Nat
   sourceHash : String
   olean : String
   ilean : String
@@ -688,6 +697,12 @@ structure SaveOleanResult where
   bc? : Option String := none
   sync : SyncFileResult
   deriving Inhabited
+
+def SaveOleanResult.path (result : SaveOleanResult) : String :=
+  result.sync.path
+
+def SaveOleanResult.version (result : SaveOleanResult) : Nat :=
+  result.sync.version
 
 instance : ToJson SaveOleanResult where
   toJson result :=
@@ -740,9 +755,7 @@ instance : FromJson SaveOleanResult where
     unless version == sync.version do
       throw s!"save result version {version} does not match sync version {sync.version}"
     pure {
-      path
       module
-      version
       sourceHash
       olean
       ilean
@@ -757,9 +770,11 @@ instance : FromJson SaveOleanResult where
 
 /-- Stable broker result for an artifact save followed by closing the mirrored document. -/
 structure CloseSaveResult where
-  closed : Bool
   saved : SaveOleanResult
   deriving Inhabited
+
+def CloseSaveResult.closed (_ : CloseSaveResult) : Bool :=
+  true
 
 instance : ToJson CloseSaveResult where
   toJson result := Json.mkObj [
@@ -774,51 +789,65 @@ instance : FromJson CloseSaveResult where
     let saved ← json.getObjValAs? SaveOleanResult "saved"
     unless closed do
       throw "close-save result requires 'closed' to be true"
-    pure { closed, saved }
+    pure { saved }
 
-structure Response where
-  ok : Bool := true
-  result? : Option Json := none
-  error? : Option Error := none
+/-- A broker failure together with observations collected before the request failed. -/
+structure ResponseFailure where
+  error : Error
   fileProgress? : Option SyncFileProgress := none
-  clientRequestId? : Option String := none
   deriving Inhabited
+
+/-- A successful broker payload or a typed broker failure. -/
+inductive Response where
+  | successResult (result : Json) (fileProgress? : Option SyncFileProgress)
+  | errorResult (failure : ResponseFailure)
+  deriving Inhabited
+
+def Response.ok : Response → Bool
+  | .successResult .. => true
+  | .errorResult .. => false
+
+def Response.result? : Response → Option Json
+  | .successResult result .. => some result
+  | .errorResult .. => none
+
+def Response.error? : Response → Option Error
+  | .successResult .. => none
+  | .errorResult failure => some failure.error
+
+def Response.fileProgress? : Response → Option SyncFileProgress
+  | .successResult _ fileProgress? => fileProgress?
+  | .errorResult failure => failure.fileProgress?
 
 instance : ToJson Response where
   toJson resp :=
-    Json.mkObj <|
-      [("ok", toJson resp.ok)] ++
-      (match resp.result? with
-      | some result => [("result", result)]
-      | none => []) ++
-      (match resp.error? with
-      | some err => [("error", toJson err)]
-      | none => []) ++
+    let payloadFields :=
+      match resp with
+      | .successResult result _ => [("ok", toJson true), ("result", result)]
+      | .errorResult failure => [("ok", toJson false), ("error", toJson failure.error)]
+    Json.mkObj <| payloadFields ++
       (match resp.fileProgress? with
       | some progress => [("fileProgress", toJson progress)]
-      | none => []) ++
-      (match resp.clientRequestId? with
-      | some clientRequestId => [("clientRequestId", toJson clientRequestId)]
       | none => [])
 
 instance : FromJson Response where
   fromJson? j := do
     requireOnlyJsonFields "Beam daemon response"
-      #["ok", "result", "error", "fileProgress", "clientRequestId"] j
+      #["ok", "result", "error", "fileProgress"] j
     let result? ← optionalField? (α := Json) j "result"
     let error? ← optionalField? (α := Error) j "error"
     let fileProgress? ← optionalField? (α := SyncFileProgress) j "fileProgress"
-    let clientRequestId? ← optionalField? (α := String) j "clientRequestId"
     let ok ← j.getObjValAs? Bool "ok"
-    if ok && error?.isSome then
-      throw "invalid Beam daemon response: ok=true must not include 'error'"
-    if ok && result?.isNone then
-      throw "invalid Beam daemon response: ok=true must include 'result'"
-    if !ok && error?.isNone then
-      throw "invalid Beam daemon response: ok=false must include 'error'"
-    if !ok && result?.isSome then
-      throw "invalid Beam daemon response: ok=false must not include 'result'"
-    pure { ok, result?, error?, fileProgress?, clientRequestId? }
+    if ok then
+      match result?, error? with
+      | some result, none => pure <| .successResult result fileProgress?
+      | _, some _ => throw "invalid Beam daemon response: ok=true must not include 'error'"
+      | none, none => throw "invalid Beam daemon response: ok=true must include 'result'"
+    else
+      match result?, error? with
+      | none, some error => pure <| .errorResult { error, fileProgress? }
+      | some _, _ => throw "invalid Beam daemon response: ok=false must not include 'result'"
+      | none, none => throw "invalid Beam daemon response: ok=false must include 'error'"
 
 def syncBarrierIncompleteCode : String :=
   "syncBarrierIncomplete"
@@ -832,79 +861,105 @@ def saveUnsupportedSetupCode : String :=
 def saveTargetNotModuleCode : String :=
   "saveTargetNotModule"
 
-inductive StreamKind where
+private inductive StreamKind where
   | response
   | fileProgress
   | diagnostic
-  deriving Inhabited, BEq, Repr
 
-def StreamKind.key : StreamKind → String
+private def StreamKind.key : StreamKind → String
   | .response => "response"
   | .fileProgress => "fileProgress"
   | .diagnostic => "diagnostic"
 
-instance : ToJson StreamKind where
+private instance : ToJson StreamKind where
   toJson kind := toJson kind.key
 
-instance : FromJson StreamKind where
+private instance : FromJson StreamKind where
   fromJson?
     | .str "response" => .ok .response
     | .str "fileProgress" => .ok .fileProgress
     | .str "diagnostic" => .ok .diagnostic
     | j => .error s!"expected Beam daemon stream kind, got {j.compress}"
 
-structure StreamMessage where
-  kind : StreamKind
-  response? : Option Response := none
-  fileProgress? : Option SyncFileProgress := none
-  diagnostic? : Option StreamDiagnostic := none
-  clientRequestId? : Option String := none
-  deriving Inhabited, ToJson
+/-- One decoded broker stream event with exactly the payload selected by its wire `kind`. -/
+inductive StreamMessage where
+  | response (clientRequestId? : Option String) (response : Response)
+  | fileProgress (clientRequestId? : Option String) (progress : SyncFileProgress)
+  | diagnostic (clientRequestId? : Option String) (diagnostic : StreamDiagnostic)
+  deriving Inhabited
+
+def StreamMessage.clientRequestId? : StreamMessage → Option String
+  | .response clientRequestId? _
+  | .fileProgress clientRequestId? _
+  | .diagnostic clientRequestId? _ => clientRequestId?
+
+instance : ToJson StreamMessage where
+  toJson
+    | .response clientRequestId? resp =>
+        Json.mkObj <| [
+          ("kind", toJson StreamKind.response),
+          ("payload", toJson resp)
+        ] ++ optionalJsonField "clientRequestId" clientRequestId?
+    | .fileProgress clientRequestId? progress =>
+        Json.mkObj <| [
+          ("kind", toJson StreamKind.fileProgress),
+          ("payload", toJson progress)
+        ] ++ optionalJsonField "clientRequestId" clientRequestId?
+    | .diagnostic clientRequestId? streamDiagnostic =>
+        Json.mkObj <| [
+          ("kind", toJson StreamKind.diagnostic),
+          ("payload", toJson streamDiagnostic)
+        ] ++ optionalJsonField "clientRequestId" clientRequestId?
+
+private def decodeStreamPayload [FromJson α]
+    (kind : StreamKind)
+    (payload : Json) : Except String α :=
+  (fromJson? payload).mapError fun err =>
+    s!"invalid Beam {kind.key} stream payload: {err}"
 
 instance : FromJson StreamMessage where
   fromJson? json := do
     requireOnlyJsonFields "Beam stream message"
-      #["kind", "response", "fileProgress", "diagnostic", "clientRequestId"] json
+      #["kind", "payload", "clientRequestId"] json
     let kind ← json.getObjValAs? StreamKind "kind"
-    let response? ← optionalField? (α := Response) json "response"
-    let fileProgress? ← optionalField? (α := SyncFileProgress) json "fileProgress"
-    let diagnostic? ← optionalField? (α := StreamDiagnostic) json "diagnostic"
+    let payload ← json.getObjVal? "payload"
     let clientRequestId? ← optionalField? (α := String) json "clientRequestId"
     match kind with
     | .response =>
-        unless response?.isSome && fileProgress?.isNone && diagnostic?.isNone do
-          throw "Beam response stream message requires only a 'response' payload"
-        unless clientRequestId?.isNone do
-          throw "Beam response stream message carries clientRequestId only in its response payload"
+        pure <| .response clientRequestId? (← decodeStreamPayload kind payload)
     | .fileProgress =>
-        unless response?.isNone && fileProgress?.isSome && diagnostic?.isNone do
-          throw "Beam fileProgress stream message requires only a 'fileProgress' payload"
+        pure <| .fileProgress clientRequestId? (← decodeStreamPayload kind payload)
     | .diagnostic =>
-        unless response?.isNone && fileProgress?.isNone && diagnostic?.isSome do
-          throw "Beam diagnostic stream message requires only a 'diagnostic' payload"
-    pure { kind, response?, fileProgress?, diagnostic?, clientRequestId? }
-
-def StreamMessage.mkResponse (resp : Response) : StreamMessage :=
-  { kind := .response, response? := some resp }
-
-def StreamMessage.mkFileProgress
-    (clientRequestId? : Option String)
-    (progress : SyncFileProgress) : StreamMessage :=
-  { kind := .fileProgress, fileProgress? := some progress, clientRequestId? := clientRequestId? }
-
-def StreamMessage.mkDiagnostic
-    (clientRequestId? : Option String)
-    (streamDiagnostic : StreamDiagnostic) : StreamMessage :=
-  { kind := .diagnostic, diagnostic? := some streamDiagnostic, clientRequestId? := clientRequestId? }
+        pure <| .diagnostic clientRequestId? (← decodeStreamPayload kind payload)
 
 def Response.success (result : Json) : Response :=
-  { ok := true, result? := some result }
+  .successResult result none
 
-def Response.error (code : String) (message : String := "") (data? : Option Json := none) : Response :=
-  { ok := false, error? := some { code, message, data? } }
+def ResponseFailure.toResponse (failure : ResponseFailure) : Response :=
+  .errorResult failure
 
-def Response.withClientRequestId (resp : Response) (clientRequestId? : Option String) : Response :=
-  { resp with clientRequestId? := clientRequestId? <|> resp.clientRequestId? }
+def Response.withFileProgress
+    (resp : Response)
+    (fileProgress : SyncFileProgress) : Response :=
+  match resp with
+  | .successResult result _ =>
+      .successResult result (some fileProgress)
+  | .errorResult failure =>
+      .errorResult { failure with fileProgress? := some fileProgress }
+
+def Response.withOptionalFileProgress
+    (resp : Response)
+    (fileProgress? : Option SyncFileProgress) : Response :=
+  match fileProgress? with
+  | some fileProgress => resp.withFileProgress fileProgress
+  | none => resp
+
+def ResponseFailure.withOptionalFileProgress
+    (failure : ResponseFailure)
+    (fileProgress? : Option SyncFileProgress) : ResponseFailure :=
+  match fileProgress? with
+  | some fileProgress => { failure with fileProgress? := some fileProgress }
+  | none => failure
 
 def Request.resolvedWorkspaceId? (req : Request) : Option WorkspaceId :=
   match req.workspaceId?, req.handle? with

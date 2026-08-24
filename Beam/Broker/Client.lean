@@ -34,13 +34,6 @@ def parseEndpointOption (args : List String) : Except String (Endpoint × List S
   | _ =>
       pure (.tcp 8765, args)
 
-def parsePortOption (args : List String) : Except String (UInt16 × List String) := do
-  match args with
-  | "--port" :: port :: rest =>
-      pure (← parsePortText "port" port, rest)
-  | _ =>
-      pure (8765, args)
-
 private def decodeStreamMessage (msg : String) : IO StreamMessage := do
   match Json.parse msg with
   | .error err => throw <| IO.userError s!"invalid Beam daemon response json: {err}"
@@ -84,13 +77,14 @@ partial def sendRequestWithStream
     let rec loop : IO Response := do
       let msg ← Transport.recvMsg client
       let stream ← decodeStreamMessage msg
+      unless stream.clientRequestId? == req.clientRequestId? do
+        throw <| IO.userError
+          s!"Beam daemon stream request id {stream.clientRequestId?} does not match request id {req.clientRequestId?}"
       onStream stream
-      match stream.kind with
-      | .response =>
-          let some resp := stream.response?
-            | throw <| IO.userError "invalid Beam daemon response stream: missing response payload"
-          pure resp
-      | .fileProgress | .diagnostic =>
+      match stream with
+      | .response _ response =>
+          pure response
+      | .fileProgress .. | .diagnostic .. =>
           loop
     loop
   finally
@@ -101,23 +95,13 @@ partial def sendRequestWithCallbacks
     (req : Request)
     (callbacks : StreamCallbacks := {}) : IO Response := do
   sendRequestWithStream endpoint req fun stream => do
-    match stream.kind with
-    | .response =>
+    match stream with
+    | .response .. =>
         pure ()
-    | .fileProgress =>
-        let some progress := stream.fileProgress?
-          | throw <| IO.userError "invalid Beam daemon response stream: missing fileProgress payload"
-        callbacks.onFileProgress stream.clientRequestId? progress
-    | .diagnostic =>
-        let some diagnostic := stream.diagnostic?
-          | throw <| IO.userError "invalid Beam daemon response stream: missing diagnostic payload"
-        callbacks.onDiagnostic stream.clientRequestId? diagnostic
-def sendRequestWithProgress
-    (endpoint : Endpoint)
-    (req : Request)
-    (onFileProgress : Option String → SyncFileProgress → IO Unit) : IO Response :=
-  sendRequestWithCallbacks endpoint req { onFileProgress := onFileProgress }
-
+    | .fileProgress clientRequestId? progress =>
+        callbacks.onFileProgress clientRequestId? progress
+    | .diagnostic clientRequestId? diagnostic =>
+        callbacks.onDiagnostic clientRequestId? diagnostic
 def sendRequest (endpoint : Endpoint) (req : Request) : IO Response :=
   sendRequestWithCallbacks endpoint req
 
@@ -130,13 +114,20 @@ def readRequestFromStdin : IO Request := do
       | .ok req => pure req
       | .error err => throw <| IO.userError s!"invalid request payload: {err}"
 
-def printResponse (resp : Response) : IO Unit := do
-  IO.println <| Beam.orderedJsonPretty (toJson resp)
+/-- Render a CLI response, optionally adding caller-visible correlation at the presentation edge. -/
+def responseOutputJson (resp : Response) (clientRequestId? : Option String := none) : Json :=
+  match clientRequestId? with
+  | some clientRequestId =>
+      (toJson resp).setObjVal! "clientRequestId" (toJson clientRequestId)
+  | none =>
+      toJson resp
+
+def printResponse (resp : Response) (clientRequestId? : Option String := none) : IO Unit := do
+  IO.println <| Beam.orderedJsonPretty (responseOutputJson resp clientRequestId?)
 
 def failOnError (resp : Response) : IO Unit := do
-  if resp.ok then
-    pure ()
-  else
-    throw <| IO.userError ((resp.error?.map (·.message)).getD "Beam daemon error")
+  match resp with
+  | .successResult .. => pure ()
+  | .errorResult failure => throw <| IO.userError failure.error.message
 
 end Beam.Broker

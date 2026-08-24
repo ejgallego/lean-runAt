@@ -38,22 +38,22 @@ private def requireError
     (expectedCode : String)
     (expectedMessage : String)
     (resp : Response) : IO Error := do
-  if resp.ok then
-    throw <| IO.userError s!"{label}: expected error response, got {(toJson resp).compress}"
-  match resp.error? with
-  | some err =>
+  match resp with
+  | .successResult .. =>
+      throw <| IO.userError s!"{label}: expected error response, got {(toJson resp).compress}"
+  | .errorResult failure =>
+      let err := failure.error
       if err.code != expectedCode then
         throw <| IO.userError s!"{label}: expected code={expectedCode}, got {(toJson resp).compress}"
       if err.message != expectedMessage then
         throw <| IO.userError s!"{label}: expected message={expectedMessage}, got {(toJson resp).compress}"
       pure err
-  | none =>
-      throw <| IO.userError s!"{label}: expected error payload, got {(toJson resp).compress}"
 
 private def requireResponseResult (label : String) (resp : Response) : IO Json := do
-  match resp.result? with
-  | some result => pure result
-  | none => throw <| IO.userError s!"{label}: expected result payload, got {(toJson resp).compress}"
+  match resp with
+  | .successResult result .. => pure result
+  | .errorResult .. =>
+      throw <| IO.userError s!"{label}: expected result payload, got {(toJson resp).compress}"
 
 private def requireErrorData (label : String) (err : Error) : IO Json := do
   match err.data? with
@@ -63,12 +63,12 @@ private def requireErrorData (label : String) (err : Error) : IO Json := do
 private def expectRequestArgError
     (label : String)
     (expectedMessage : String)
-    (result : Except Response α) : IO Unit := do
+    (result : Except ResponseFailure α) : IO Unit := do
   match result with
   | .ok _ =>
       throw <| IO.userError s!"{label}: expected invalidParams response"
-  | .error resp =>
-      discard <| requireError label "invalidParams" expectedMessage resp
+  | .error failure =>
+      discard <| requireError label "invalidParams" expectedMessage failure.toResponse
 
 private def lspPos (line character : Nat) : Lsp.Position :=
   { line, character }
@@ -93,7 +93,7 @@ private def syncResultFor
     (warningCount : Nat := 0) : SyncFileResult := {
   path := "Demo.lean"
   version
-  diagnostics := { counts := { warning := warningCount, total := warningCount } }
+  diagnostics := { counts := { warning := warningCount } }
   readiness := {
     saveReady
     reason
@@ -134,52 +134,90 @@ private def checkResponseJsonShape : IO Unit := do
   requireFieldPresent "success response" "result" successJson
   requireFieldAbsent "success response" "error" successJson
 
-  let errorJson := toJson <| Response.error "invalidParams" "bad request"
+  let errorJson := toJson <| (responseFailureFor .invalidParams "bad request").toResponse
   requireJsonBool "error response" "ok" false errorJson
   requireFieldPresent "error response" "error" errorJson
   requireFieldAbsent "error response" "result" errorJson
 
+  requireFieldAbsent "semantic success response" "clientRequestId" successJson
+
 private def checkStreamMessageDecode : IO Unit := do
   let response := Response.success (Json.mkObj [("value", toJson (1 : Nat))])
   let validResponse ← expectOk "valid response stream" <|
-    fromJson? (α := StreamMessage) (toJson <| StreamMessage.mkResponse response)
-  require "valid response stream kind" (validResponse.kind == .response)
+    fromJson? (α := StreamMessage) (toJson <| StreamMessage.response none response)
+  match validResponse with
+  | .response none _ => pure ()
+  | other => throw <| IO.userError s!"valid response stream decoded as {(toJson other).compress}"
 
-  let correlatedResponse := { response with clientRequestId? := some "req-response" }
+  let correlatedResponseJson :=
+    toJson <| StreamMessage.response (some "req-response") response
+  requireJsonString "correlated response stream" "clientRequestId" "req-response"
+    correlatedResponseJson
+  let correlatedResponsePayload ←
+    requireObjVal "correlated response stream" "payload" correlatedResponseJson
+  requireFieldAbsent "correlated response payload" "clientRequestId" correlatedResponsePayload
   let validCorrelatedResponse ← expectOk "valid correlated response stream" <|
-    fromJson? (α := StreamMessage) (toJson <| StreamMessage.mkResponse correlatedResponse)
-  require "valid correlated response stream omits redundant outer request id"
-    validCorrelatedResponse.clientRequestId?.isNone
-  require "valid correlated response stream preserves payload request id"
-    (validCorrelatedResponse.response?.bind (·.clientRequestId?) == some "req-response")
+    fromJson? (α := StreamMessage) correlatedResponseJson
+  match validCorrelatedResponse with
+  | .response clientRequestId? decodedResponse =>
+      require "valid correlated response stream preserves envelope request id"
+        (clientRequestId? == some "req-response")
+      require "valid correlated response stream preserves response payload"
+        (decodedResponse.result?.isSome)
+  | other =>
+      throw <| IO.userError s!"valid correlated response decoded as {(toJson other).compress}"
 
   let progress : SyncFileProgress := { updates := 2, done := false }
   let validProgress ← expectOk "valid progress stream" <|
-    fromJson? (α := StreamMessage) (toJson <| StreamMessage.mkFileProgress (some "req-1") progress)
-  require "valid progress stream kind" (validProgress.kind == .fileProgress)
+    fromJson? (α := StreamMessage) (toJson <| StreamMessage.fileProgress (some "req-1") progress)
+  match validProgress with
+  | .fileProgress clientRequestId? decodedProgress =>
+      require "valid progress stream preserves request id" (clientRequestId? == some "req-1")
+      require "valid progress stream preserves payload" (decodedProgress.updates == 2)
+  | other => throw <| IO.userError s!"valid progress stream decoded as {(toJson other).compress}"
+
+  let diagnostic : StreamDiagnostic := {
+    path := "Demo.lean"
+    uri := "file:///repo/Demo.lean"
+    version? := some 3
+    severity? := some .warning
+    range := lspRange 0 0 1
+    message := "unused variable"
+  }
+  let validDiagnostic ← expectOk "valid diagnostic stream" <|
+    fromJson? (α := StreamMessage) <|
+      toJson <| StreamMessage.diagnostic (some "req-2") diagnostic
+  match validDiagnostic with
+  | .diagnostic clientRequestId? decodedDiagnostic =>
+      require "valid diagnostic stream preserves request id" (clientRequestId? == some "req-2")
+      require "valid diagnostic stream preserves payload"
+        (decodedDiagnostic.path == "Demo.lean" && decodedDiagnostic.message == "unused variable")
+  | other =>
+      throw <| IO.userError s!"valid diagnostic stream decoded as {(toJson other).compress}"
 
   let responseJson := toJson response
   let progressJson := toJson progress
+  let diagnosticJson := toJson diagnostic
   expectDecodeFailure StreamMessage "response stream missing payload" <|
     Json.mkObj [("kind", toJson "response")]
   expectDecodeFailure StreamMessage "progress stream with response payload" <|
-    Json.mkObj [("kind", toJson "fileProgress"), ("response", responseJson)]
-  expectDecodeFailure StreamMessage "response stream with two payloads" <|
+    Json.mkObj [("kind", toJson "fileProgress"), ("payload", responseJson)]
+  expectDecodeFailure StreamMessage "response stream with legacy variant payload field" <|
+    Json.mkObj [("kind", toJson "response"), ("response", responseJson)]
+  expectDecodeFailure StreamMessage "progress stream with legacy variant payload field" <|
+    Json.mkObj [("kind", toJson "fileProgress"), ("fileProgress", progressJson)]
+  expectDecodeFailure StreamMessage "diagnostic stream with legacy variant payload field" <|
+    Json.mkObj [("kind", toJson "diagnostic"), ("diagnostic", diagnosticJson)]
+  expectDecodeFailure StreamMessage "response stream with nested request id" <|
     Json.mkObj [
       ("kind", toJson "response"),
-      ("response", responseJson),
-      ("fileProgress", progressJson)
-    ]
-  expectDecodeFailure StreamMessage "response stream with redundant outer request id" <|
-    Json.mkObj [
-      ("kind", toJson "response"),
-      ("response", toJson correlatedResponse),
+      ("payload", (toJson response).setObjVal! "clientRequestId" (toJson "req-response")),
       ("clientRequestId", toJson "req-response")
     ]
   expectDecodeFailure StreamMessage "stream with undeclared field" <|
     Json.mkObj [
       ("kind", toJson "fileProgress"),
-      ("fileProgress", progressJson),
+      ("payload", progressJson),
       ("extra", toJson true)
     ]
 
@@ -224,12 +262,9 @@ private def checkResponseJsonDecode : IO Unit := do
     ("result", Json.mkObj []),
     ("extra", toJson true)
   ]
-
 private def checkSaveResultJsonDecode : IO Unit := do
   let saveResult : SaveOleanResult := {
-    path := "Demo.lean"
     module := "Demo"
-    version := 7
     sourceHash := "9a9bdc9950870951"
     olean := "/tmp/Demo.olean"
     ilean := "/tmp/Demo.ilean"
@@ -242,10 +277,14 @@ private def checkSaveResultJsonDecode : IO Unit := do
     fromJson? (α := SaveOleanResult) (toJson saveResult)
   require "save result round-trip preserves source hash"
     (decodedSave.sourceHash == saveResult.sourceHash)
+  require "save result derives its path from nested sync"
+    (decodedSave.path == "Demo.lean")
+  require "save result derives its version from nested sync"
+    (decodedSave.version == 7)
   require "save result round-trip preserves nested sync version"
     (decodedSave.sync.version == saveResult.sync.version)
 
-  let closeSaveResult : CloseSaveResult := { closed := true, saved := saveResult }
+  let closeSaveResult : CloseSaveResult := { saved := saveResult }
   let decodedCloseSave ← expectOk "close-save result round-trip" <|
     fromJson? (α := CloseSaveResult) (toJson closeSaveResult)
   require "close-save result round-trip preserves closure and nested save"
@@ -272,15 +311,12 @@ private def checkSaveResultJsonDecode : IO Unit := do
     (toJson closeSaveResult).setObjVal! "closed" (toJson false)
 
 private def checkOrderedJsonPretty : IO Unit := do
-  let resp : Response := {
-    ok := true
-    result? := some <| toJson <| syncResultFor 3
-    fileProgress? := some {
+  let resp : Response :=
+    (Response.success <| toJson <| syncResultFor 3).withFileProgress {
       updates := 2
       done := true
       rangeEndLine? := some 1
     }
-  }
   let json := toJson resp
   let rendered := Beam.orderedJsonPretty json
   let expected := String.intercalate "\n" [
@@ -349,7 +385,7 @@ private def checkSyncFileResultDecode : IO Unit := do
   expectDecodeFailure SyncFileResult "sync result missing saveReady" <|
     syncFileResultJson 7 incompleteReadiness
 
-private def checkBrokerFailureResponse : IO Unit := do
+private def checkFailureResponseConversions : IO Unit := do
   let data := Json.mkObj [("uri", toJson "file:///A.lean")]
   let failure : BrokerFailure := {
     code := .contentModified
@@ -365,6 +401,20 @@ private def checkBrokerFailureResponse : IO Unit := do
   | none =>
       throw <| IO.userError "broker failure response: expected error data"
 
+  let progress : SyncFileProgress := { updates := 3, done := false, rangeEndLine? := some 17 }
+  let responseFailure : ResponseFailure := {
+    error := { code := "backendSpecific", message := "backend failed", data? := some data }
+    fileProgress? := some progress
+  }
+  match responseFailure.toResponse with
+  | .successResult .. =>
+      throw <| IO.userError "response failure converted to a successful response"
+  | .errorResult failure =>
+      require "response failure preserves an arbitrary backend code"
+        (failure.error.code == "backendSpecific")
+      require "response failure preserves progress metadata"
+        (failure.fileProgress? == some progress)
+
 private def checkDocumentVersionMismatchErrorData : IO Unit := do
   let data := documentVersionMismatchErrorData 1 2
     (currentVersion? := some 2)
@@ -374,24 +424,6 @@ private def checkDocumentVersionMismatchErrorData : IO Unit := do
   requireJsonInt "version mismatch data" "acceptedVersion" 2 data
   requireJsonInt "version mismatch data" "currentVersion" 2 data
   requireJsonString "version mismatch data" "uri" "file:///A.lean" data
-
-private def checkJsonRpcErrorObjectMapping : IO Unit := do
-  discard <| requireError
-    "jsonrpc known numeric error"
-    "invalidParams"
-    "bad params"
-    (responseForJsonRpcErrorObject <| Json.mkObj [
-      ("code", toJson (-32602 : Int)),
-      ("message", toJson "bad params")
-    ])
-  discard <| requireError
-    "jsonrpc string error"
-    "-32803"
-    "focused goal error"
-    (responseForJsonRpcErrorObject <| Json.mkObj [
-      ("code", toJson "-32803"),
-      ("message", toJson "focused goal error")
-    ])
 
 private def checkReadinessBoundary : IO Unit := do
   let uri := "file:///workspace/SaveSmoke/A.lean"
@@ -418,13 +450,15 @@ private def checkReadinessBoundary : IO Unit := do
     needsSave := true
   }]
   let incompleteResp :=
-    syncBarrierIncompleteResponse uri 7 "SaveSmoke/A.lean" hints #[incompleteDiagnostic]
-      diagnosticBarrier.fileProgress?
+    (syncBarrierIncompleteFailure uri 7 "SaveSmoke/A.lean" hints #[incompleteDiagnostic]
+      diagnosticBarrier.fileProgress?).toResponse
   let err ← requireError
     "readiness incomplete response"
     syncBarrierIncompleteCode
     (syncBarrierIncompleteMessage uri 7 diagnosticBarrier.fileProgress?)
     incompleteResp
+  require "readiness incomplete response should preserve fileProgress"
+    (incompleteResp.fileProgress? == diagnosticBarrier.fileProgress?)
   let data ← requireErrorData "readiness incomplete response" err
   requireJsonString "readiness incomplete response data" "targetPath" "SaveSmoke/A.lean" data
   let saveDepsJson ← requireObjVal "readiness incomplete response data" "saveDeps" data
@@ -832,9 +866,8 @@ def main : IO Unit := do
   checkSaveResultJsonDecode
   checkOrderedJsonPretty
   checkSyncFileResultDecode
-  checkBrokerFailureResponse
+  checkFailureResponseConversions
   checkDocumentVersionMismatchErrorData
-  checkJsonRpcErrorObjectMapping
   checkReadinessBoundary
   checkStaleDirectDepHints
   checkRequestArgsBoundary

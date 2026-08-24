@@ -29,7 +29,7 @@ structure PendingResult where
 
 structure PendingRequest where
   cancelRef? : Option (IO.Ref Bool) := none
-  promise : IO.Promise (Except Response PendingResult)
+  promise : IO.Promise (Except ResponseFailure PendingResult)
   tracked? : Option (DocumentUri × Nat) := none
   progressRef : IO.Ref (Option SyncFileProgress)
   diagnosticsRef : IO.Ref (Array Diagnostic)
@@ -88,24 +88,16 @@ def resolveError
     (code : ErrorCode)
     (message : String)
     (data? : Option Json := none) : IO Unit := do
-  let errJson := Json.mkObj <|
-    [("code", toJson code), ("message", toJson message)] ++
-    match data? with
-    | some data => [("data", data)]
-    | none => []
+  let progress? ← pending.progressRef.get
+  let failure :=
+    (backendResponseFailure code message data?).withOptionalFileProgress progress?
   try
-    pending.promise.resolve (.error (responseForJsonRpcErrorObject errJson))
+    pending.promise.resolve (.error failure)
   catch _ =>
     pure ()
 
-def resolveErrorJson (pending : PendingRequest) (errJson : Json) : IO Unit := do
-  try
-    pending.promise.resolve (.error (responseForJsonRpcErrorObject errJson))
-  catch _ =>
-    pure ()
-
-def awaitOutcome (promise : IO.Promise (Except Response PendingResult)) :
-    IO (Except Response PendingResult) := do
+def awaitOutcome (promise : IO.Promise (Except ResponseFailure PendingResult)) :
+    IO (Except ResponseFailure PendingResult) := do
   let some result ← IO.wait promise.result?
     | throw <| IO.userError "pending broker request promise dropped"
   pure result
@@ -221,8 +213,11 @@ private def emitNewTrackedDiagnostics
       seen := seen.insert key
       match emitDiagnostic? with
       | some emitDiagnostic =>
-          emitDiagnostic <|
-            streamDiagnosticOfDiagnostic root diagnosticParam.uri diagnosticParam.version? diagnostic
+          try
+            emitDiagnostic <|
+              streamDiagnosticOfDiagnostic root diagnosticParam.uri diagnosticParam.version? diagnostic
+          catch _ =>
+            pure ()
       | none =>
           pure ()
   pure seen
@@ -274,11 +269,13 @@ end PendingRequest
 
 namespace PendingRequestStore
 
-def failAll (store : PendingRequestStore) (resp : Response) : IO Unit := do
+def failAll (store : PendingRequestStore) (failure : ResponseFailure) : IO Unit := do
   let pending ← clear store
   for req in pending do
+    let progress? ← req.progressRef.get
+    let failure := failure.withOptionalFileProgress progress?
     try
-      req.promise.resolve (.error resp)
+      req.promise.resolve (.error failure)
     catch _ =>
       pure ()
 
@@ -405,12 +402,12 @@ def markCancelledActive
 end ActiveRequestRegistry
 
 def ensureRequestNotCancelled
-    (cancelRef? : Option (IO.Ref Bool)) : IO (Except Response Unit) := do
+    (cancelRef? : Option (IO.Ref Bool)) : IO (Except ResponseFailure Unit) := do
   match cancelRef? with
   | none => pure (.ok ())
   | some cancelRef =>
       if ← cancelRef.get then
-        pure <| .error <| BrokerFailure.toResponse {
+        pure <| .error <| BrokerFailure.toResponseFailure {
           code := .requestCancelled
           message := "client requested cancellation"
         }

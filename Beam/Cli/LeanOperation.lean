@@ -163,14 +163,14 @@ def leanSaveRequest
     (root : System.FilePath)
     (path : String)
     (diagnosticScope : DiagnosticScope) : Request :=
-  ({ path, diagnosticScope? := some diagnosticScope } : Beam.Lean.SyncInput).toSaveBrokerRequest
+  ({ path, diagnosticScope? := some diagnosticScope } : Beam.Lean.SaveInput).toSaveBrokerRequest
     (rootText root)
 
 def leanCloseSaveRequest
     (root : System.FilePath)
     (path : String)
     (diagnosticScope : DiagnosticScope) : Request :=
-  ({ path, diagnosticScope? := some diagnosticScope } : Beam.Lean.SyncInput).toCloseSaveBrokerRequest
+  ({ path, diagnosticScope? := some diagnosticScope } : Beam.Lean.SaveInput).toCloseSaveBrokerRequest
     (rootText root)
 
 end Beam.Cli

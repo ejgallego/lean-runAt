@@ -9,19 +9,19 @@ import Beam.Broker.Lean
 
 namespace Beam.Broker
 
-def invalidParamsResponse (message : String) : Response :=
-  reqError "invalidParams" message
+private def invalidParamsFailure (message : String) : ResponseFailure :=
+  responseFailureFor .invalidParams message
 
-private def asInvalidParams (arg : Except String α) : Except Response α :=
-  arg.mapError invalidParamsResponse
+private def asInvalidParams (arg : Except String α) : Except ResponseFailure α :=
+  arg.mapError invalidParamsFailure
 
-def Request.rootArg (req : Request) : Except Response System.FilePath :=
+def Request.rootArg (req : Request) : Except ResponseFailure System.FilePath :=
   asInvalidParams req.requireRoot
 
-def Request.pathArg (req : Request) : Except Response System.FilePath :=
+def Request.pathArg (req : Request) : Except ResponseFailure System.FilePath :=
   asInvalidParams req.requirePath
 
-def Request.cancelRequestIdArg (req : Request) : Except Response String :=
+def Request.cancelRequestIdArg (req : Request) : Except ResponseFailure String :=
   asInvalidParams req.requireCancelRequestId
 
 structure PositionArgs where
@@ -30,7 +30,7 @@ structure PositionArgs where
   line : Nat
   character : Nat
 
-def Request.positionArgs (req : Request) : Except Response PositionArgs := do
+def Request.positionArgs (req : Request) : Except ResponseFailure PositionArgs := do
   let path ← asInvalidParams req.requirePath
   let version ← asInvalidParams req.requireVersion
   let line ← asInvalidParams req.requireLine
@@ -41,7 +41,7 @@ structure RunAtArgs extends PositionArgs where
   text : String
   method : String
 
-def Request.runAtArgs (req : Request) : Except Response RunAtArgs := do
+def Request.runAtArgs (req : Request) : Except ResponseFailure RunAtArgs := do
   let position ← req.positionArgs
   let text ← asInvalidParams req.requireText
   let method ← asInvalidParams (runAtMethod req.backend)
@@ -57,7 +57,7 @@ def Request.runAtArgs (req : Request) : Except Response RunAtArgs := do
 structure HoverArgs extends PositionArgs where
   method : String
 
-def Request.hoverArgs (req : Request) : Except Response HoverArgs := do
+def Request.hoverArgs (req : Request) : Except ResponseFailure HoverArgs := do
   let position ← req.positionArgs
   let method ← asInvalidParams (hoverMethod req.backend)
   pure {
@@ -71,7 +71,7 @@ def Request.hoverArgs (req : Request) : Except Response HoverArgs := do
 structure SignatureHelpArgs extends PositionArgs where
   method : String
 
-def Request.signatureHelpArgs (req : Request) : Except Response SignatureHelpArgs := do
+def Request.signatureHelpArgs (req : Request) : Except ResponseFailure SignatureHelpArgs := do
   let position ← req.positionArgs
   let method ← asInvalidParams (signatureHelpMethod req.backend)
   pure {
@@ -85,7 +85,7 @@ def Request.signatureHelpArgs (req : Request) : Except Response SignatureHelpArg
 structure DefinitionArgs extends PositionArgs where
   method : String
 
-def Request.definitionArgs (req : Request) : Except Response DefinitionArgs := do
+def Request.definitionArgs (req : Request) : Except ResponseFailure DefinitionArgs := do
   let position ← req.positionArgs
   let method ← asInvalidParams (definitionMethod req.backend)
   pure {
@@ -100,7 +100,7 @@ structure ReferencesArgs extends PositionArgs where
   method : String
   includeDeclaration : Bool
 
-def Request.referencesArgs (req : Request) : Except Response ReferencesArgs := do
+def Request.referencesArgs (req : Request) : Except ResponseFailure ReferencesArgs := do
   let position ← req.positionArgs
   let method ← asInvalidParams (referencesMethod req.backend)
   pure {
@@ -117,7 +117,7 @@ structure DocumentSymbolsArgs where
   version : Nat
   method : String
 
-def Request.documentSymbolsArgs (req : Request) : Except Response DocumentSymbolsArgs := do
+def Request.documentSymbolsArgs (req : Request) : Except ResponseFailure DocumentSymbolsArgs := do
   let path ← asInvalidParams req.requirePath
   let version ← asInvalidParams req.requireVersion
   let method ← asInvalidParams (documentSymbolsMethod req.backend)
@@ -127,7 +127,7 @@ structure WorkspaceSymbolsArgs where
   query : String
   method : String
 
-def Request.workspaceSymbolsArgs (req : Request) : Except Response WorkspaceSymbolsArgs := do
+def Request.workspaceSymbolsArgs (req : Request) : Except ResponseFailure WorkspaceSymbolsArgs := do
   let query ← asInvalidParams req.requireQuery
   let method ← asInvalidParams (workspaceSymbolsMethod req.backend)
   pure { query, method }
@@ -138,7 +138,7 @@ structure CodeActionResolveArgs where
   codeAction : Lean.Lsp.CodeAction
   method : String
 
-def Request.codeActionResolveArgs (req : Request) : Except Response CodeActionResolveArgs := do
+def Request.codeActionResolveArgs (req : Request) : Except ResponseFailure CodeActionResolveArgs := do
   let path ← asInvalidParams req.requirePath
   let version ← asInvalidParams req.requireVersion
   let codeAction ← asInvalidParams req.requireCodeAction
@@ -148,7 +148,7 @@ def Request.codeActionResolveArgs (req : Request) : Except Response CodeActionRe
 structure GoalsArgs extends PositionArgs where
   method : String
 
-def Request.goalsArgs (req : Request) : Except Response GoalsArgs := do
+def Request.goalsArgs (req : Request) : Except ResponseFailure GoalsArgs := do
   let position ← req.positionArgs
   let method ← asInvalidParams (goalsMethod req.backend req.mode?)
   pure {
@@ -164,7 +164,7 @@ structure TodoArgs extends PositionArgs where
   endCharacter : Nat
   method : String
 
-def Request.todoArgs (req : Request) : Except Response TodoArgs := do
+def Request.todoArgs (req : Request) : Except ResponseFailure TodoArgs := do
   let position ← req.positionArgs
   let endLine ← asInvalidParams req.requireEndLine
   let endCharacter ← asInvalidParams req.requireEndCharacter
@@ -185,7 +185,7 @@ structure RunWithArgs where
   text : String
   method : String
 
-def Request.runWithArgs (req : Request) : Except Response RunWithArgs := do
+def Request.runWithArgs (req : Request) : Except ResponseFailure RunWithArgs := do
   let path ← asInvalidParams req.requirePath
   let handle ← asInvalidParams req.requireHandle
   let text ← asInvalidParams req.requireText
@@ -197,7 +197,7 @@ structure ReleaseArgs where
   handle : Handle
   method : String
 
-def Request.releaseArgs (req : Request) : Except Response ReleaseArgs := do
+def Request.releaseArgs (req : Request) : Except ResponseFailure ReleaseArgs := do
   let path ← asInvalidParams req.requirePath
   let handle ← asInvalidParams req.requireHandle
   let method ← asInvalidParams (releaseMethod req.backend)

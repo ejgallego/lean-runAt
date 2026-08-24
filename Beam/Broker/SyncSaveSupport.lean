@@ -243,12 +243,9 @@ def effectiveSyncBarrierProgress
 
 def leanSaveResult
     (spec : LeanSaveSpec)
-    (version : Nat)
     (sourceHash : Lake.Hash)
     (sync : SyncFileResult) : SaveOleanResult := {
-  path := spec.relPath
   module := spec.moduleName.toString
-  version
   sourceHash := sourceHash.toString
   olean := spec.oleanPath.toString
   ilean := spec.ileanPath.toString
