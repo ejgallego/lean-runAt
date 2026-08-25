@@ -10,11 +10,12 @@ contributors.
 
 Current maintainer priorities are:
 
-- keep README human-facing and release-ready
+- keep README human-facing and current
 - keep maintainer and agent workflow guidance out of README
+- keep status, setup, compatibility, MCP, and sync/diagnostic contracts at distinct levels of detail
 - make the harness work well for both humans and AI agents without turning it into public product
   surface
-- prefer small targeted fixes over broad refactors unless a release-facing doc or workflow problem
+- prefer small targeted fixes over broad refactors unless a public doc or workflow problem
   demands the larger change
 
 ## Entry Points

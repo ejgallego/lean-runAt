@@ -10,33 +10,19 @@ Rocq Beam is not a second full execution layer. It exposes saved-file goal probe
 
 ## Install
 
-The default agent skill install is Lean-only:
-
-```bash
-./scripts/install-beam.sh --codex
-./scripts/install-beam.sh --claude
-./scripts/install-beam.sh --pi
-./scripts/install-beam.sh --opencode
-./scripts/install-beam.sh --vibe
-./scripts/install-beam.sh --all-skills
-```
-
-Install the optional Rocq skill by adding `--rocq-skill` to a selected agent target:
+Install Beam through the main [setup guide](SETUP.md). The default agent skill install is
+Lean-only; add `--rocq-skill` to a selected agent target when you also want the optional Rocq skill:
 
 ```bash
 ./scripts/install-beam.sh --codex --rocq-skill
-./scripts/install-beam.sh --claude --rocq-skill
-./scripts/install-beam.sh --pi --rocq-skill
-./scripts/install-beam.sh --opencode --rocq-skill
-./scripts/install-beam.sh --vibe --rocq-skill
 ./scripts/install-beam.sh --all-skills --rocq-skill
 ```
 
 `--rocq-skill` is only a modifier. It must be paired with `--codex`, `--claude`, `--pi`,
 `--opencode`, `--vibe`, `--all-skills`, or an interactive skill target.
 
-General installer locations, MCP registration, and toolchain options are documented in
-[SETUP.md](SETUP.md).
+The full installer target matrix, locations, MCP registration, and toolchain options are documented
+in [SETUP.md](SETUP.md).
 
 ## Rocq Setup
 
