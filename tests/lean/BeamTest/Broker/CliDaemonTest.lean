@@ -505,9 +505,9 @@ private def checkStartupRetryPolicy : IO Unit := do
   require "explicit endpoint should not retry"
     (!Beam.Daemon.shouldRetryAutomaticStartup false 1 true true)
   require "Linux bind failure wording should be recognized"
-    (Beam.Daemon.startupFailureSuggestsEndpointInUse "resource busy (error code: 4294967198, address already in use)")
+    (Beam.Daemon.startupLogSuggestsEndpointInUse "resource busy (error code: 4294967198, address already in use)")
   require "macOS bind failure wording should be recognized"
-    (Beam.Daemon.startupFailureSuggestsEndpointInUse "Address already in use")
+    (Beam.Daemon.startupLogSuggestsEndpointInUse "Address already in use")
 
 private def checkDaemonFailureContext : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-daemon-failure-context-{← IO.monoNanosNow}"

@@ -85,9 +85,9 @@ def endpointOccupancyError
 def endpointInUseError (endpoint : Transport.Endpoint) : String :=
   s!"selected endpoint {endpointSummary endpoint} is already in use"
 
-def startupFailureSuggestsEndpointInUse (message : String) : Bool :=
-  message.contains "address already in use" ||
-  message.contains "Address already in use"
+def startupLogSuggestsEndpointInUse (logText : String) : Bool :=
+  logText.contains "address already in use" ||
+  logText.contains "Address already in use"
 
 def shouldRetryAutomaticStartup
     (usesAutomaticEndpoint : Bool)

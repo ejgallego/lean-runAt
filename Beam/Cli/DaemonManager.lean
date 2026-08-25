@@ -297,8 +297,14 @@ def daemonFailureMessage (root : System.FilePath) (detail : String) : IO String 
     pure <| appendMaybeSection msg <|
       incidentPath?.map fun path => s!"Beam daemon incident: {path}"
 
-private def startupFailureMessage (endpoint : Transport.Endpoint) (logPath : System.FilePath) (detail : String) :
-    IO String := do
+private structure DaemonStartupFailure where
+  message : String
+  endpointInUse : Bool := false
+
+private def daemonStartupFailure
+    (endpoint : Transport.Endpoint)
+    (logPath : System.FilePath)
+    (detail : String) : IO DaemonStartupFailure := do
   let msg := if detail.isEmpty then
     s!"failed to start Beam daemon on {endpointSummary endpoint}"
   else
@@ -306,11 +312,14 @@ private def startupFailureMessage (endpoint : Transport.Endpoint) (logPath : Sys
   if ← logPath.pathExists then
     let logText := Beam.trimLine (← IO.FS.readFile logPath)
     if logText.isEmpty then
-      pure msg
+      pure { message := msg }
     else
-      pure <| msg ++ s!"\nstartup log ({logPath}):\n{logText}"
+      pure {
+        message := msg ++ s!"\nstartup log ({logPath}):\n{logText}"
+        endpointInUse := startupLogSuggestsEndpointInUse logText
+      }
   else
-    pure msg
+    pure { message := msg }
 
 private abbrev daemonStdio : IO.Process.StdioConfig where
   stdin := .piped
@@ -372,18 +381,21 @@ private partial def waitForDaemon
     (endpoint : Transport.Endpoint)
     (logPath : System.FilePath)
     (root : System.FilePath)
-    (tries : Nat := 300) : IO Unit := do
+    (tries : Nat := 300) : IO (Except DaemonStartupFailure Unit) := do
   match ← daemonRoot? endpoint projectDaemonWorkspaceId with
   | some daemonRoot =>
       if ← Beam.sameFilePath (System.FilePath.mk daemonRoot) root then
-        pure ()
+        pure (.ok ())
       else
-        throw <| IO.userError (endpointOccupancyError endpoint (System.FilePath.mk daemonRoot) root)
+        pure <| .error {
+          message := endpointOccupancyError endpoint (System.FilePath.mk daemonRoot) root
+          endpointInUse := true
+        }
   | none =>
       if (← child.tryWait).isSome then
-        throw <| IO.userError (← startupFailureMessage endpoint logPath "Beam daemon process exited before responding")
+        .error <$> daemonStartupFailure endpoint logPath "Beam daemon process exited before responding"
       else if tries == 0 then
-        throw <| IO.userError (← startupFailureMessage endpoint logPath "Beam daemon did not become ready before timeout")
+        .error <$> daemonStartupFailure endpoint logPath "Beam daemon did not become ready before timeout"
       else
         IO.sleep 100
         waitForDaemon child endpoint logPath root (tries - 1)
@@ -432,15 +444,15 @@ private partial def startDaemonEntry
   let logPath ← daemonStartupLogPath desired.root
   let daemonId ← newDaemonGenerationId desired.configHash
   let child ← startDaemon desired endpoint logPath
-  try
-    waitForDaemon child endpoint logPath desired.root
-  catch err =>
+  match ← waitForDaemon child endpoint logPath desired.root with
+  | .ok () => pure ()
+  | .error failure =>
     terminateDaemonChild child
     let endpointOccupied ← endpointAcceptsConnection endpoint
-    let startupAddressInUse := startupFailureSuggestsEndpointInUse (toString err)
-    if shouldRetryAutomaticStartup (usesAutomaticTcpEndpoint opts) tries endpointOccupied startupAddressInUse then
+    if shouldRetryAutomaticStartup
+        (usesAutomaticTcpEndpoint opts) tries endpointOccupied failure.endpointInUse then
       return ← startDaemonEntry desired opts (tries - 1)
-    throw err
+    throw <| IO.userError failure.message
   let pid := child.pid.toNat
   let entry ← registryEntryFor desired daemonId pid endpoint opts
   pure (endpoint, entry, child)
