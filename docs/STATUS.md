@@ -184,11 +184,13 @@ Exact event ordering and examples live in
 - Wrapper sessions use explicit ownership. `lean-beam ensure --hold` is the only wrapper command that
   starts a project daemon; it passes the daemon an inherited pipe and remains alive as the owner.
   Ordinary wrapper calls, including plain `lean-beam ensure`, only attach to that generation and
-  fail with the exact owner-start command when none is live. Owner EOF shuts down request admission,
-  backend sessions, and the daemon without heartbeat timeouts or filesystem leases. This works
+  fail with the exact owner-start command when none is live. The optional `--port` override belongs
+  only to `ensure --hold`; attaching commands reject it. Owner EOF shuts down request admission,
+  completes admitted requests with `requestCancelled`, and closes backend sessions and the daemon
+  without heartbeat timeouts or filesystem leases. This works
   across PID namespaces because endpoint/root validation is authoritative when PID identity is not
   locally observable. A paused owner retains the session; a killed owner closes the pipe; explicit
-  `lean-beam shutdown` revokes the registry generation so the holder closes it cleanly.
+  `lean-beam shutdown` unpublishes the registry generation so the holder closes it cleanly.
 - A startup failure that reports `operation not permitted` through `.beam/beam-daemon-startup.log` is
   usually an environment restriction, not a bundle-resolution mismatch.
 - Beam daemon disappearance errors include registry/log context and write a JSON incident record under

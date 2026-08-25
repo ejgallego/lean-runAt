@@ -32,6 +32,53 @@ if [ -z "${BEAM_INSTALL_BUNDLE_DIR:-}" ]; then
 fi
 hold_pid=""
 root_removed="false"
+active_request_pid=""
+
+start_slow_request() {
+  local root="$1"
+  local label="$2"
+  local request_id="$3"
+  local version
+  version="$(beam_wrapper_update_version "$label SlowPoll" \
+    "$beam_script" --root "$root" lean-update tests/scenario/docs/SlowPoll.lean)"
+  BEAM_PROGRESS=1 BEAM_REQUEST_ID="$request_id" "$beam_script" --root "$root" \
+    lean-run-at tests/scenario/docs/SlowPoll.lean "$version" 25 2 poll_sleep_cmd \
+    >"$root/$label.out" 2>"$root/$label.err" &
+  active_request_pid="$!"
+  if ! wait_for_file_text "$root/$label.err" "running lean-run-at" \
+      "$label request progress" 150 0.1; then
+    cat "$root/$label.out" >&2
+    cat "$root/$label.err" >&2
+    exit 1
+  fi
+  if ! kill -0 "$active_request_pid" 2>/dev/null; then
+    echo "expected $label request to remain active before session close" >&2
+    cat "$root/$label.out" >&2
+    cat "$root/$label.err" >&2
+    exit 1
+  fi
+}
+
+expect_slow_request_cancelled() {
+  local root="$1"
+  local label="$2"
+  local request_id="$3"
+  local status=0
+  set +e
+  wait "$active_request_pid"
+  status="$?"
+  set -e
+  active_request_pid=""
+  if [ "$status" -eq 0 ]; then
+    echo "expected $label request to exit non-zero after session close" >&2
+    cat "$root/$label.out" >&2
+    exit 1
+  fi
+  assert_json_file_field_equals "$label cancellation code" "$root/$label.out" \
+    error.code requestCancelled "$root/$label.err"
+  assert_json_file_field_equals "$label request id" "$root/$label.out" \
+    clientRequestId "$request_id" "$root/$label.err"
+}
 
 stop_hold_process() {
   local require_clean_exit="${1:-false}"
@@ -62,6 +109,11 @@ stop_hold_process() {
 }
 
 cleanup() {
+  if [ -n "$active_request_pid" ]; then
+    kill "$active_request_pid" > /dev/null 2>&1 || true
+    wait "$active_request_pid" 2>/dev/null || true
+    active_request_pid=""
+  fi
   stop_hold_process
   if [ "$root_removed" != "true" ]; then
     "$beam_script" --root "$tmp1" shutdown > /dev/null 2>&1 || true
@@ -83,10 +135,25 @@ for tmp in "$tmp1" "$tmp2"; do
   rsync -a --exclude='.beam/' tests/save_olean_project/ "$tmp"/
   remove_tmp_tree_within "$tmp/.beam" "$tmp"
   mkdir -p "$tmp/.beam"
+  mkdir -p "$tmp/tests/scenario/docs"
+  cp tests/scenario/docs/SlowPoll.lean "$tmp/tests/scenario/docs/SlowPoll.lean"
 done
 
 fixture_toolchain="$(awk 'NR==1 {print $1}' tests/save_olean_project/lean-toolchain)"
 "$beam_cli" bundle-install "$fixture_toolchain"
+
+invalid_backend_out="$tmp1/invalid-backend.out"
+invalid_backend_err="$tmp1/invalid-backend.err"
+if "$beam_script" --root "$tmp1" ensure typo --hold > "$invalid_backend_out" 2> "$invalid_backend_err"; then
+  echo "expected an unknown owner backend to be rejected" >&2
+  cat "$invalid_backend_out" >&2
+  exit 1
+fi
+if ! grep -Fq "expected backend 'lean' or 'rocq'" "$invalid_backend_err"; then
+  echo "expected unknown-backend diagnostics to list the valid backend names" >&2
+  cat "$invalid_backend_err" >&2
+  exit 1
+fi
 
 missing_owner_out="$tmp1/missing-owner.out"
 missing_owner_err="$tmp1/missing-owner.err"
@@ -164,6 +231,8 @@ assert_json_field_equals "owned ensure response" "$ensure_json" ok true
 stats_json="$("$beam_script" --root "$tmp1" stats)"
 assert_json_field_equals "owned stats response" "$stats_json" ok true
 
+start_slow_request "$tmp1" "shutdown-active" "shutdown-active"
+
 second_owner_out="$tmp1/second-owner.out"
 second_owner_err="$tmp1/second-owner.err"
 if "$beam_script" --root "$tmp1" ensure --hold > "$second_owner_out" 2> "$second_owner_err"; then
@@ -198,6 +267,7 @@ fi
 
 shutdown_json="$("$beam_script" --root "$tmp1" shutdown)"
 assert_json_field_equals "explicit session shutdown" "$shutdown_json" ok true
+expect_slow_request_cancelled "$tmp1" "shutdown-active" "shutdown-active"
 if ! wait_for_exit "$hold_pid" "owner after explicit shutdown" 200 0.05; then
   cat "$tmp1/owner-1.err" >&2
   exit 1
@@ -256,6 +326,7 @@ fi
 
 start_owner "$tmp1" "owner-3"
 daemon3_pid="$(read_json_field "$registry" pid)"
+start_slow_request "$tmp1" "owner-loss-active" "owner-loss-active"
 kill -KILL "$hold_pid"
 set +e
 wait "$hold_pid"
@@ -265,6 +336,7 @@ if ! wait_for_exit "$daemon3_pid" "daemon after owner death" 200 0.05; then
   echo "expected owner-pipe EOF to stop the daemon" >&2
   exit 1
 fi
+expect_slow_request_cancelled "$tmp1" "owner-loss-active" "owner-loss-active"
 owner_loss_out="$tmp1/owner-loss.out"
 owner_loss_err="$tmp1/owner-loss.err"
 if "$beam_script" --root "$tmp1" ensure > "$owner_loss_out" 2> "$owner_loss_err"; then
@@ -282,6 +354,42 @@ if [ -e "$registry" ]; then
   cat "$registry" >&2
   exit 1
 fi
+
+generation_registry="$tmp2/.beam/beam-daemon.json"
+start_owner "$tmp2" "owner-generation"
+generation_daemon_pid="$(read_json_field "$generation_registry" pid)"
+generation_id="$(read_json_field "$generation_registry" daemonId)"
+replacement_generation_id="$generation_id-replacement"
+python3 - "$generation_registry" "$replacement_generation_id" <<'PY'
+import json
+import os
+import sys
+
+path, replacement_id = sys.argv[1:]
+with open(path, "r", encoding="utf-8") as stream:
+    entry = json.load(stream)
+entry["daemonId"] = replacement_id
+replacement = path + ".replacement"
+with open(replacement, "w", encoding="utf-8") as stream:
+    json.dump(entry, stream, separators=(",", ":"))
+    stream.write("\n")
+os.replace(replacement, path)
+PY
+if ! wait_for_exit "$hold_pid" "owner after generation replacement" 200 0.05; then
+  cat "$tmp2/owner-generation.err" >&2
+  exit 1
+fi
+wait "$hold_pid"
+hold_pid=""
+if ! wait_for_exit "$generation_daemon_pid" "daemon after generation replacement" 200 0.05; then
+  exit 1
+fi
+if [ "$(read_json_field "$generation_registry" daemonId)" != "$replacement_generation_id" ]; then
+  echo "expected old-owner cleanup to preserve the replacement registry generation" >&2
+  cat "$generation_registry" >&2
+  exit 1
+fi
+rm -f -- "$generation_registry"
 
 start_owner "$tmp1" "owner-4"
 daemon4_pid="$(read_json_field "$registry" pid)"

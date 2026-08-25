@@ -166,28 +166,33 @@ private def checkPendingStoreResolve : IO Unit := do
   require "pending store is empty after remove"
     ((← PendingRequestStore.snapshot store).isEmpty)
 
-private def checkPendingStoreFailAll : IO Unit := do
+private def checkPendingStoreFailAllRespectingCancellation : IO Unit := do
   let store ← PendingRequestStore.create
   let firstProgress : SyncFileProgress := { updates := 5, done := false }
   let secondProgress : SyncFileProgress := { updates := 8, done := true }
-  let (firstPending, firstPromise) ← mkPending (progress? := some firstProgress)
+  let cancelRef ← IO.mkRef true
+  let (firstPending, firstPromise) ← mkPending
+    (progress? := some firstProgress) (cancelRef? := some cancelRef)
   let (secondPending, secondPromise) ← mkPending (progress? := some secondProgress)
   PendingRequestStore.insert store 11 firstPending
   PendingRequestStore.insert store 12 secondPending
-  PendingRequestStore.failAll store (responseFailureFor .workerExited "worker exited")
-  for (label, promise, expectedProgress) in #[
-      ("first", firstPromise, firstProgress),
-      ("second", secondPromise, secondProgress)
+  PendingRequestStore.failAllRespectingCancellation store
+    (responseFailureFor .workerExited "worker exited")
+  for (label, promise, expectedCode, expectedProgress) in #[
+      ("cancelled", firstPromise, "requestCancelled", firstProgress),
+      ("worker-exited", secondPromise, "workerExited", secondProgress)
     ] do
     match ← PendingRequest.awaitOutcome promise with
     | .ok _ =>
-        throw <| IO.userError s!"failAll resolves {label} pending request as an error: expected error"
+        throw <| IO.userError
+          s!"failAllRespectingCancellation resolves {label} pending request as an error: expected error"
     | .error failure =>
         discard <| requireFailureCode
-          s!"failAll resolves {label} pending request as an error" "workerExited" failure
-        require s!"failAll preserves {label} pending request progress"
+          s!"failAllRespectingCancellation resolves {label} pending request as an error"
+          expectedCode failure
+        require s!"failAllRespectingCancellation preserves {label} pending request progress"
           (failure.fileProgress? == some expectedProgress)
-  require "failAll clears pending store"
+  require "failAllRespectingCancellation clears pending store"
     ((← PendingRequestStore.snapshot store).isEmpty)
 
 private def checkPendingResolveError : IO Unit := do
@@ -411,7 +416,7 @@ def main : IO Unit := do
   checkActiveRegistry
   checkPendingCancellationIdentity
   checkPendingStoreResolve
-  checkPendingStoreFailAll
+  checkPendingStoreFailAllRespectingCancellation
   checkPendingResolveError
   checkSyncFileProgressDisplay
   checkSyncFileProgressLines

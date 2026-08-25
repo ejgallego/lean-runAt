@@ -606,7 +606,8 @@ private def closeDaemonOwnerPipe
   pure child
 
 private partial def waitForOwnedDaemonExit
-    (child : IO.Process.Child detachedDaemonStdio)
+    {cfg : IO.Process.StdioConfig}
+    (child : IO.Process.Child cfg)
     (exitCodeRef : IO.Ref (Option UInt32))
     (tries : Nat) : IO Unit := do
   if (← exitCodeRef.get).isSome || tries == 0 then
@@ -628,6 +629,33 @@ private def removeOwnedRegistry (root : System.FilePath) (daemonId : String) : I
   catch _ =>
     pure ()
 
+private def attemptCleanup (act : IO Unit) : IO Unit := do
+  try
+    act
+  catch _ =>
+    pure ()
+
+private def finishOwnedDaemonChild
+    (owned : OwnedProjectDaemon)
+    (exitCodeRef : IO.Ref (Option UInt32)) : IO Unit := do
+  try
+    let child ← closeDaemonOwnerPipe owned.child
+    attemptCleanup <| waitForOwnedDaemonExit child exitCodeRef 100
+    if (← exitCodeRef.get).isNone then
+      attemptCleanup child.kill
+      attemptCleanup <| waitForOwnedDaemonExit child exitCodeRef 20
+    pure ()
+  catch _ =>
+    attemptCleanup owned.child.kill
+    attemptCleanup <| waitForOwnedDaemonExit owned.child exitCodeRef 20
+
+private def finishOwnedProjectDaemon
+    (root : System.FilePath)
+    (owned : OwnedProjectDaemon)
+    (exitCodeRef : IO.Ref (Option UInt32)) : IO Unit := do
+  finishOwnedDaemonChild owned exitCodeRef
+  removeOwnedRegistry root owned.entry.daemonId
+
 def withProjectDaemonOwner
     (home root : System.FilePath)
     (backend : Backend)
@@ -637,29 +665,16 @@ def withProjectDaemonOwner
   let owned ← withProjectControlLock root do
     startOwnedProjectDaemon desired opts
   let exitCodeRef ← IO.mkRef (none : Option UInt32)
-  let result ←
-    try
-      pure <| Except.ok (← act {
+  try
+    act {
         client := owned.client
         root
         daemonId := owned.entry.daemonId
         child := owned.child
         exitCodeRef
-      })
-    catch err =>
-      pure <| Except.error err
-  let child ← closeDaemonOwnerPipe owned.child
-  waitForOwnedDaemonExit child exitCodeRef 100
-  if (← exitCodeRef.get).isNone then
-    try
-      child.kill
-    catch _ =>
-      pure ()
-    waitForOwnedDaemonExit child exitCodeRef 20
-  removeOwnedRegistry root owned.entry.daemonId
-  match result with
-  | .ok value => pure value
-  | .error err => throw err
+      }
+  finally
+    finishOwnedProjectDaemon root owned exitCodeRef
 
 private def lookupProjectDaemon
     (root : System.FilePath)
@@ -674,7 +689,6 @@ private def lookupProjectDaemon
 def withProjectDaemon
     (home root : System.FilePath)
     (backend : Backend)
-    (_opts : CliOptions)
     (act : ProjectDaemonClient → IO α) : IO α := do
   let desired ← desiredConfig home root backend
   act (← lookupProjectDaemon root (some desired.configHash))

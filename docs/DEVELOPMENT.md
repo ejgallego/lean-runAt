@@ -395,9 +395,6 @@ Keep these invariants covered:
 - the regressions for this path are
   [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh) and
   [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)
-- the regressions for this path are
-  [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh) and
-  [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)
 
 Generic process helpers and the typed `RecordedPid.observe` boundary live in
 [Beam/System.lean](../Beam/System.lean). Persisted registry and lock-owner PIDs must pass

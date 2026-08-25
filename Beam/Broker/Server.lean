@@ -459,7 +459,7 @@ partial def sessionReaderLoop (session : Session) : IO Unit := do
         pure ()
     sessionReaderLoop session
   catch e =>
-    PendingRequestStore.failAll session.pending <| BrokerFailure.toResponseFailure {
+    PendingRequestStore.failAllRespectingCancellation session.pending <| BrokerFailure.toResponseFailure {
       code := .workerExited
       message := e.toString
     }

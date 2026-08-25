@@ -269,10 +269,22 @@ end PendingRequest
 
 namespace PendingRequestStore
 
-def failAll (store : PendingRequestStore) (failure : ResponseFailure) : IO Unit := do
+/-- Fail every pending request, giving an already-marked cancellation token precedence. -/
+def failAllRespectingCancellation
+    (store : PendingRequestStore)
+    (fallback : ResponseFailure) : IO Unit := do
   let pending ← clear store
   for req in pending do
     let progress? ← req.progressRef.get
+    let cancelled ←
+      match req.cancelRef? with
+      | some cancelRef => cancelRef.get
+      | none => pure false
+    let failure :=
+      if cancelled then
+        responseFailureFor .requestCancelled "request was cancelled while its backend session closed"
+      else
+        fallback
     let failure := failure.withOptionalFileProgress progress?
     try
       req.promise.resolve (.error failure)

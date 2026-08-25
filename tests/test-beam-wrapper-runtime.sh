@@ -15,7 +15,6 @@ beam_wrapper_init
 primary_root="$(beam_wrapper_prepare_project_root runtime-primary)"
 other_root="$(beam_wrapper_prepare_project_root runtime-other)"
 signal_root="$(beam_wrapper_prepare_project_root_with_scenario_docs runtime-signal)"
-busy_port_root="$(beam_wrapper_prepare_project_root runtime-busy-port)"
 
 run_sigint_probe() {
   local project_root="$1"
@@ -367,6 +366,7 @@ PY
 )
 wait_for_exit "$signal_owner_pid" "first signal-test session owner" 120 0.1
 wait "$signal_owner_pid"
+beam_wrapper_unregister_pid "$signal_owner_pid"
 
 beam_wrapper_start_owner "$signal_root"
 signal_owner_pid="$beam_wrapper_last_owner_pid"
@@ -460,6 +460,7 @@ signal_owner_pid="$beam_wrapper_last_owner_pid"
 )
 wait_for_exit "$signal_owner_pid" "second signal-test session owner" 120 0.1
 wait "$signal_owner_pid"
+beam_wrapper_unregister_pid "$signal_owner_pid"
 
 beam_wrapper_start_owner "$other_root"
 (
@@ -494,72 +495,16 @@ if ! grep -q "invalidParams" "$cross_err"; then
   exit 1
 fi
 
-beam_wrapper_start_owner "$busy_port_root"
-(
-  cd "$busy_port_root"
-  "$beam_script" ensure lean > /dev/null
-  warm_version="$(beam_wrapper_update_version "busy-port SaveSmoke/B.lean" "$beam_script" lean-update SaveSmoke/B.lean)"
-  warm_out="$("$beam_script" lean-run-at SaveSmoke/B.lean "$warm_version" 0 2 "#eval bVal")"
-  if [ "$(BEAM_JSON_PAYLOAD="$warm_out" read_json_text_field ok)" != "true" ]; then
-    echo "expected busy-port warmup probe to succeed before reuse check" >&2
-    printf '%s\n' "$warm_out" >&2
-    exit 1
-  fi
-)
-
-busy_registry="$(beam_wrapper_registry_path "$busy_port_root")"
-beam_wrapper_expect_file "$busy_registry"
-pid5="$(read_json_field "$busy_registry" pid)"
-port5="$(read_json_field "$busy_registry" port)"
-busy_port=43123
-if [ "$busy_port" = "$port5" ]; then
-  busy_port=43124
-fi
-
-python3 -m http.server "$busy_port" >/dev/null 2>&1 &
-busy_pid=$!
-beam_wrapper_register_pid "$busy_pid"
-sleep 1
-
-(
-  cd "$busy_port_root"
-  doctor_out="$("$beam_script" doctor lean)"
-  if ! printf '%s\n' "$doctor_out" | grep -q 'daemon status: live'; then
-    echo "expected doctor lean to report a live Beam daemon before requested-port reuse check" >&2
-    printf '%s\n' "$doctor_out" >&2
-    exit 1
-  fi
-  sed_in_place_portable 's/1/2/' SaveSmoke/B.lean
-  sync_out="$("$beam_script" --port "$busy_port" lean-sync SaveSmoke/B.lean)"
-  if [ "$(BEAM_JSON_PAYLOAD="$sync_out" read_json_text_field ok)" != "true" ]; then
-    echo "expected lean-sync with a busy requested port to reuse the live Beam daemon" >&2
-    printf '%s\n' "$sync_out" >&2
-    exit 1
-  fi
-  if [ "$(BEAM_JSON_PAYLOAD="$sync_out" read_json_text_field result.version)" != "2" ]; then
-    echo "expected busy-port lean-sync reuse path to report version 2" >&2
-    printf '%s\n' "$sync_out" >&2
-    exit 1
-  fi
-  stats_out="$("$beam_script" stats)"
-  if [ "$(BEAM_JSON_PAYLOAD="$stats_out" read_json_text_field ok)" != "true" ]; then
-    echo "expected stats to keep working after busy-port lean-sync reuse" >&2
-    printf '%s\n' "$stats_out" >&2
-    exit 1
-  fi
-)
-
-kill "$busy_pid" > /dev/null 2>&1 || true
-wait "$busy_pid" 2>/dev/null || true
-
-pid5_after="$(read_json_field "$busy_registry" pid)"
-port5_after="$(read_json_field "$busy_registry" port)"
-if [ "$pid5" != "$pid5_after" ] || [ "$port5" != "$port5_after" ]; then
-  echo "expected requested-port lean-sync reuse to preserve the original registry entry" >&2
+port_scope_out="$(beam_wrapper_mktemp_file port-scope-out)"
+port_scope_err="$(beam_wrapper_mktemp_file port-scope-err)"
+if "$beam_script" --root "$primary_root" --port 43123 stats >"$port_scope_out" 2>"$port_scope_err"; then
+  echo "expected --port on an attaching command to be rejected" >&2
+  cat "$port_scope_out" >&2
   exit 1
 fi
-if ! kill -0 "$pid5" 2>/dev/null; then
-  echo "expected original Beam daemon pid $pid5 to remain alive after busy-port lean-sync reuse" >&2
+if ! grep -Fq -- "--port is only valid" "$port_scope_err"; then
+  echo "expected rejected attaching --port to explain the owner-only scope" >&2
+  cat "$port_scope_err" >&2
   exit 1
 fi
 
@@ -569,6 +514,7 @@ fi
 )
 wait_for_exit "$primary_owner_pid" "primary session owner" 120 0.1
 wait "$primary_owner_pid"
+beam_wrapper_unregister_pid "$primary_owner_pid"
 
 if [ -f "$primary_registry" ]; then
   echo "expected shutdown to remove the project Beam daemon registry" >&2

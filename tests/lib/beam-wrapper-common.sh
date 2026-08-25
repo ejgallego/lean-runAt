@@ -469,6 +469,18 @@ beam_wrapper_register_pid() {
   beam_wrapper_managed_pids+=("$1")
 }
 
+beam_wrapper_unregister_pid() {
+  local target="$1"
+  local pid
+  local -a kept_pids=()
+  for pid in ${beam_wrapper_managed_pids[@]+"${beam_wrapper_managed_pids[@]}"}; do
+    if [ "$pid" != "$target" ]; then
+      kept_pids+=("$pid")
+    fi
+  done
+  beam_wrapper_managed_pids=(${kept_pids[@]+"${kept_pids[@]}"})
+}
+
 beam_wrapper_start_owner() {
   local root="$1"
   local backend="${2:-lean}"

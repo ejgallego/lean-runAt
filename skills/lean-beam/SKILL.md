@@ -317,6 +317,8 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 - `lean-beam ensure --hold` prints the usual JSON ensure response on stdout and keeps the wrapper
   process alive as the session owner; an inherited pipe ties daemon lifetime to that process without
   heartbeat files or lease expiry
+- `--port` is an optional owner-start override for `lean-beam ensure --hold`; attaching commands
+  reject it instead of silently ignoring it
 - interrupting or killing the holder closes the owner pipe and shuts down the daemon; explicit
   `lean-beam shutdown` releases the holder cleanly
 - plain `lean-beam ensure` checks and warms a live owned session; if there is no owner, follow its
