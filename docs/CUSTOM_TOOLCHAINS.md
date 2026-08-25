@@ -93,4 +93,4 @@ BEAM_STAGE0_TOOLCHAIN=lean4-dev bash tests/test-stage0-toolchain.sh
 
 The smoke skips when the requested elan toolchain is unavailable. When it runs, it installs Beam
 with `--custom-toolchain`, checks that `doctor` resolves the installed bundle and reports a
-fingerprint, then starts Beam with `ensure`.
+fingerprint, then starts and closes an explicit `ensure --hold` wrapper session.

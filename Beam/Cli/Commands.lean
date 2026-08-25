@@ -107,8 +107,10 @@ private def shutdownProjectDaemon (opts : CliOptions) : IO Unit := do
         if let some endpoint := Beam.Daemon.registryEndpoint? entry then
           let resp ← sendRequest endpoint { op := .shutdown }
           printResponse resp
-          finishRegistryDaemonShutdown entry
+          -- Revoking the published generation tells its wrapper owner to close the inherited
+          -- owner pipe. That unblocks the daemon's stdin watcher during an explicit shutdown.
           removeRegistry root
+          finishRegistryDaemonShutdown entry
         else
           stopRegisteredDaemon root
           printJsonLine <| Json.mkObj [
@@ -123,7 +125,9 @@ private def shutdownProjectDaemon (opts : CliOptions) : IO Unit := do
 private def backendOfName (name : String) : Backend :=
   if name == "rocq" then .rocq else .lean
 
-private def runThenHoldUntilInterrupted (act : IO Unit) : IO Unit := do
+private def runThenHoldUntilInterrupted
+    (owner : ProjectDaemonOwner)
+    (act : IO Unit) : IO Unit := do
   let signal ← Std.Internal.UV.Signal.mk 2 false
   let promise ← Std.Internal.UV.Signal.next signal
   let task ← IO.asTask (prio := Task.Priority.dedicated) do
@@ -132,12 +136,16 @@ private def runThenHoldUntilInterrupted (act : IO Unit) : IO Unit := do
     pure ()
   try
     act
-    while !(← IO.hasFinished task) && !(← IO.checkCanceled) do
+    while !(← IO.hasFinished task) && !(← owner.exited) &&
+        (← owner.registered) && !(← IO.checkCanceled) do
       IO.sleep 50
     if ← IO.hasFinished task then
       match ← IO.wait task with
       | .ok () => pure ()
       | .error err => throw err
+    else if let some exitCode ← owner.exitCode? then
+      unless exitCode == 0 do
+        throw <| IO.userError s!"owned Beam daemon exited with status {exitCode}"
   finally
     Std.Internal.UV.Signal.stop signal
 
@@ -147,15 +155,16 @@ private def ensureBackend
     (backend : Backend)
     (hold : Bool := false) : IO Unit := do
   let root ← projectRoot opts backend
-  withProjectDaemon home root backend opts fun client =>
-    if hold then
-      runThenHoldUntilInterrupted do
-        callBroker root client {
+  if hold then
+    withProjectDaemonOwner home root backend opts fun owner =>
+      runThenHoldUntilInterrupted owner do
+        callBroker root owner.client {
           op := .ensure, backend := backend, root? := some root.toString
         }
         (← IO.getStdout).flush
-        IO.eprintln "beam: holding ensured daemon; interrupt this wrapper process when finished"
-    else
+        IO.eprintln "beam: owning Beam session; interrupt this wrapper process when finished"
+  else
+    withProjectDaemon home root backend opts fun client =>
       callBroker root client { op := .ensure, backend := backend, root? := some root.toString }
 
 def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit := do

@@ -78,8 +78,6 @@ private def checkActiveRegistry : IO Unit := do
 
   let firstResult ← ActiveRequestRegistry.register registry (some "req-1")
   let first ← expectRegistered "register active request" firstResult
-  require "count excluding the current admission reports only other requests"
-    ((← ActiveRequestRegistry.countExcluding registry first) == 0)
   match ← ActiveRequestRegistry.register registry (some "req-1") with
   | .ok _ =>
       throw <| IO.userError "duplicate clientRequestId registered successfully"

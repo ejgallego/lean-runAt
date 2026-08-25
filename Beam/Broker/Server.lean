@@ -24,8 +24,6 @@ import Beam.Broker.Lean
 import Beam.Broker.LakeSave
 import Beam.Broker.Readiness
 import Beam.Broker.SyncResult
-import Beam.Daemon.Ownership
-import Beam.Daemon.Paths
 import Beam.LSP.Save
 import Beam.Path
 import Std.Sync.Mutex
@@ -36,8 +34,6 @@ open Lean.Lsp
 open IO.FS.Stream
 
 namespace Beam.Broker
-
-open Beam.Daemon.Ownership
 
 abbrev brokerStdio : IO.Process.StdioConfig where
   stdin := .piped
@@ -892,8 +888,6 @@ structure ServerRuntime where
   endpoint : Transport.Endpoint
   stop : IO.Ref Bool
   activeRequests : ActiveRequestRegistry
-  root : System.FilePath
-  daemonId? : Option String := none
 
 /--
 A cancellation capability bound to one active broker request admission.
@@ -914,18 +908,14 @@ def ServerRuntime.withState (server : ServerRuntime) (act : M α) : IO α := do
 
 private def ServerRuntime.statsResponse
     (server : ServerRuntime)
-    (currentRequest : ActiveRequest)
     (workspaceId? : Option WorkspaceId := none) : IO Response := do
-  let activeRequestCount ←
-    ActiveRequestRegistry.countExcluding server.activeRequests currentRequest
   let payload ← server.withState <| statsPayload workspaceId?
-  pure <| Response.success <| payload.setObjVal! "activeRequestCount" (toJson activeRequestCount)
+  pure <| Response.success payload
 
 def ServerRuntime.create
     (config : BrokerConfig)
     (workspaceId : WorkspaceId)
-    (endpoint : Transport.Endpoint := .tcp 0)
-    (daemonId? : Option String := none) : IO ServerRuntime := do
+    (endpoint : Transport.Endpoint := .tcp 0) : IO ServerRuntime := do
   unless validWorkspaceId workspaceId do
     throw <| IO.userError "workspace id must be non-empty"
   let startMonoNanos ← IO.monoNanosNow
@@ -935,8 +925,6 @@ def ServerRuntime.create
     endpoint := endpoint
     stop := ← IO.mkRef false
     activeRequests := ← ActiveRequestRegistry.create
-    root := config.root
-    daemonId?
   }
 
 private def brokerConfigSame (left right : BrokerConfig) : Bool :=
@@ -1099,72 +1087,6 @@ def RequestHandle.cancel (handle : RequestHandle) : IO Bool := do
       cancelRegisteredRequest handle.runtime <|
         ActiveRequestRegistry.markCancelledActive handle.runtime.activeRequests active
 
-private inductive WrapperLeaseInactiveReason where
-  | generationMismatch
-  | invalidFileName
-  | revoked
-  | missing
-  | malformed
-  | invalidPid
-  | unreadable
-
-private def WrapperLeaseInactiveReason.key : WrapperLeaseInactiveReason → String
-  | .generationMismatch => "generationMismatch"
-  | .invalidFileName => "invalidFileName"
-  | .revoked => "revoked"
-  | .missing => "missing"
-  | .malformed => "malformed"
-  | .invalidPid => "invalidPid"
-  | .unreadable => "unreadable"
-
-private inductive WrapperLeaseValidation where
-  | active
-  | inactive (reason : WrapperLeaseInactiveReason)
-
-/--
-Validate the wrapper's filesystem fence after active-request registration. Retirement first writes
-the revocation tombstone and only then observes the active-request count, so a fenced request that
-passes this check is necessarily visible to the retiring owner before broker work begins.
-
-Unfenced broker clients remain valid; their lifecycle must be owned independently or protected by
-a foreground wrapper owner such as `lean-beam ensure --hold`.
--/
-private def ServerRuntime.validateWrapperLease
-    (server : ServerRuntime)
-    (req : Request) : IO WrapperLeaseValidation := do
-  if !req.op.acceptsWrapperLease then
-    return .active
-  let some lease := req.wrapperLease?
-    | return .active
-  try
-    unless server.daemonId? == some lease.daemonId do
-      return .inactive .generationMismatch
-    unless validWrapperLeaseFileName lease.leaseFile do
-      return .inactive .invalidFileName
-    let leasePath := (← Beam.Daemon.wrapperLeaseDir server.root) / lease.leaseFile
-    let revocationPath := wrapperLeaseRevocationPath leasePath
-    if ← revocationPath.pathExists then
-      return .inactive .revoked
-    unless ← leasePath.pathExists do
-      return .inactive .missing
-    let text ← IO.FS.readFile leasePath
-    let json ←
-      match Json.parse text with
-      | .ok json => pure json
-      | .error _ => return .inactive .malformed
-    let metadata : WrapperLeaseMetadata ←
-      match fromJson? (α := WrapperLeaseMetadata) json with
-      | .ok metadata => pure metadata
-      | .error _ => return .inactive .malformed
-    if metadata.pid == 0 then
-      return .inactive .invalidPid
-    if ← revocationPath.pathExists then
-      pure (.inactive .revoked)
-    else
-      pure .active
-  catch _ =>
-    pure (.inactive .unreadable)
-
 private def propagatePendingCancellation
     (session : Session)
     (cancelRef? : Option (IO.Ref Bool)) : IO Unit := do
@@ -1173,8 +1095,9 @@ private def propagatePendingCancellation
 private def requestStop (server : ServerRuntime) : IO Unit := do
   server.stop.set true
   try
-    let conn ← Transport.connect server.endpoint
-    Transport.closeConnection conn
+    -- Wake the blocking accept. Both ends are intentionally left to scope cleanup: performing a
+    -- graceful TCP shutdown on the wake-up pair can wait for its peer and deadlock daemon exit.
+    discard <| Transport.connect server.endpoint
   catch _ =>
     pure ()
 
@@ -2204,22 +2127,24 @@ private def handleRequestIO
   let cancelRef? := activeRequest?.map (·.cancelRef)
   match req.op with
   | .shutdown =>
-      let resp ← server.withState do
-        let state ← get
-        for (_, workspace) in state.workspaces.toList do
-          shutdownWorkspaceSessions workspace
-        pure <| Response.success (Json.mkObj [("shutdown", toJson true)])
-      pure (resp, true)
+      let firstClose ← ActiveRequestRegistry.closeAdmission server.activeRequests
+      if firstClose then
+        let resp ← server.withState do
+          let state ← get
+          for (_, workspace) in state.workspaces.toList do
+            shutdownWorkspaceSessions workspace
+          pure <| Response.success (Json.mkObj [("shutdown", toJson true)])
+        pure (resp, true)
+      else
+        pure (Response.success (Json.mkObj [("shutdown", toJson true)]), false)
   | .stats =>
-      let some currentRequest := activeRequest?
-        | unreachable!
       match req.workspaceId? with
-      | none => pure (← server.statsResponse currentRequest, false)
+      | none => pure (← server.statsResponse, false)
       | some _ =>
           match ← validateRequestWorkspace server req with
           | .error failure => pure (failure.toResponse, false)
           | .ok workspaceReq =>
-              pure (← server.statsResponse currentRequest (some workspaceReq.workspaceId), false)
+              pure (← server.statsResponse (some workspaceReq.workspaceId), false)
   | .listWorkspaces =>
       let payload ← server.withState do
         pure <| workspaceListPayload (← get)
@@ -2330,7 +2255,7 @@ private def ServerRuntime.withRequestAdmission
   | .ok () => pure ()
   try
     let active? ←
-      if req.op.acceptsWrapperLease then
+      if req.op.tracksActiveRequest then
         match ← ActiveRequestRegistry.register server.activeRequests req.clientRequestId? with
         | .ok active => pure (some active)
         | .error failure =>
@@ -2340,19 +2265,6 @@ private def ServerRuntime.withRequestAdmission
       else
         pure none
     try
-      match ← server.validateWrapperLease req with
-      | .inactive reason =>
-          let resp := BrokerFailure.toResponse {
-            code := .requestCancelled
-            message := "wrapper daemon-lifetime lease is no longer active"
-            data? := some <| Json.mkObj [
-              ("reason", toJson "wrapperLeaseInactive"),
-              ("leaseState", toJson reason.key)
-            ]
-          }
-          recordDispatchMetrics server req resp startedAt
-          return (resp, false)
-      | .active => pure ()
       let handle : RequestHandle := { runtime := server, active? }
       let (resp, shouldStop) ← act handle
       traceBroker
@@ -2420,11 +2332,22 @@ private partial def watchRoot (server : ServerRuntime) (root : System.FilePath) 
         pure false
     if !rootAvailable then
       IO.eprintln s!"Beam daemon root is no longer available; shutting down: {root}"
-      discard <| server.dispatchRequest { op := .shutdown }
-      requestStop server
+      let (_, shouldStop) ← server.dispatchRequest { op := .shutdown }
+      if shouldStop then
+        requestStop server
     else
       IO.sleep rootWatchPollMs
       watchRoot server root
+
+private def watchSessionOwnerStdin (server : ServerRuntime) : IO Unit := do
+  try
+    discard <| (← IO.getStdin).readToEnd
+  catch _ =>
+    pure ()
+  unless ← server.stop.get do
+    let (_, shouldStop) ← server.dispatchRequest { op := .shutdown }
+    if shouldStop then
+      requestStop server
 
 private def watchClientDisconnect
     (client : Transport.Connection)
@@ -2493,7 +2416,7 @@ private partial def acceptLoop (server : ServerRuntime) (listener : Transport.Li
   else
     let client ← Transport.accept listener
     if ← server.stop.get then
-      Transport.closeConnection client
+      pure ()
     else
       let _ ← IO.asTask (prio := Task.Priority.dedicated) do
         try
@@ -2506,7 +2429,7 @@ private structure CliOptions where
   endpoint : Transport.Endpoint := .tcp 8765
   root? : Option String := none
   workspaceId? : Option WorkspaceId := none
-  daemonId? : Option String := none
+  sessionOwnerStdin : Bool := false
   leanCmd? : Option String := none
   leanPlugin? : Option String := none
   rocqCmd? : Option String := none
@@ -2532,8 +2455,8 @@ private partial def parseCliOptions (opts : CliOptions) : List String → Except
       parseCliOptions { opts with root? := some root } rest
   | "--workspace-id" :: workspaceId :: rest =>
       parseCliOptions { opts with workspaceId? := some workspaceId } rest
-  | "--daemon-id" :: daemonId :: rest =>
-      parseCliOptions { opts with daemonId? := some daemonId } rest
+  | "--session-owner-stdin" :: rest =>
+      parseCliOptions { opts with sessionOwnerStdin := true } rest
   | "--lean-cmd" :: leanCmd :: rest =>
       parseCliOptions { opts with leanCmd? := some leanCmd } rest
   | "--lean-plugin" :: leanPlugin :: rest =>
@@ -2551,9 +2474,6 @@ def main (args : List String) : IO Unit := do
     | throw <| IO.userError "missing Beam daemon --workspace-id ID"
   unless validWorkspaceId workspaceId do
     throw <| IO.userError "workspace id must be non-empty"
-  if let some daemonId := opts.daemonId? then
-    if daemonId.isEmpty then
-      throw <| IO.userError "daemon id must be non-empty"
   let root ← Beam.resolveExistingPath <| System.FilePath.mk root
   let leanPlugin? ← opts.leanPlugin?.mapM (fun path => Beam.resolveExistingPath <| System.FilePath.mk path)
   let config : BrokerConfig := {
@@ -2563,21 +2483,20 @@ def main (args : List String) : IO Unit := do
     rocqCmd? := opts.rocqCmd?
   }
   let listener ← Transport.bindAndListen opts.endpoint 16
-  let startMonoNanos ← IO.monoNanosNow
-  let runtime : ServerRuntime := {
-    state := ← Std.Mutex.new (mkInitialState config workspaceId startMonoNanos)
-    endpoint := opts.endpoint
-    stop := ← IO.mkRef false
-    activeRequests := ← ActiveRequestRegistry.create
-    root
-    daemonId? := opts.daemonId?
-  }
+  let runtime ← ServerRuntime.create config workspaceId opts.endpoint
   let rootWatcher ← IO.asTask (prio := Task.Priority.dedicated) <| watchRoot runtime root
+  let ownerWatcher? ←
+    if opts.sessionOwnerStdin then
+      some <$> IO.asTask (prio := Task.Priority.dedicated) (watchSessionOwnerStdin runtime)
+    else
+      pure none
   try
     acceptLoop runtime listener
   finally
     runtime.stop.set true
     Transport.closeListener listener
+    if let some ownerWatcher := ownerWatcher? then
+      IO.cancel ownerWatcher
     discard <| IO.wait rootWatcher
 
 end Beam.Broker

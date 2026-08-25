@@ -139,6 +139,8 @@ expect_sigint_cancelled() {
   fi
 }
 
+beam_wrapper_start_owner "$primary_root"
+primary_owner_pid="$beam_wrapper_last_owner_pid"
 (
   cd "$primary_root"
   "$beam_script" ensure lean > /dev/null
@@ -153,10 +155,10 @@ if [ -z "$client1" ]; then
   client1="$client"
 fi
 
+beam_wrapper_start_owner "$signal_root"
+signal_owner_pid="$beam_wrapper_last_owner_pid"
 (
   cd "$signal_root"
-  "$beam_script" --root "$signal_root" shutdown > /dev/null 2>&1 || true
-  "$beam_script" --root "$signal_root" ensure lean > /dev/null
   slow_version="$(beam_wrapper_update_version "signal SlowPoll" "$beam_script" --root "$signal_root" lean-update tests/scenario/docs/SlowPoll.lean)"
   command_version="$(beam_wrapper_update_version "signal CommandA" "$beam_script" --root "$signal_root" lean-update tests/scenario/docs/CommandA.lean)"
 
@@ -363,11 +365,13 @@ PY
 
   "$beam_script" --root "$signal_root" shutdown > /dev/null 2>&1 || true
 )
+wait_for_exit "$signal_owner_pid" "first signal-test session owner" 120 0.1
+wait "$signal_owner_pid"
 
+beam_wrapper_start_owner "$signal_root"
+signal_owner_pid="$beam_wrapper_last_owner_pid"
 (
   cd "$signal_root"
-  "$beam_script" --root "$signal_root" shutdown > /dev/null 2>&1 || true
-  "$beam_script" --root "$signal_root" ensure lean > /dev/null
   slow_version="$(beam_wrapper_update_version "duplicate SlowPoll" "$beam_script" --root "$signal_root" lean-update tests/scenario/docs/SlowPoll.lean)"
   command_version="$(beam_wrapper_update_version "duplicate CommandA" "$beam_script" --root "$signal_root" lean-update tests/scenario/docs/CommandA.lean)"
 
@@ -454,7 +458,10 @@ PY
 
   "$beam_script" --root "$signal_root" shutdown > /dev/null 2>&1 || true
 )
+wait_for_exit "$signal_owner_pid" "second signal-test session owner" 120 0.1
+wait "$signal_owner_pid"
 
+beam_wrapper_start_owner "$other_root"
 (
   cd "$other_root"
   "$beam_script" ensure lean > /dev/null
@@ -487,6 +494,7 @@ if ! grep -q "invalidParams" "$cross_err"; then
   exit 1
 fi
 
+beam_wrapper_start_owner "$busy_port_root"
 (
   cd "$busy_port_root"
   "$beam_script" ensure lean > /dev/null
@@ -559,6 +567,8 @@ fi
   cd "$primary_root"
   "$beam_script" shutdown > /dev/null
 )
+wait_for_exit "$primary_owner_pid" "primary session owner" 120 0.1
+wait "$primary_owner_pid"
 
 if [ -f "$primary_registry" ]; then
   echo "expected shutdown to remove the project Beam daemon registry" >&2

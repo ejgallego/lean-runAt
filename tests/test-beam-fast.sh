@@ -352,12 +352,42 @@ wrapper_todo_update_out="$(mktemp /tmp/lean-beam-wrapper-todo-update-out-XXXXXX)
 wrapper_todo_update_err="$(mktemp /tmp/lean-beam-wrapper-todo-update-err-XXXXXX)"
 wrapper_todo_out="$(mktemp /tmp/lean-beam-wrapper-todo-out-XXXXXX)"
 wrapper_todo_err="$(mktemp /tmp/lean-beam-wrapper-todo-err-XXXXXX)"
+wrapper_todo_owner_out="$(mktemp /tmp/lean-beam-wrapper-todo-owner-out-XXXXXX)"
+wrapper_todo_owner_err="$(mktemp /tmp/lean-beam-wrapper-todo-owner-err-XXXXXX)"
+wrapper_todo_owner_pid=""
 wrapper_todo_cleanup() {
   BEAM_CONTROL_DIR="$wrapper_todo_control_dir" \
     scripts/lean-beam --root tests/save_olean_project shutdown > /dev/null 2>&1 || true
+  if [ -n "$wrapper_todo_owner_pid" ]; then
+    wait "$wrapper_todo_owner_pid" 2>/dev/null || true
+  fi
   rm -rf -- "$wrapper_todo_control_dir"
-  rm -f "$wrapper_todo_update_out" "$wrapper_todo_update_err" "$wrapper_todo_out" "$wrapper_todo_err"
+  rm -f "$wrapper_todo_update_out" "$wrapper_todo_update_err" "$wrapper_todo_out" "$wrapper_todo_err" \
+    "$wrapper_todo_owner_out" "$wrapper_todo_owner_err"
 }
+
+BEAM_CONTROL_DIR="$wrapper_todo_control_dir" \
+  scripts/lean-beam --root tests/save_olean_project ensure --hold \
+  >"$wrapper_todo_owner_out" 2>"$wrapper_todo_owner_err" &
+wrapper_todo_owner_pid="$!"
+for _ in $(seq 1 600); do
+  if grep -Fq "owning Beam session" "$wrapper_todo_owner_err"; then
+    break
+  fi
+  if ! kill -0 "$wrapper_todo_owner_pid" 2>/dev/null; then
+    echo "expected lean-beam todo wrapper owner to remain alive" >&2
+    cat "$wrapper_todo_owner_err" >&2
+    wrapper_todo_cleanup
+    exit 1
+  fi
+  sleep 0.1
+done
+if ! grep -Fq "owning Beam session" "$wrapper_todo_owner_err"; then
+  echo "timed out waiting for lean-beam todo wrapper owner" >&2
+  cat "$wrapper_todo_owner_err" >&2
+  wrapper_todo_cleanup
+  exit 1
+fi
 
 if ! BEAM_CONTROL_DIR="$wrapper_todo_control_dir" \
     scripts/lean-beam --root tests/save_olean_project \

@@ -13,6 +13,7 @@ cd "$(dirname "$0")/.."
 beam_wrapper_init
 
 handle_root="$(beam_wrapper_prepare_project_root handle)"
+beam_wrapper_start_owner "$handle_root"
 
 (
   cd "$handle_root"

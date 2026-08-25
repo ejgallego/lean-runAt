@@ -13,6 +13,7 @@ cd "$(dirname "$0")/.."
 beam_wrapper_init
 
 project_root="$(beam_wrapper_prepare_project_root probe)"
+beam_wrapper_start_owner "$project_root"
 
 (
   cd "$project_root"

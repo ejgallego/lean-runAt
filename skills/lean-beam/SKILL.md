@@ -73,8 +73,8 @@ and isolation rules; do not treat MCP as a raw Lean LSP proxy.
 
 Supported command families:
 
-- bootstrap the Lean backend: `lean-beam ensure`
-- keep a sandboxed daemon owner alive across separate commands: `lean-beam ensure --hold`
+- start and own a wrapper session: `lean-beam ensure --hold`
+- check and warm an already-owned Lean session: `lean-beam ensure`
 - inspect existing code, navigation data, or proof state: `lean-beam hover`,
   `lean-beam signature-help`, `lean-beam definition`, `lean-beam references`,
   `lean-beam document-symbols`, `lean-beam workspace-symbols`, `lean-beam goals before`,
@@ -108,8 +108,10 @@ Core workflow contract:
 - use `lean-beam`, not raw JSON and not raw LSP
 - Beam never applies source edits to `.lean` files on disk; the client applies source edits
 - `lean-beam` only sees the on-disk file, not unsaved editor buffers
-- in transient PID-sandboxed command runners, start one foreground `lean-beam ensure --hold`
-  process when you need daemon reuse across separate shell invocations; interrupt it when finished
+- before using wrapper workflow commands, start one foreground `lean-beam ensure --hold` process
+  and keep it running across shell invocations; interrupt it or run `lean-beam shutdown` when finished
+- MCP owns its stdio runtime session automatically; do not start a separate wrapper holder solely
+  for MCP tool calls
 - after every real Lean source edit: save the file normally, then run `lean-beam update` before the
   next version-bound probe; run `lean-beam sync` when you need diagnostics/readiness
 - use `lean-beam save` only for a synced workspace module path in the current Lake workspace package
@@ -126,9 +128,9 @@ Core workflow contract:
   before the next command that uses the Lean server; `lean-beam refresh` does not restart it
 - treat wrapper `stderr` as human-facing only; use stdout JSON or `beam-client request-stream`
   for machine-readable automation
-- when `beam-client` targets a wrapper-managed daemon in a PID-reaping command runner, keep one
-  `lean-beam ensure --hold` process active for the raw request lifetime; raw broker requests do not
-  carry wrapper leases, while a separately launched standalone daemon has its own process owner
+- when `beam-client` targets a wrapper-managed daemon, keep that session's
+  `lean-beam ensure --hold` owner active for the raw request lifetime; raw broker requests attach to
+  the session but do not own it, while a separately launched standalone daemon has its own owner
 - `lean-beam feedback-report` and `beam_feedback_report` return a report to the caller; Beam does not
   upload or submit it; before posting non-confidential output, review caller-authored narrative,
   request/response payloads, local paths, Beam stats, open-file data, daemon logs/incidents, and
@@ -297,28 +299,28 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 - fully validates exact Lean toolchains listed in `validated-lean-toolchains`, locally qualifies
   canonical RC/patch variants from `compatible-lean-release-lines`, and accepts exact custom names
   recorded by the installer in `custom-lean-toolchains`
-- owns Beam daemon startup, shutdown, and registry handling
+- gives daemon startup authority only to `lean-beam ensure --hold`; ordinary wrapper commands attach
+  to its registry generation and never start a daemon implicitly
+- owns shutdown and registry handling
 - resolves Lean with `elan which lean`
 - builds and plugin-qualifies a local fallback bundle only when no matching installed bundle exists
   for the exact accepted toolchain fingerprint
 - fails early on toolchains that are neither validated, canonical members of a compatible release
   line, nor explicitly custom; use `lean-beam validated-toolchains`,
   `lean-beam compatible-release-lines`, and `lean-beam doctor` to inspect the decision
-- restarts the Beam daemon if the effective Lean startup configuration for that root changes
+- after effective Lean startup configuration changes, requires shutting down the old session and
+  starting a new `lean-beam ensure --hold` owner
 - `lean-beam shutdown`, `lean-beam stats`, and `lean-beam reset-stats` apply to the current project only
 - `lean-beam prune` previews old installed runtimes; restart active agents and MCP clients before
   any `--apply`, and add `--bundles` when stale installed bundle caches should also be removed
 - wrapper commands talk to the per-project Beam daemon over localhost TCP; they are not direct in-process Lean calls
-- `lean-beam ensure --hold` prints the usual JSON ensure response on stdout, keeps the wrapper
-  process alive until interrupted, and is only for environments that reap background daemons when
-  each command exits; later wrappers with matching PID-domain identity recover killed leases from
-  PID liveness, while unknown or cross-namespace killed leases recover after their heartbeat
-  expires, normally after about five seconds; expiry revokes that lease, already-admitted broker work
-  keeps the daemon owner alive until it drains, and a resumed or heartbeat-failed wrapper fails or
-  cancels instead of reusing the revoked lease; if the exact daemon started by the foreground owner
-  dies, owner retirement releases after same-domain PID liveness or zombie state proves it is gone
-- the wrapper retirement fence closes wrapper admission; keep `lean-beam ensure --hold` active when
-  an unfenced `beam-client` targets that managed daemon in a PID-reaping command runner
+- `lean-beam ensure --hold` prints the usual JSON ensure response on stdout and keeps the wrapper
+  process alive as the session owner; an inherited pipe ties daemon lifetime to that process without
+  heartbeat files or lease expiry
+- interrupting or killing the holder closes the owner pipe and shuts down the daemon; explicit
+  `lean-beam shutdown` releases the holder cleanly
+- plain `lean-beam ensure` checks and warms a live owned session; if there is no owner, follow its
+  error and start `lean-beam ensure --hold`
 
 `lean-beam` is more than a one-shot probe:
 
@@ -337,8 +339,8 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 Default rules:
 
 - use `lean-beam`, not raw JSON and not raw LSP
+- start and keep one `lean-beam ensure --hold` owner before issuing wrapper workflow commands
 - start with `lean-beam run-at`
-- use `lean-beam ensure --hold` only when your command runner needs a foreground owner for daemon reuse
 - after every real source edit: save the file to disk normally, then `lean-beam update` before the
   next version-bound probe; use `lean-beam sync` for diagnostics/readiness
 - if exact continuation matters: mint a handle
@@ -351,11 +353,10 @@ Default rules:
 If you only remember one workflow, use this one:
 
 ```bash
-lean-beam ensure
-# in PID-isolated command runners, keep this in one foreground session instead
+# terminal or long-lived agent process 1: keep this running
 lean-beam ensure --hold
 
-# inspect existing code or proof state
+# terminal or agent process 2: inspect existing code or proof state
 update_out="$(lean-beam update "Foo.lean")"
 printf '%s\n' "$update_out"
 version="$(printf '%s\n' "$update_out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["version"])')"

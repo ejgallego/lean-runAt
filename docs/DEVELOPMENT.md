@@ -148,13 +148,10 @@ carries a continuation handle that names one, and daemon startup receives its in
 explicitly through `--workspace-id`. The public CLI still manages one daemon per project, but that
 policy stays in `Beam.Cli`: its request adapter supplies a CLI-owned private identifier. That value
 is an implementation detail, not part of the broker protocol. Broker stats and open-document
-requests without an id remain process-wide; stats also report `uptimeMs` and the internal
-`activeRequestCount` used by daemon retirement, while both return the `workspaces` map. The count is
-the number of other currently admitted requests: the stats request itself is excluded. Every
+requests without an id remain process-wide; stats report `uptimeMs` and the `workspaces` map. Every
 broker request except `cancel` and `shutdown` is tracked even when it has no client request id;
 anonymous requests use an internal admission token so disconnect cancellation cannot affect a later
-request. Wrapper requests carry both a generated request id and an internal daemon-lifetime lease
-context, so every lease-fenced request participates in that count and can be cancelled by its exact
+request. Wrapper requests carry a generated request id so each one can be cancelled by its exact
 admission handle. The CLI scopes those requests before sending them.
 `Beam.Broker.Op.workspaceScope` is the shared operation classification; CLI and test adapters should
 use it instead of maintaining their own operation lists.
@@ -285,7 +282,7 @@ The broker is not a raw LSP proxy. Its narrow public job is still to expose smal
 internally it coordinates several responsibilities around the LSP process:
 
 - the CLI owns process identity: project-root detection, bundle selection, registry files,
-  endpoint/root validation, startup/shutdown, wrapper leases, and control-directory locks
+  endpoint/root validation, explicit session ownership, startup/shutdown, and control-directory locks
 - the broker owns request identity: daemon root validation, backend session lifetime, request
   dispatch, cancellation, active-request bookkeeping, transport errors, and the LSP document mirror
 - the LSP server and plugin own Lean/Rocq semantic facts: elaboration, diagnostics, progress,
@@ -295,8 +292,8 @@ internally it coordinates several responsibilities around the LSP process:
 
 `ServerRuntime.dispatchRequestWithHandle` is the asynchronous admission boundary for in-process
 consumers such as MCP. It validates operation field ownership, registers the request's active
-identity, validates any wrapper lease, exposes one opaque `RequestHandle`, and owns unregistering
-that handle on success, rejection, or exception. A handle uses a per-admission token and must become
+identity, exposes one opaque `RequestHandle`, and owns unregistering that handle on success,
+rejection, or exception. A handle uses a per-admission token and must become
 inert after that lexical scope, including when a later request reuses the same client request ID.
 Keep ordinary daemon and CLI dispatch on
 `ServerRuntime.dispatchRequest`; transport layers must not mutate the active-request registry
@@ -357,69 +354,53 @@ broker-derived decision.
 This wrapper path is easy to break accidentally, so keep the mental model simple.
 
 A daemon generation is one concrete daemon start identified by the `daemonId` in
-`beam-daemon.json`. Every wrapper call holds a heartbeat lease while it may use that generation.
-When the wrapper that started a generation sees all sibling leases and daemon-admitted requests
-drain, it writes a retirement fence: a short-lived marker that closes wrapper admission until that
-starter exits and its owner lease is provably stale.
+`beam-daemon.json`. Exactly one foreground `lean-beam ensure --hold` process owns that generation.
+It starts the daemon with piped stdin and retains the pipe's write end. The daemon watches the read
+end; EOF atomically closes broker admission, marks admitted requests for cancellation, shuts down
+backend sessions, and stops the listener. There is no wrapper heartbeat, lease file, revocation
+tombstone, or retirement fence.
 
-The retirement fence belongs to the wrapper-managed lifecycle. An unfenced `beam-client` request
-that targets the same daemon is counted after broker admission, but the filesystem marker cannot
-prevent a new raw request after the retiring owner samples that count. In a PID-reaping command
-runner, keep `lean-beam ensure --hold` active while directing `beam-client` at a wrapper-managed
-daemon. A separately launched standalone daemon instead has its own explicit process owner.
+Ordinary wrapper commands never start a daemon. Under the per-project control lock they require a
+registry whose root and effective configuration match, whose owner is not known dead in the current
+PID domain, and whose endpoint answers for the CLI's private workspace and canonical project root.
+Endpoint/root validation is authoritative across PID namespaces because numeric PID observations
+from another domain are not safe process identity. A same-domain dead owner or a dead endpoint makes
+the registry stale; cleanup remains generation-scoped and PID fallback is permitted only through the
+typed PID-domain boundary.
 
-What was broken:
+The owner also watches its exact registry generation and daemon child. `lean-beam shutdown` removes
+that generation after the typed shutdown response, which makes the holder close its pipe and lets
+the daemon's stdin watcher finish. An unexpected nonzero daemon exit is reported by the holder.
+Interrupting or killing the holder closes the pipe by process lifetime. A paused holder keeps the
+pipe open, so the session remains valid without time-based expiry. If the project root disappears,
+the daemon's root watcher and the holder both converge on the same shutdown path.
 
-- Codex-style wrapper calls run in separate PID-isolated sandboxes.
-- A later wrapper call could look at the daemon pid in the registry and think the daemon was dead,
-  even when the daemon was still alive and answering on its TCP endpoint.
-- If one wrapper call started the daemon and then exited while sibling wrapper calls were still
-  using it, that exit could tear the daemon down mid-flight.
+This model prevents PID-isolated commands from making contradictory ownership decisions: later
+commands may attach to a validated endpoint, but none can silently become a replacement owner.
+Starting a new session is always an explicit `lean-beam ensure --hold` action. Raw `beam-client`
+requests may attach while that owner remains live; they participate in typed broker admission and
+disconnect cancellation but do not own the process. A separately launched standalone daemon has
+its own explicit process owner.
 
-What the fix does:
+Keep these invariants covered:
 
-- if the registry endpoint still answers, treat the daemon as live even if the recorded pid looks
-  wrong in the current sandbox
-- acquire a wrapper lease under the daemon control lock before inspecting or starting a daemon, so
-  an owner cannot decide that the generation drained while a new wrapper is joining it
-- if a wrapper call started the daemon, keep that wrapper call alive until overlapping sibling
-  wrapper calls for the same project root drain, without a fixed request-duration cutoff
-- close wrapper admission to a drained generation before its owner exits; a later wrapper waits for
-  that retirement fence to clear before it observes the endpoint
-- assign every daemon start a distinct generation id and let an obsolete starter release its lease
-  before waiting on wrappers admitted to the replacement generation
-- bound the retiring owner's broker stats probe; if that exact registry generation has a dead PID
-  or zombie process in the observer's PID domain, release its starter without writing a
-  retirement fence, while timeout and transport failures remain fail-closed when PID identity
-  cannot prove disappearance
-- wait for or kill a registry PID during shutdown only when its recorded PID domain matches the
-  current wrapper; cross-domain shutdown relies on the validated daemon endpoint and never treats
-  the same numeric PID as local process identity
-- `lean-beam ensure --hold` gives agents an explicit foreground owner when they need daemon reuse
-  across separate PID-isolated shell invocations
-- wrapper leases include a PID-domain identity and a monotonic heartbeat; Linux records the PID
-  namespace, while macOS records its host process domain. Known same-domain stale leases can be
-  pruned from PID liveness, while unknown or cross-namespace killed wrappers become stale only after
-  their heartbeat expires
-- expiring a lease first writes a persistent `.revoked` tombstone and only then removes the heartbeat
-  file; a resumed wrapper cannot recreate or reuse that basename, and a killed wrapper leaves the
-  small tombstone in place as its fencing record
-- each wrapper request carries an internal typed fence containing the daemon generation id and its
-  lease basename; the daemon registers the request, validates the fence before dispatch, and reports
-  the active-request count to the retiring owner
-- a request admitted before lease revocation keeps the generation owner alive until the broker
-  finishes or cancels it; a request resumed after revocation is rejected before broker work begins
-- daemon transport watches client disconnects and cancels the exact registered request, so killing a
-  cross-namespace wrapper drains both its heartbeat lease and its broker admission
-- a wrapper reusing an existing daemon stops or cancels its request if it can no longer renew its
-  heartbeat; cancellation uses synthesized request ids for both progress and normally short calls,
-  and heartbeat cleanup does not wait without a bound for an uncooperative task
+- only `ensure --hold` may create and publish a wrapper daemon generation
+- a second owner is rejected while the current endpoint/root generation is live
+- ordinary wrapper commands preserve the owner's generation and fail with the exact recovery command
+  when no owner is live
+- owner EOF, explicit shutdown, and project-root disappearance all close admission before backend
+  teardown and complete with bounded child cleanup
+- PID-domain checks gate every PID probe or signal; cross-domain decisions use the validated endpoint
+- request IDs and per-admission tokens retain exact disconnect and explicit cancellation semantics
+- the regressions for this path are
+  [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh) and
+  [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)
 - the regressions for this path are
   [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh) and
   [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)
 
 Generic process helpers and the typed `RecordedPid.observe` boundary live in
-[Beam/System.lean](../Beam/System.lean). Persisted registry, lease, and lock-owner PIDs must pass
+[Beam/System.lean](../Beam/System.lean). Persisted registry and lock-owner PIDs must pass
 through that boundary; only a matching recorded/current PID-domain pair permits a local liveness,
 zombie, or termination operation. Generic directory locks live in
 [Beam/Cli/Lock.lean](../Beam/Cli/Lock.lean). Their owner metadata records both PID and PID domain;
@@ -453,11 +434,10 @@ and shared with Lake/elaboration work, so a tiny task that blocks in an OS read 
 normal-priority work on low-core runners. The cheap regression guard is
 [scripts/check-task-priority.sh](../scripts/check-task-priority.sh).
 
-Pure wrapper lease metadata, staleness, filename, and retirement decisions live in
-[Beam/Daemon/Ownership.lean](../Beam/Daemon/Ownership.lean). Shared registry, lease, retirement,
-startup-log, and incident paths live in [Beam/Daemon/Paths.lean](../Beam/Daemon/Paths.lean). Daemon
-registry management, daemon startup/reuse, endpoint selection, and effectful wrapper lease handling
-live in [Beam/Cli/DaemonManager.lean](../Beam/Cli/DaemonManager.lean). Broker request plumbing,
+Shared registry, startup-log, and incident paths live in
+[Beam/Daemon/Paths.lean](../Beam/Daemon/Paths.lean). Daemon registry management, explicit owner
+lifetime, endpoint selection, and typed PID-domain cleanup live in
+[Beam/Cli/DaemonManager.lean](../Beam/Cli/DaemonManager.lean). Broker request plumbing,
 progress messages, cancellation-on-interrupt, and response failure notes live in
 [Beam/Cli/Broker.lean](../Beam/Cli/Broker.lean). User-facing stdout/stderr formatting helpers live
 in [Beam/Cli/Output.lean](../Beam/Cli/Output.lean). Doctor, validated/compatible toolchain registry,

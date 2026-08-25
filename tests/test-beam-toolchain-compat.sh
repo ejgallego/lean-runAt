@@ -11,6 +11,8 @@ cd "$(dirname "$0")/.."
 . tests/lib/ci-steps.sh
 # shellcheck source=tests/lib/tmp-guards.sh
 . tests/lib/tmp-guards.sh
+# shellcheck source=tests/lib/wait.sh
+. tests/lib/wait.sh
 
 BEAM_TEST_SUITE="${BEAM_TEST_SUITE:-beam-toolchain-compat}"
 bundle_timeout="${BEAM_TOOLCHAIN_COMPAT_TIMEOUT:-600}"
@@ -40,6 +42,9 @@ stale_build_stdout="$tmp_env_root/stale-build.stdout"
 stale_build_stderr="$tmp_env_root/stale-build.stderr"
 stale_sync_stdout="$tmp_env_root/stale-sync.stdout"
 stale_sync_stderr="$tmp_env_root/stale-sync.stderr"
+stale_owner_stdout="$tmp_env_root/stale-owner.stdout"
+stale_owner_stderr="$tmp_env_root/stale-owner.stderr"
+stale_owner_pid=""
 toolchain_failed=false
 
 if [ -z "${ELAN_HOME:-}" ] && [ -d "$HOME/.elan" ]; then
@@ -56,6 +61,12 @@ cleanup() {
     HOME="$tmp_env_root/home" CODEX_HOME="$tmp_env_root/codex" CLAUDE_HOME="$tmp_env_root/claude" \
       ELAN_HOME="$host_elan_home" BEAM_INSTALL_BUNDLE_DIR="$tmp_bundle_dir" \
       ./scripts/lean-beam --root "$stale_project_root" shutdown > /dev/null 2>&1 || true
+  fi
+  if [ -n "${stale_owner_pid:-}" ]; then
+    if kill -0 "$stale_owner_pid" 2>/dev/null; then
+      kill -INT "$stale_owner_pid" 2>/dev/null || true
+    fi
+    wait "$stale_owner_pid" 2>/dev/null || true
   fi
   if [ "$toolchain_failed" = "true" ]; then
     case "$keep_tmp_on_failure" in
@@ -109,6 +120,8 @@ print_toolchain_context() {
   tail_file "stale build stderr" "$stale_build_stderr"
   tail_file "stale sync stdout" "$stale_sync_stdout"
   tail_file "stale sync stderr" "$stale_sync_stderr"
+  tail_file "stale owner stdout" "$stale_owner_stdout"
+  tail_file "stale owner stderr" "$stale_owner_stderr"
 }
 
 run_build() {
@@ -260,6 +273,35 @@ run_stale_wrapper_checked() {
   fi
 }
 
+start_stale_owner() {
+  run_stale_wrapper ensure --hold > "$stale_owner_stdout" 2> "$stale_owner_stderr" &
+  stale_owner_pid="$!"
+  if ! wait_for_file_text "$stale_owner_stderr" "owning Beam session" \
+      "toolchain compatibility session owner" 600 0.1; then
+    print_toolchain_context "explicit session owner failed to start"
+    return 1
+  fi
+}
+
+stop_stale_owner() {
+  if [ -z "$stale_owner_pid" ]; then
+    return 0
+  fi
+  if ! run_stale_wrapper shutdown > /dev/null 2> "$stale_sync_stderr"; then
+    print_toolchain_context "explicit session owner failed to shut down"
+    return 1
+  fi
+  if ! wait_for_exit "$stale_owner_pid" "toolchain compatibility session owner" 120 0.1; then
+    print_toolchain_context "explicit session owner did not exit"
+    return 1
+  fi
+  if ! wait "$stale_owner_pid"; then
+    print_toolchain_context "explicit session owner exited unsuccessfully"
+    return 1
+  fi
+  stale_owner_pid=""
+}
+
 run_stale_diagnostic_compat() {
   local rc=0
   prepare_stale_diagnostic_project
@@ -278,6 +320,10 @@ EOF
   if [ "$rc" -ne 0 ]; then
     print_toolchain_context "stale diagnostic fixture build failed"
     return "$rc"
+  fi
+
+  if ! start_stale_owner; then
+    return 1
   fi
 
   if ! run_stale_wrapper_checked "initial dependency sync failed" sync SaveSmoke/B.lean; then
@@ -320,6 +366,7 @@ EOF
     print_toolchain_context "stale diagnostic wording changed"
     return 1
   fi
+  stop_stale_owner
 }
 
 run_step "build beam-cli" run_build

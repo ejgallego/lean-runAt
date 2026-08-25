@@ -51,7 +51,8 @@ notes:
   - run `lean-beam sync <path>` when you also need the diagnostics/readiness barrier
   - for multiline text-carrying Lean probes, prefer `--stdin` or `--text-file <path>`; use `--` before text that starts with `--`
   - for handle-based commands, use `--handle-file <path>` when you do not want to inline handle json
-  - use `ensure --hold` when a PID-isolated command runner needs one foreground process to keep a newly-started daemon alive
+  - wrapper commands require one live session owner; start `ensure --hold` in a foreground process and keep it running
+  - plain `ensure` checks and warms that owned session but never starts one implicitly
   - set `BEAM_DEBUG_TEXT=1` to print the exact escaped text and UTF-8 bytes sent for text-carrying Lean probes
   - use `lean-beam --version` for bug reports and installed runtime identity checks
   - validated-toolchains lists exact CI-validated versions; compatible-release-lines lists canonical RC/patch families qualified locally

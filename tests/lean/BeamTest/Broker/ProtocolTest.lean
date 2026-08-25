@@ -661,9 +661,9 @@ private def checkWorkspaceRoutingFields : IO Unit := do
         .required
     require s!"{op.key} has the wrong workspace scope"
       (op.workspaceScope == expectedScope)
-    let expectedWrapperLease := op != .cancel && op != .shutdown
-    require s!"{op.key} has the wrong wrapper-lease admission policy"
-      (op.acceptsWrapperLease == expectedWrapperLease)
+    let expectedTracking := op != .cancel && op != .shutdown
+    require s!"{op.key} has the wrong active-request tracking policy"
+      (op.tracksActiveRequest == expectedTracking)
     let request : Request := { op }
     let decoded ← expectOk s!"minimal {op.key} request round trip" <|
       fromJson? (α := Request) (toJson request)
@@ -675,43 +675,6 @@ private def checkWorkspaceRoutingFields : IO Unit := do
 
   let leanReq : Request := { op := .ensure }
   requireJsonString "backend-scoped request serialization" "backend" "lean" (toJson leanReq)
-
-  let wrapperLease : WrapperLeaseContext := {
-    daemonId := "daemon-generation"
-    leaseFile := "123-42-99.lease"
-  }
-  let fencedReq : Request := {
-    op := .stats
-    clientRequestId? := some "wrapper-lease-round-trip"
-    wrapperLease? := some wrapperLease
-  }
-  let decodedFenced ← expectOk "wrapper lease request round trip" <|
-    fromJson? (α := Request) (toJson fencedReq)
-  require "wrapper lease request preserves its typed fence"
-    (decodedFenced.wrapperLease? == some wrapperLease)
-  for op in #[Op.cancel, .shutdown] do
-    let fencedControl : Request := {
-      op
-      clientRequestId? := some s!"wrapper-lease-{op.key}"
-      wrapperLease? := some wrapperLease
-    }
-    match fromJson? (α := Request) (toJson fencedControl) with
-    | .ok _ => throw <| IO.userError s!"broker accepted a wrapper lease for {op.key}"
-    | .error err =>
-        require s!"{op.key} should reject its wrapper lease explicitly"
-          (err.contains "does not accept 'wrapperLease'")
-  match fromJson? (α := Request) <| Json.mkObj [
-      ("op", toJson "stats"),
-      ("clientRequestId", toJson "wrapper-lease-undeclared-field"),
-      ("wrapperLease", Json.mkObj [
-        ("daemonId", toJson "daemon-generation"),
-        ("leaseFile", toJson "123-42-99.lease"),
-        ("obsolete", toJson true)
-      ])
-    ] with
-  | .ok _ => throw <| IO.userError "broker accepted an undeclared wrapper lease field"
-  | .error err =>
-      require "wrapper lease decoder should identify its undeclared field" (err.contains "obsolete")
 
   let explicitReq : Request := {
     op := .stats
@@ -840,7 +803,6 @@ private def checkWorkspaceLifecycleProtocol : IO Unit := do
   requireFieldAbsent "process-wide stats" "root" processStats
   requireFieldAbsent "process-wide stats" "sessions" processStats
   requireFieldAbsent "process-wide stats" "byBackend" processStats
-  requireJsonInt "process-wide stats" "activeRequestCount" 0 processStats
   discard <| IO.ofExcept <| processStats.getObjVal? "workspaces"
 
   let resetResult : Beam.Workspace.InitResult := {
@@ -900,110 +862,24 @@ private def checkWorkspaceLifecycleProtocol : IO Unit := do
   require "typed workspace drop preserves lifecycle state"
     (decodedDrop.workspaceId == "fixture" && decodedDrop.dropped && decodedDrop.invalidatedHandles)
 
-private def wrapperLeaseInactiveResponse (leaseState : String) (resp : Response) : Bool :=
-  resp.error?.any fun err =>
-    err.code == "requestCancelled" &&
-      err.data?.any fun data =>
-        (data.getObjValAs? String "reason").toOption == some "wrapperLeaseInactive" &&
-          (data.getObjValAs? String "leaseState").toOption == some leaseState
-
-private def checkWrapperLeaseFence : IO Unit := do
-  let root := System.FilePath.mk s!"/tmp/beam-wrapper-lease-fence-{← IO.monoNanosNow}"
-  let daemonId := "daemon-generation"
-  let leaseFile := "123-42-99.lease"
-  try
-    IO.FS.createDirAll root
-    let leaseDir ← Beam.Daemon.wrapperLeaseDir root
-    IO.FS.createDirAll leaseDir
-    let leasePath := leaseDir / leaseFile
-    let metadata : Beam.Daemon.Ownership.WrapperLeaseMetadata := {
-      pid := 42
-      heartbeatMonoNanos := ← IO.monoNanosNow
-    }
-    IO.FS.writeFile leasePath ((toJson metadata).pretty ++ "\n")
-    let runtime ← Beam.Broker.ServerRuntime.create
-      ({ root } : Beam.Broker.BrokerConfig) "fixture" (.tcp 0) (some daemonId)
-    let request : Request := {
-      op := .stats
-      clientRequestId? := some "wrapper-lease-valid"
-      wrapperLease? := some { daemonId, leaseFile }
-    }
-    let anonymousLeaseJson := Json.mkObj [
-      ("op", toJson "stats"),
-      ("wrapperLease", toJson ({ daemonId, leaseFile } : WrapperLeaseContext))
-    ]
-    match fromJson? (α := Request) anonymousLeaseJson with
-    | .ok _ =>
-        throw <| IO.userError "broker accepted an untracked wrapper lease request"
-    | .error err =>
-        require "wrapper lease validation should require request correlation"
-          (err.contains "clientRequestId")
-    match request.validateFields with
-    | .error err =>
-        throw <| IO.userError s!"valid wrapper lease request failed validation: {err}"
-    | .ok () => pure ()
-    let (accepted, _) ← runtime.dispatchRequest request
-    require "a matching live wrapper lease should pass daemon dispatch fencing" accepted.ok
-    let some acceptedResult := accepted.result?
-      | throw <| IO.userError "accepted wrapper lease stats response omitted its result"
-    requireJsonInt "lease-fenced stats" "activeRequestCount" 0 acceptedResult
-
-    let revocationPath := Beam.Daemon.Ownership.wrapperLeaseRevocationPath leasePath
-    IO.FS.writeFile revocationPath "{}\n"
-    let (revoked, _) ← runtime.dispatchRequest {
-      request with clientRequestId? := some "wrapper-lease-revoked"
-    }
-    require "a revoked wrapper lease should fail before broker dispatch"
-      (wrapperLeaseInactiveResponse "revoked" revoked)
-
-    let (wrongGeneration, _) ← runtime.dispatchRequest {
-      request with
-        clientRequestId? := some "wrapper-lease-wrong-generation"
-        wrapperLease? := some { daemonId := "replacement", leaseFile }
-    }
-    require "a wrapper lease from another daemon generation should fail before dispatch"
-      (wrapperLeaseInactiveResponse "generationMismatch" wrongGeneration)
-
-    IO.FS.removeFile revocationPath
-    IO.FS.removeFile leasePath
-    let (missing, _) ← runtime.dispatchRequest {
-      request with clientRequestId? := some "wrapper-lease-missing"
-    }
-    require "a missing wrapper lease should fail before broker dispatch"
-      (wrapperLeaseInactiveResponse "missing" missing)
-
-    IO.FS.writeFile leasePath "{\n"
-    let (malformed, _) ← runtime.dispatchRequest {
-      request with clientRequestId? := some "wrapper-lease-malformed"
-    }
-    require "a malformed wrapper lease should fail before broker dispatch"
-      (wrapperLeaseInactiveResponse "malformed" malformed)
-    IO.FS.removeFile leasePath
-    IO.FS.createDir leasePath
-    let (unreadable, _) ← runtime.dispatchRequest {
-      request with clientRequestId? := some "wrapper-lease-unreadable"
-    }
-    require "an unreadable wrapper lease should fail before broker dispatch"
-      (wrapperLeaseInactiveResponse "unreadable" unreadable)
-    IO.FS.removeDir leasePath
-    IO.FS.writeFile leasePath ((toJson { metadata with pid := 0 }).pretty ++ "\n")
-    let (invalidPid, _) ← runtime.dispatchRequest {
-      request with clientRequestId? := some "wrapper-lease-invalid-pid"
-    }
-    require "a zero-pid wrapper lease should fail before broker dispatch"
-      (wrapperLeaseInactiveResponse "invalidPid" invalidPid)
-    let (invalidFileName, _) ← runtime.dispatchRequest {
-      request with
-        clientRequestId? := some "wrapper-lease-invalid-file-name"
-        wrapperLease? := some { daemonId, leaseFile := "../outside.lease" }
-    }
-    require "an invalid wrapper lease basename should fail before broker dispatch"
-      (wrapperLeaseInactiveResponse "invalidFileName" invalidFileName)
-    require "rejected wrapper leases should leave no active admission"
-      ((← ActiveRequestRegistry.count runtime.activeRequests) == 0)
-  finally
-    if ← root.pathExists then
-      IO.FS.removeDirAll root
+private def checkSessionCloseAdmission : IO Unit := do
+  let root := System.FilePath.mk "/tmp/beam-session-close-admission"
+  let runtime ← Beam.Broker.ServerRuntime.create
+    ({ root } : Beam.Broker.BrokerConfig) "fixture" (.tcp 0)
+  let (beforeClose, _) ← runtime.dispatchRequest { op := .stats }
+  require "stats should be admitted before session close" beforeClose.ok
+  require "first session close should win admission shutdown"
+    (← ActiveRequestRegistry.closeAdmission runtime.activeRequests)
+  require "repeated session close should be idempotent"
+    (!(← ActiveRequestRegistry.closeAdmission runtime.activeRequests))
+  let (afterClose, _) ← runtime.dispatchRequest { op := .stats }
+  require "ordinary requests should be rejected after session close"
+    (afterClose.error?.any fun err => err.code == "requestCancelled")
+  let (shutdown, shouldStop) ← runtime.dispatchRequest { op := .shutdown }
+  require "shutdown remains idempotent after admission closes" shutdown.ok
+  require "an idempotent shutdown should not claim process teardown" (!shouldStop)
+  require "closed admission should leave no active request"
+    ((← ActiveRequestRegistry.count runtime.activeRequests) == 0)
 
 def main : IO Unit := do
   checkResponseJsonShape
@@ -1019,7 +895,7 @@ def main : IO Unit := do
   checkRequestArgsBoundary
   checkWorkspaceRoutingFields
   checkWorkspaceLifecycleProtocol
-  checkWrapperLeaseFence
+  checkSessionCloseAdmission
 
 end BeamTest.Broker.ProtocolTest
 

@@ -201,10 +201,14 @@ lean-beam doctor
 Command positions use Lean/LSP coordinates: line and character are zero-based, and character counts
 UTF-16 code units.
 
-Then start the per-project daemon and ask questions against a saved Lean file in that project:
+Start one foreground owner for the wrapper session and keep it running. In another terminal or agent
+process, ask questions against saved Lean files in that project:
 
 ```bash
-lean-beam ensure
+# terminal/session 1
+lean-beam ensure --hold
+
+# terminal/session 2
 update_json="$(lean-beam update "Foo.lean")"
 printf '%s\n' "$update_json"
 version="$(printf '%s\n' "$update_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["version"])')"
@@ -213,6 +217,12 @@ lean-beam definition "Foo.lean" "$version" 10 2
 lean-beam goals before "Foo.lean" "$version" 10 2
 lean-beam run-at "Foo.lean" "$version" 10 2 "exact trivial"
 ```
+
+`lean-beam ensure --hold` is the only wrapper command that starts the per-project daemon. Its
+inherited ownership pipe defines the session lifetime: interrupt the holder, or run
+`lean-beam shutdown`, to close the daemon and its backend processes. Plain `lean-beam ensure` and
+all other wrapper commands attach to an existing owner and fail with a recovery command when none
+is live. MCP clients do not need a separate holder; the stdio MCP process owns its runtime session.
 
 The `python3` line extracts `result.version` for shell examples. You can also copy that version
 number from the printed `lean-beam update` JSON.
@@ -265,9 +275,9 @@ checks.
 
 The running Lean server and existing file workers are not guaranteed to pick up Lake workspace
 configuration changes. After editing a lakefile, manifest, package override, `lean-toolchain`, Lean
-options, plugins, or dynamic libraries, run `lean-beam shutdown` before the next command that uses
-the Lean server. `lean-beam refresh` reopens a file within the current server and is not sufficient
-for this case.
+options, plugins, or dynamic libraries, run `lean-beam shutdown`, then start a new
+`lean-beam ensure --hold` owner before the next wrapper command that uses the Lean server.
+`lean-beam refresh` reopens a file within the current server and is not sufficient for this case.
 
 ### Final Batch Validation
 

@@ -7,7 +7,6 @@ Author: Emilio J. Gallego Arias
 import Beam.Broker.Errors
 import Beam.Cli.Args
 import Beam.Cli.Broker
-import Beam.Daemon.Ownership
 import Beam.Cli.Info
 import Beam.Cli.LeanOperation
 import Beam.Cli.Lock
@@ -18,7 +17,6 @@ import Beam.Path
 import BeamTest.Broker.JsonAssert
 
 open Lean
-open Beam.Daemon.Ownership
 open BeamTest.Broker.JsonAssert (requireJsonNull requireJsonString)
 
 namespace BeamTest.Broker.CliDaemonTest
@@ -30,10 +28,6 @@ private def require (label : String) (cond : Bool) : IO Unit := do
 private def projectDaemonClientForTest
     (endpoint : Beam.Broker.Transport.Endpoint) : Beam.Cli.ProjectDaemonClient := {
   endpoint
-  wrapperLease := {
-    daemonId := "test-daemon"
-    leaseFile := "test-wrapper.lease"
-  }
 }
 
 private def checkDaemonDebugWarnings : IO Unit := do
@@ -50,7 +44,7 @@ private def checkDaemonDebugWarnings : IO Unit := do
     (warnings.any (fun warning => warning.contains "registry pid is not alive"))
   require "dead registry pid warning should include recovery hint"
     (warnings.any (fun warning =>
-      warning.contains "lean-beam shutdown" && warning.contains "lean-beam ensure"))
+      warning.contains "lean-beam shutdown" && warning.contains "lean-beam ensure --hold"))
 
 private def expectIoErrorMessage (label : String) (act : IO α) : IO String := do
   let result ←
@@ -172,7 +166,7 @@ private def serveCancelablePlainRequest
     finally
       Beam.Broker.Transport.closeConnection cancelConn
     let response := Beam.Broker.errorResponseFor
-      .requestCancelled "cancelled by wrapper lease loss"
+      .requestCancelled "cancelled by session close"
     Beam.Broker.Transport.sendMsg requestConn
       (toJson (Beam.Broker.StreamMessage.response (some requestId) response)).compress
   finally
@@ -527,6 +521,8 @@ private def checkDaemonFailureContext : IO Unit := do
       daemonId := "daemon-test"
       pid := 999999999
       pidDomain?
+      ownerPid := 999999999
+      ownerPidDomain? := pidDomain?
       port? := some 42424
       root := root.toString
       configHash := "config-test"
@@ -655,6 +651,7 @@ private def writeTestRegistryEntry
   let entry : Beam.Daemon.RegistryEntry := {
     daemonId := "daemon-test"
     pid := 999999999
+    ownerPid := 999999999
     port?
     root := root.toString
     configHash := "config-test"
@@ -835,30 +832,6 @@ private def createSymlink
   if out.exitCode != 0 then
     throw <| IO.userError s!"failed to create {label} symlink\n{out.stderr}"
 
-private def checkWrapperLeaseStaleness : IO Unit := do
-  let fresh : WrapperLeaseMetadata := {
-    pid := 42
-    pidDomain? := some "pid:[owner]"
-    heartbeatMonoNanos := 1000
-  }
-  let timeout := 500
-  require "a fresh cross-domain lease should not depend on an unrelated PID observation"
-    (!(wrapperLeaseStaleFromObservation .differentDomain 1200 timeout fresh))
-  require "a dead same-domain PID should make a fresh lease stale"
-    (wrapperLeaseStaleFromObservation (.local false) 1200 timeout fresh)
-  require "a live same-domain PID should preserve a fresh lease"
-    (!(wrapperLeaseStaleFromObservation (.local true) 1200 timeout fresh))
-  require "unknown domain identity should fall back to a fresh heartbeat"
-    (!(wrapperLeaseStaleFromObservation .unknownDomain 1200 timeout fresh))
-  require "heartbeat expiry should revoke even a same-domain live process lease"
-    (wrapperLeaseStaleFromObservation (.local true) 1501 timeout fresh)
-  require "heartbeat expiry should make a cross-domain lease stale"
-    (wrapperLeaseStaleFromObservation .differentDomain 1501 timeout fresh)
-  require "a heartbeat from a previous monotonic clock epoch should be stale"
-    (wrapperLeaseStaleFromObservation .differentDomain 999 timeout fresh)
-  require "pid zero should never hold daemon ownership"
-    (wrapperLeaseStaleFromObservation .differentDomain 1000 timeout { fresh with pid := 0 })
-
 private def checkCurrentPidDomain : IO Unit := do
   let selfPid := (← IO.Process.getPID).toNat
   let domain? ← Beam.currentPidDomain?
@@ -900,6 +873,8 @@ private def checkCrossDomainRegistryPidGuard : IO Unit := do
       daemonId := "cross-domain-pid-guard"
       pid := child.pid.toNat
       pidDomain? := some "beam-test-other-pid-domain"
+      ownerPid := child.pid.toNat
+      ownerPidDomain? := some "beam-test-other-pid-domain"
       root := "/tmp/beam-cross-domain-pid-guard"
       configHash := "cross-domain-pid-guard"
       startedAt := "2026-08-25T00:00:00Z"
@@ -916,34 +891,6 @@ private def checkCrossDomainRegistryPidGuard : IO Unit := do
       discard <| child.wait
     catch _ =>
       pure ()
-
-private def checkDaemonRetirementPolicy : IO Unit := do
-  require "a drained current generation should commit retirement"
-    (retirementDecision (.current .drained .drained) == .commit)
-  require "an active current generation sibling should keep the owner alive"
-    (retirementDecision (.current .activeOrUnreadable .drained) == .wait)
-  require "an admitted broker request should keep the current generation owner alive"
-    (retirementDecision (.current .drained .activeOrUnreadable) == .wait)
-  require "a provably dead current daemon should release its starter without fencing"
-    (retirementDecision (.current .drained .provenGone) == .obsolete)
-  require "a proven replacement generation should make the old owner obsolete immediately"
-    (retirementDecision .replacement == .obsolete)
-  require "unavailable registry state with active or unreadable siblings should fail closed"
-    (retirementDecision (.unavailable .activeOrUnreadable) == .wait)
-  require "unavailable registry state may release an owner only after siblings drain"
-    (retirementDecision (.unavailable .drained) == .obsolete)
-
-private def checkWrapperLeaseFileNames : IO Unit := do
-  require "a generated-style lease basename should be accepted"
-    (validWrapperLeaseFileName "123-42-99.lease")
-  require "a parent-relative retirement lease path should be rejected"
-    (!(validWrapperLeaseFileName "../outside.lease"))
-  require "an absolute retirement lease path should be rejected"
-    (!(validWrapperLeaseFileName "/tmp/outside.lease"))
-  require "a nested retirement lease path should be rejected"
-    (!(validWrapperLeaseFileName "nested/outside.lease"))
-  require "a non-lease retirement basename should be rejected"
-    (!(validWrapperLeaseFileName "owner.json"))
 
 private def checkPathCanonicalization : IO Unit := do
   let stamp ← IO.monoNanosNow
@@ -1316,11 +1263,8 @@ def main : IO Unit := do
   checkDoctorDaemonFailureIncidentLines
   checkPathRelativeToRoot
   checkLeanModuleNamePathHelpers
-  checkWrapperLeaseStaleness
   checkCurrentPidDomain
   checkCrossDomainRegistryPidGuard
-  checkDaemonRetirementPolicy
-  checkWrapperLeaseFileNames
   checkPathCanonicalization
   checkLockLifecycle
   checkLeanToolchainPolicyParsing

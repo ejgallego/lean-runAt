@@ -325,6 +325,7 @@ structure ActiveRequest where
 
 private structure ActiveRequestRegistryState where
   nextToken : Nat := 1
+  accepting : Bool := true
   requests : Std.TreeMap String ActiveRequest := {}
   anonymousRequests : Std.TreeMap Nat ActiveRequest := {}
 
@@ -342,6 +343,11 @@ def register
   let cancelRef ← IO.mkRef false
   registry.mutex.atomically do
     let state ← get
+    unless state.accepting do
+      return .error {
+        code := .requestCancelled
+        message := "Beam session owner is closing"
+      }
     match clientRequestId? with
     | none =>
         let active : ActiveRequest := { clientRequestId?, token := state.nextToken, cancelRef }
@@ -391,23 +397,23 @@ def count (registry : ActiveRequestRegistry) : IO Nat := do
     let state ← get
     pure (state.requests.size + state.anonymousRequests.size)
 
-def countExcluding
-    (registry : ActiveRequestRegistry)
-    (excluded : ActiveRequest) : IO Nat := do
-  registry.mutex.atomically do
-    let state ← get
-    let total := state.requests.size + state.anonymousRequests.size
-    let exactAdmissionPresent : Bool :=
-      match excluded.clientRequestId? with
-      | some clientRequestId =>
-          match state.requests.get? clientRequestId with
-          | some current => current.token == excluded.token
-          | none => false
-      | none =>
-          match state.anonymousRequests.get? excluded.token with
-          | some current => current.token == excluded.token
-          | none => false
-    pure <| if exactAdmissionPresent then total - 1 else total
+/--
+Atomically close request admission and mark every admitted request for cancellation. Return `true`
+only to the caller that changed the registry from accepting to closed.
+-/
+def closeAdmission (registry : ActiveRequestRegistry) : IO Bool := do
+  let (firstClose, active) ← registry.mutex.atomically do
+    let state : ActiveRequestRegistryState ← get
+    if !state.accepting then
+      pure (false, #[])
+    else
+      set { state with accepting := false }
+      let named := state.requests.toList.map Prod.snd |>.toArray
+      let anonymous := state.anonymousRequests.toList.map Prod.snd |>.toArray
+      pure (true, named ++ anonymous)
+  for request in active do
+    request.cancelRef.set true
+  pure firstClose
 
 def markCancelled
     (registry : ActiveRequestRegistry)

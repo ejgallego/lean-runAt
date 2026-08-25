@@ -55,12 +55,19 @@ bash tests/setup-rocq-opam.sh
 Rocq commands are available through the same installed `lean-beam` wrapper:
 
 ```bash
-lean-beam ensure rocq
+# keep this foreground owner running in one terminal/session
+lean-beam ensure rocq --hold
+
+# issue probes from another terminal/session
 lean-beam doctor rocq
 lean-beam rocq-goals-after "Demo.v" 2 8
 lean-beam rocq-goals-prev "Demo.v" 2 8
 lean-beam rocq-goals-prev "Demo.v" 2 8 "intro x."
 ```
+
+The holder is the explicit owner of the wrapper daemon and its `coq-lsp` backend. Interrupt it, or
+run `lean-beam shutdown`, when the session is finished. Ordinary wrapper commands attach to that
+session and do not start a daemon implicitly.
 
 Use `rocq-goals-after` to inspect goals after an existing sentence. Use `rocq-goals-prev` to
 inspect goals before a sentence, or with extra text to inspect an intermediate tactic prefix while

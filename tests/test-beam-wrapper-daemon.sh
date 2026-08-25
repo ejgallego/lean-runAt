@@ -23,71 +23,52 @@ if [ ! -x "$beam_cli" ]; then
   exit 1
 fi
 
+tmp1="$(mktemp -d /tmp/beam-wrapper-daemon-owner-a-XXXXXX)"
+tmp2="$(mktemp -d /tmp/beam-wrapper-daemon-owner-b-XXXXXX)"
+owned_bundle_dir=""
+if [ -z "${BEAM_INSTALL_BUNDLE_DIR:-}" ]; then
+  owned_bundle_dir="$(mktemp -d /tmp/beam-wrapper-daemon-owner-bundles-XXXXXX)"
+  export BEAM_INSTALL_BUNDLE_DIR="$owned_bundle_dir"
+fi
+hold_pid=""
+root_removed="false"
+
 stop_hold_process() {
   local require_clean_exit="${1:-false}"
-  if [ -n "$hold_pid" ]; then
-    kill -INT "$hold_pid" > /dev/null 2>&1 || true
-    if ! wait_for_exit "$hold_pid" "ensure --hold wrapper" 20 0.1; then
-      kill "$hold_pid" > /dev/null 2>&1 || true
-      wait "$hold_pid" 2>/dev/null || true
-      hold_pid=""
-      if [ "$require_clean_exit" = "true" ]; then
-        echo "expected ensure --hold wrapper to exit promptly after SIGINT" >&2
-        return 1
-      fi
-    else
-      local hold_status=0
-      set +e
-      wait "$hold_pid" 2>/dev/null
-      hold_status="$?"
-      set -e
-      hold_pid=""
-      if [ "$require_clean_exit" = "true" ] && [ "$hold_status" -ne 0 ]; then
-        echo "expected ensure --hold wrapper to exit cleanly after SIGINT, got $hold_status" >&2
-        return 1
-      fi
-    fi
+  if [ -z "$hold_pid" ]; then
+    return
+  fi
+  kill -INT "$hold_pid" > /dev/null 2>&1 || true
+  if ! wait_for_exit "$hold_pid" "ensure --hold owner" 200 0.05; then
+    kill "$hold_pid" > /dev/null 2>&1 || true
+    wait "$hold_pid" 2>/dev/null || true
     hold_pid=""
+    if [ "$require_clean_exit" = "true" ]; then
+      echo "expected ensure --hold owner to exit promptly after SIGINT" >&2
+      return 1
+    fi
+    return
+  fi
+  local status=0
+  set +e
+  wait "$hold_pid"
+  status="$?"
+  set -e
+  hold_pid=""
+  if [ "$require_clean_exit" = "true" ] && [ "$status" -ne 0 ]; then
+    echo "expected ensure --hold owner to exit cleanly, got $status" >&2
+    return 1
   fi
 }
 
-tmp1="$(mktemp -d /tmp/beam-wrapper-daemon-a-XXXXXX)"
-tmp3="$(mktemp -d /tmp/beam-wrapper-daemon-c-XXXXXX)"
-tmp9="$(mktemp -d /tmp/beam-wrapper-daemon-i-XXXXXX)"
-owned_bundle_dir=""
-if [ -z "${BEAM_INSTALL_BUNDLE_DIR:-}" ]; then
-  owned_bundle_dir="$(mktemp -d /tmp/beam-wrapper-daemon-bundles-XXXXXX)"
-  export BEAM_INSTALL_BUNDLE_DIR="$owned_bundle_dir"
-fi
-busy_pid=""
-hold_pid=""
-heartbeat_follower_pid=""
-removed_root_pid=""
-removed_root_err=""
-
 cleanup() {
   stop_hold_process
-  if [ -n "$busy_pid" ]; then
-    kill "$busy_pid" > /dev/null 2>&1 || true
-    wait "$busy_pid" 2>/dev/null || true
+  if [ "$root_removed" != "true" ]; then
+    "$beam_script" --root "$tmp1" shutdown > /dev/null 2>&1 || true
+    remove_owned_tmp_tree "$tmp1"
   fi
-  if [ -n "$heartbeat_follower_pid" ]; then
-    kill "$heartbeat_follower_pid" > /dev/null 2>&1 || true
-    wait "$heartbeat_follower_pid" 2>/dev/null || true
-  fi
-  if [ -n "$removed_root_pid" ]; then
-    kill "$removed_root_pid" > /dev/null 2>&1 || true
-    wait "$removed_root_pid" 2>/dev/null || true
-  fi
-  if [ -n "$removed_root_err" ]; then
-    rm -f "$removed_root_err"
-  fi
-  "$beam_script" --root "$tmp1" shutdown > /dev/null 2>&1 || true
-  "$beam_script" --root "$tmp3" shutdown > /dev/null 2>&1 || true
-  "$beam_script" --root "$tmp9" shutdown > /dev/null 2>&1 || true
-  remove_owned_tmp_tree "$tmp1"
-  remove_owned_tmp_tree "$tmp3"
-  remove_owned_tmp_tree "$tmp9"
+  "$beam_script" --root "$tmp2" shutdown > /dev/null 2>&1 || true
+  remove_owned_tmp_tree "$tmp2"
   if [ -n "$owned_bundle_dir" ]; then
     remove_owned_tmp_tree "$owned_bundle_dir"
   fi
@@ -97,449 +78,229 @@ trap cleanup EXIT
 if [ -n "$owned_bundle_dir" ]; then
   expect_owned_tmp_dir "$owned_bundle_dir"
 fi
-
-fixture_toolchain="$(awk 'NR==1 {print $1}' tests/save_olean_project/lean-toolchain)"
-"$beam_cli" bundle-install "$fixture_toolchain"
-
-for tmp in "$tmp1" "$tmp3" "$tmp9"; do
+for tmp in "$tmp1" "$tmp2"; do
   expect_owned_tmp_dir "$tmp"
   rsync -a --exclude='.beam/' tests/save_olean_project/ "$tmp"/
   remove_tmp_tree_within "$tmp/.beam" "$tmp"
   mkdir -p "$tmp/.beam"
 done
 
-"$beam_script" --root "$tmp9" ensure --hold > "$tmp9/hold.out" 2> "$tmp9/hold.err" &
-hold_pid="$!"
-hold_registry="$tmp9/.beam/beam-daemon.json"
-# A cold installed-bundle qualification can build the selected Lean payload before `ensure`
-# responds. Keep this bounded, but allow enough time for that legitimate first-use path on CI.
-hold_ready_attempts="${BEAM_TEST_HOLD_READY_ATTEMPTS:-1800}"
-case "$hold_ready_attempts" in
+fixture_toolchain="$(awk 'NR==1 {print $1}' tests/save_olean_project/lean-toolchain)"
+"$beam_cli" bundle-install "$fixture_toolchain"
+
+missing_owner_out="$tmp1/missing-owner.out"
+missing_owner_err="$tmp1/missing-owner.err"
+if "$beam_script" --root "$tmp1" ensure > "$missing_owner_out" 2> "$missing_owner_err"; then
+  echo "expected an ordinary wrapper command to require a session owner" >&2
+  cat "$missing_owner_out" >&2
+  exit 1
+fi
+if ! grep -Fq "lean-beam ensure --hold" "$missing_owner_err"; then
+  echo "expected missing-owner error to name the recovery command" >&2
+  cat "$missing_owner_err" >&2
+  exit 1
+fi
+
+start_owner() {
+  local root="$1"
+  local label="$2"
+  local out="$root/$label.out"
+  local err="$root/$label.err"
+  "$beam_script" --root "$root" ensure --hold > "$out" 2> "$err" &
+  hold_pid="$!"
+  local registry="$root/.beam/beam-daemon.json"
+  local attempts="${BEAM_TEST_HOLD_READY_ATTEMPTS:-1800}"
+  case "$attempts" in
+    ''|*[!0-9]*|0)
+      echo "BEAM_TEST_HOLD_READY_ATTEMPTS must be a positive integer" >&2
+      exit 1
+      ;;
+  esac
+  for _ in $(seq 1 "$attempts"); do
+    if [ -s "$out" ] && [ -f "$registry" ]; then
+      break
+    fi
+    if ! kill -0 "$hold_pid" 2>/dev/null; then
+      echo "session owner exited before becoming ready" >&2
+      cat "$err" >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+  if [ ! -s "$out" ] || [ ! -f "$registry" ]; then
+    echo "expected ensure --hold to publish its response and registry" >&2
+    cat "$err" >&2
+    exit 1
+  fi
+  assert_json_field_equals "ensure --hold response" "$(cat "$out")" ok true "$err"
+}
+
+registry="$tmp1/.beam/beam-daemon.json"
+start_owner "$tmp1" "owner-1"
+owner1_pid="$hold_pid"
+daemon1_pid="$(read_json_field "$registry" pid)"
+daemon1_id="$(read_json_field "$registry" daemonId)"
+recorded_owner_pid="$(read_json_field "$registry" ownerPid)"
+owner_domain="$(read_json_field "$registry" ownerPidDomain)"
+case "$recorded_owner_pid" in
   ''|*[!0-9]*|0)
-    echo "BEAM_TEST_HOLD_READY_ATTEMPTS must be a positive integer" >&2
+    echo "expected registry to record a positive session-owner PID" >&2
+    cat "$registry" >&2
     exit 1
     ;;
 esac
-for _ in $(seq 1 "$hold_ready_attempts"); do
-  if [ -s "$tmp9/hold.out" ] && [ -f "$hold_registry" ]; then
-    break
-  fi
-  sleep 0.1
-done
-if [ ! -s "$tmp9/hold.out" ] || [ ! -f "$hold_registry" ]; then
-  echo "expected ensure --hold to print an ensure response and create a registry after $hold_ready_attempts readiness probes" >&2
-  cat "$tmp9/hold.err" >&2
+if [ -z "$owner_domain" ]; then
+  echo "expected registry to record the session owner's PID domain" >&2
+  cat "$registry" >&2
   exit 1
 fi
-if ! kill -0 "$hold_pid" 2>/dev/null; then
-  echo "expected ensure --hold wrapper process to remain alive" >&2
-  cat "$tmp9/hold.err" >&2
-  exit 1
-fi
-hold_json="$(cat "$tmp9/hold.out")"
-assert_json_field_equals "ensure --hold response" "$hold_json" ok true "$tmp9/hold.err"
-
-lease_dir="$tmp9/.beam/wrapper-leases"
-retirement_path="$tmp9/.beam/daemon-retirement.json"
-
-# A retirement marker is local control state, but its lease field must still be constrained to the
-# wrapper-leases directory before cleanup code joins or removes that path.
-outside_lease="$tmp9/.beam/outside.lease"
-printf 'preserve\n' > "$outside_lease"
-retirement_daemon_id="$(read_json_field "$hold_registry" daemonId)"
-RETIREMENT_PATH="$retirement_path" DAEMON_ID="$retirement_daemon_id" python3 - <<'PY'
-import json, os
-
-with open(os.environ["RETIREMENT_PATH"], "w") as f:
-    json.dump({"daemonId": os.environ["DAEMON_ID"], "ownerLeaseFile": "../outside.lease"}, f)
-    f.write("\n")
-PY
-"$beam_script" --root "$tmp9" ensure lean > /dev/null
-if [ ! -f "$outside_lease" ]; then
-  echo "expected an invalid retirement owner path not to remove a file outside wrapper-leases" >&2
-  exit 1
-fi
-if [ -e "$retirement_path" ]; then
-  echo "expected an invalid retirement owner path to be discarded" >&2
-  cat "$retirement_path" >&2
-  exit 1
-fi
-rm -f "$outside_lease"
-
-# A reused-daemon request must stop if its heartbeat writer fails; otherwise the owner can prune its
-# expired lease while the request is still using the daemon. Block only the follower's atomic tmp
-# path so the starter heartbeat remains healthy.
-owner_lease="$(find "$lease_dir" -maxdepth 1 -type f -name '*.lease' -print | sed -n '1p')"
-if [ -z "$owner_lease" ]; then
-  echo "expected the foreground owner to hold a wrapper lease" >&2
-  exit 1
-fi
-"$beam_script" --root "$tmp9" ensure --hold \
-  > "$tmp9/heartbeat-follower.out" 2> "$tmp9/heartbeat-follower.err" &
-heartbeat_follower_pid="$!"
-heartbeat_follower_lease=""
-for _ in $(seq 1 100); do
-  heartbeat_follower_lease="$(find "$lease_dir" -maxdepth 1 -type f -name '*.lease' \
-    ! -path "$owner_lease" -print | sed -n '1p')"
-  if [ -s "$tmp9/heartbeat-follower.out" ] && [ -n "$heartbeat_follower_lease" ]; then
-    break
-  fi
-  sleep 0.05
-done
-if [ ! -s "$tmp9/heartbeat-follower.out" ] || [ -z "$heartbeat_follower_lease" ]; then
-  echo "expected the heartbeat-failure follower to acquire a lease and print ensure output" >&2
-  cat "$tmp9/heartbeat-follower.err" >&2
-  exit 1
-fi
-heartbeat_tmp="${heartbeat_follower_lease%.lease}.tmp"
-for _ in $(seq 1 100); do
-  if mkdir "$heartbeat_tmp" 2>/dev/null; then
-    break
-  fi
-  sleep 0.01
-done
-if [ ! -d "$heartbeat_tmp" ]; then
-  echo "could not block the follower heartbeat tmp path" >&2
-  exit 1
-fi
-if ! wait_for_exit "$heartbeat_follower_pid" "wrapper with failed heartbeat writer" 100 0.05; then
-  cat "$tmp9/heartbeat-follower.err" >&2
-  exit 1
-fi
-set +e
-wait "$heartbeat_follower_pid"
-heartbeat_follower_status="$?"
-set -e
-heartbeat_follower_pid=""
-rmdir "$heartbeat_tmp"
-if [ "$heartbeat_follower_status" -eq 0 ]; then
-  echo "expected a reused-daemon wrapper with a failed heartbeat writer to fail" >&2
-  cat "$tmp9/heartbeat-follower.err" >&2
+if ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; then
+  echo "expected both the wrapper owner and daemon to remain alive" >&2
   exit 1
 fi
 
-# Neither an unreadable registry nor an unreadable sibling lease may make the starter leave its
-# retirement loop. Restore each observation independently and require the owner to remain alive
-# until the lease directory is provably drained.
-unreadable_lease="$lease_dir/unreadable-sibling.lease"
-mkdir "$unreadable_lease"
-mv "$hold_registry" "$hold_registry.saved"
-mkdir "$hold_registry"
-kill -INT "$hold_pid"
-sleep 0.5
-if ! kill -0 "$hold_pid" 2>/dev/null; then
-  echo "expected an owner to stay alive while registry state is unreadable" >&2
-  cat "$tmp9/hold.err" >&2
+ensure_json="$("$beam_script" --root "$tmp1" ensure)"
+assert_json_field_equals "owned ensure response" "$ensure_json" ok true
+stats_json="$("$beam_script" --root "$tmp1" stats)"
+assert_json_field_equals "owned stats response" "$stats_json" ok true
+
+second_owner_out="$tmp1/second-owner.out"
+second_owner_err="$tmp1/second-owner.err"
+if "$beam_script" --root "$tmp1" ensure --hold > "$second_owner_out" 2> "$second_owner_err"; then
+  echo "expected a second foreground owner to be rejected" >&2
+  cat "$second_owner_out" >&2
   exit 1
 fi
-rmdir "$hold_registry"
-mv "$hold_registry.saved" "$hold_registry"
-sleep 0.5
-if ! kill -0 "$hold_pid" 2>/dev/null; then
-  echo "expected an owner to stay alive while a sibling lease is unreadable" >&2
-  cat "$tmp9/hold.err" >&2
+if ! grep -Fq "already owned" "$second_owner_err"; then
+  echo "expected duplicate-owner failure to identify the active owner" >&2
+  cat "$second_owner_err" >&2
   exit 1
 fi
-rmdir "$unreadable_lease"
-if ! wait_for_exit "$hold_pid" "owner after registry and lease recovery" 100 0.05; then
-  cat "$tmp9/hold.err" >&2
+
+port1="$(read_json_field "$registry" port)"
+collision_out="$tmp2/collision.out"
+collision_err="$tmp2/collision.err"
+if "$beam_script" --root "$tmp2" --port "$port1" ensure --hold > "$collision_out" 2> "$collision_err"; then
+  echo "expected an owner not to claim another project's endpoint" >&2
+  cat "$collision_out" >&2
+  exit 1
+fi
+if ! grep -Fq "already serves Beam root" "$collision_err"; then
+  echo "expected endpoint collision to identify the served project root" >&2
+  cat "$collision_err" >&2
+  exit 1
+fi
+if [ -e "$tmp2/.beam/beam-daemon.json" ]; then
+  echo "expected endpoint collision not to publish a registry" >&2
+  cat "$tmp2/.beam/beam-daemon.json" >&2
+  exit 1
+fi
+
+shutdown_json="$("$beam_script" --root "$tmp1" shutdown)"
+assert_json_field_equals "explicit session shutdown" "$shutdown_json" ok true
+if ! wait_for_exit "$hold_pid" "owner after explicit shutdown" 200 0.05; then
+  cat "$tmp1/owner-1.err" >&2
   exit 1
 fi
 set +e
 wait "$hold_pid"
-hold_status="$?"
+owner_status="$?"
 set -e
 hold_pid=""
-if [ "$hold_status" -ne 0 ]; then
-  echo "expected the owner to exit cleanly after registry and lease recovery, got $hold_status" >&2
-  cat "$tmp9/hold.err" >&2
+if [ "$owner_status" -ne 0 ]; then
+  echo "expected owner to exit cleanly after explicit shutdown, got $owner_status" >&2
+  cat "$tmp1/owner-1.err" >&2
   exit 1
 fi
-"$beam_script" --root "$tmp9" shutdown > /dev/null
+if ! wait_for_exit "$daemon1_pid" "daemon after explicit session shutdown" 200 0.05; then
+  exit 1
+fi
+if [ -e "$registry" ]; then
+  echo "expected owner shutdown to remove its registry" >&2
+  cat "$registry" >&2
+  exit 1
+fi
 
-stale_lease_dir="$tmp9/.beam/wrapper-leases"
-stale_lease="$stale_lease_dir/stale-dead-wrapper.lease"
-mkdir -p "$stale_lease_dir"
-case "$(uname -s)" in
-  Linux) pid_domain="$(readlink /proc/self/ns/pid 2>/dev/null || true)" ;;
-  Darwin) pid_domain="host:Darwin" ;;
-  *) pid_domain="" ;;
-esac
-LEASE_PATH="$stale_lease" PID_DOMAIN="$pid_domain" python3 - <<'PY'
-import json, os, time
+start_owner "$tmp1" "owner-2"
+daemon2_pid="$(read_json_field "$registry" pid)"
+daemon2_id="$(read_json_field "$registry" daemonId)"
+if [ "$daemon2_id" = "$daemon1_id" ]; then
+  echo "expected a new owner to publish a new daemon generation" >&2
+  exit 1
+fi
 
-metadata = {
-    "pid": 999999999,
-    "pidDomain": os.environ["PID_DOMAIN"] or None,
-    "heartbeatMonoNanos": time.monotonic_ns(),
-}
-with open(os.environ["LEASE_PATH"], "w") as f:
-    json.dump(metadata, f)
-    f.write("\n")
-PY
-
-"$beam_script" --root "$tmp9" ensure lean > /dev/null
-if [ -e "$stale_lease" ]; then
-  echo "expected wrapper ensure to remove a stale same-domain wrapper lease" >&2
-  cat "$stale_lease" >&2
-  exit 1
-fi
-"$beam_script" --root "$tmp9" shutdown > /dev/null
-
-malformed_lease="$stale_lease_dir/malformed-wrapper.lease"
-printf '{\n' > "$malformed_lease"
-"$beam_script" --root "$tmp9" ensure lean > /dev/null
-if [ -e "$malformed_lease" ]; then
-  echo "expected wrapper ensure to prune a malformed wrapper lease" >&2
-  cat "$malformed_lease" >&2
-  exit 1
-fi
-"$beam_script" --root "$tmp9" shutdown > /dev/null
-
-rm -f "$retirement_path"
-mkdir "$retirement_path"
-set +e
-"$beam_script" --root "$tmp9" ensure lean > "$tmp9/retirement-read.out" 2> "$tmp9/retirement-read.err"
-retirement_read_status="$?"
-set -e
-if [ "$retirement_read_status" -eq 0 ]; then
-  echo "expected an unreadable retirement fence to fail closed" >&2
-  cat "$tmp9/retirement-read.out" >&2
-  cat "$tmp9/retirement-read.err" >&2
-  exit 1
-fi
-if [ ! -d "$retirement_path" ]; then
-  echo "expected an unreadable retirement fence to remain in place" >&2
-  exit 1
-fi
-rmdir "$retirement_path"
-"$beam_script" --root "$tmp9" ensure lean > /dev/null
-"$beam_script" --root "$tmp9" shutdown > /dev/null
-
-# If the daemon started by a foreground owner dies before retirement, that wrapper must not poll
-# forever waiting for stats from a process that is provably gone. A later wrapper should replace
-# the dead registry generation normally.
-rm -f "$tmp9/dead-daemon-hold.out" "$tmp9/dead-daemon-hold.err"
-"$beam_script" --root "$tmp9" ensure --hold \
-  > "$tmp9/dead-daemon-hold.out" 2> "$tmp9/dead-daemon-hold.err" &
-hold_pid="$!"
-for _ in $(seq 1 200); do
-  if [ -s "$tmp9/dead-daemon-hold.out" ] && [ -f "$hold_registry" ]; then
-    break
-  fi
-  sleep 0.05
-done
-if [ ! -s "$tmp9/dead-daemon-hold.out" ] || [ ! -f "$hold_registry" ]; then
-  echo "expected the crash-retirement owner to start a daemon" >&2
-  cat "$tmp9/dead-daemon-hold.err" >&2
-  exit 1
-fi
-dead_daemon_pid="$(read_json_field "$hold_registry" pid)"
-dead_daemon_id="$(read_json_field "$hold_registry" daemonId)"
-kill -KILL "$dead_daemon_pid"
-dead_daemon_stopped="false"
-for _ in $(seq 1 100); do
-  if ! kill -0 "$dead_daemon_pid" 2>/dev/null; then
-    dead_daemon_stopped="true"
-    break
-  fi
-  if ps -o stat= -p "$dead_daemon_pid" 2>/dev/null | grep -Eq '^[[:space:]]*Z'; then
-    dead_daemon_stopped="true"
-    break
-  fi
-  sleep 0.05
-done
-if [ "$dead_daemon_stopped" != "true" ]; then
-  echo "expected daemon $dead_daemon_pid to stop before owner retirement" >&2
-  exit 1
-fi
-kill -INT "$hold_pid"
-if ! wait_for_exit "$hold_pid" "owner of a provably dead daemon" 100 0.05; then
-  cat "$tmp9/dead-daemon-hold.err" >&2
+kill -KILL "$daemon2_pid"
+if ! wait_for_exit "$hold_pid" "owner after unexpected daemon crash" 200 0.05; then
+  cat "$tmp1/owner-2.err" >&2
   exit 1
 fi
 set +e
 wait "$hold_pid"
-dead_daemon_owner_status="$?"
+crashed_owner_status="$?"
 set -e
 hold_pid=""
-if [ "$dead_daemon_owner_status" -ne 0 ]; then
-  echo "expected the owner of a provably dead daemon to exit cleanly, got $dead_daemon_owner_status" >&2
-  cat "$tmp9/dead-daemon-hold.err" >&2
+if [ "$crashed_owner_status" -eq 0 ]; then
+  echo "expected the owner to report an unexpected daemon crash" >&2
   exit 1
 fi
-"$beam_script" --root "$tmp9" ensure lean > /dev/null
-replacement_daemon_id="$(read_json_field "$hold_registry" daemonId)"
-if [ "$replacement_daemon_id" = "$dead_daemon_id" ]; then
-  echo "expected the next wrapper to replace the dead daemon generation" >&2
-  cat "$hold_registry" >&2
+if ! grep -Fq "owned Beam daemon exited with status" "$tmp1/owner-2.err"; then
+  echo "expected the owner crash report to include the daemon exit status" >&2
+  cat "$tmp1/owner-2.err" >&2
   exit 1
 fi
-"$beam_script" --root "$tmp9" shutdown > /dev/null
-
-(
-  cd "$tmp1"
-  "$beam_script" ensure lean > /dev/null
-)
-
-reg1="$tmp1/.beam/beam-daemon.json"
-expect_file "$reg1"
-
-pid1="$(read_json_field "$reg1" pid)"
-port1="$(read_json_field "$reg1" port)"
-root1="$(read_json_field "$reg1" root)"
-if [ "$root1" != "$(beam_test_realpath "$tmp1")" ]; then
-  echo "wrapper registry root mismatch: expected $tmp1, got $root1" >&2
-  exit 1
-fi
-if ! kill -0 "$pid1" 2>/dev/null; then
-  echo "expected Beam daemon pid $pid1 to be alive" >&2
+if [ -e "$registry" ]; then
+  echo "expected a crashed daemon's owner to remove its exact registry generation" >&2
+  cat "$registry" >&2
   exit 1
 fi
 
-(
-  cd "$tmp3"
-  collision_out="$(mktemp /tmp/beam-wrapper-port-collision-out-XXXXXX)"
-  collision_err="$(mktemp /tmp/beam-wrapper-port-collision-err-XXXXXX)"
-  if "$beam_script" --port "$port1" ensure lean >"$collision_out" 2>"$collision_err"; then
-    echo "expected wrapper ensure to reject a port already serving another Beam root" >&2
-    cat "$collision_out" >&2
-    cat "$collision_err" >&2
-    rm -f "$collision_out" "$collision_err"
-    exit 1
-  fi
-  if ! grep -q 'already serves Beam root' "$collision_err"; then
-    echo "expected port collision failure to name the existing Beam root" >&2
-    cat "$collision_out" >&2
-    cat "$collision_err" >&2
-    rm -f "$collision_out" "$collision_err"
-    exit 1
-  fi
-  if [ -f "$tmp3/.beam/beam-daemon.json" ]; then
-    echo "expected port collision failure not to write a registry for the wrong endpoint" >&2
-    cat "$tmp3/.beam/beam-daemon.json" >&2
-    rm -f "$collision_out" "$collision_err"
-    exit 1
-  fi
-  rm -f "$collision_out" "$collision_err"
-)
-
-stale_registry="$tmp3/.beam/beam-daemon.json"
-REGISTRY_TEMPLATE="$reg1" STALE_REGISTRY="$stale_registry" STALE_ROOT="$tmp3" python3 - <<'PY'
-import json
-import os
-
-with open(os.environ["REGISTRY_TEMPLATE"]) as f:
-    data = json.load(f)
-data["root"] = os.path.realpath(os.environ["STALE_ROOT"])
-data["configHash"] = "stale-registry-test"
-with open(os.environ["STALE_REGISTRY"], "w") as f:
-    json.dump(data, f)
-    f.write("\n")
-PY
-
-(
-  cd "$tmp3"
-  doctor_out="$("$beam_script" doctor lean)"
-  if ! printf '%s\n' "$doctor_out" | grep -q 'daemon status: stale'; then
-    echo "expected wrapper doctor to reject a stale registry whose endpoint serves another root" >&2
-    printf '%s\n' "$doctor_out" >&2
-    exit 1
-  fi
-  "$beam_script" shutdown > /dev/null
-  if [ -f "$stale_registry" ]; then
-    echo "expected wrapper shutdown to remove the stale registry" >&2
-    cat "$stale_registry" >&2
-    exit 1
-  fi
-)
-if ! kill -0 "$pid1" 2>/dev/null; then
-  echo "expected stale registry shutdown not to kill the real Beam daemon for tmp1" >&2
+start_owner "$tmp1" "owner-3"
+daemon3_pid="$(read_json_field "$registry" pid)"
+kill -KILL "$hold_pid"
+set +e
+wait "$hold_pid"
+set -e
+hold_pid=""
+if ! wait_for_exit "$daemon3_pid" "daemon after owner death" 200 0.05; then
+  echo "expected owner-pipe EOF to stop the daemon" >&2
+  exit 1
+fi
+owner_loss_out="$tmp1/owner-loss.out"
+owner_loss_err="$tmp1/owner-loss.err"
+if "$beam_script" --root "$tmp1" ensure > "$owner_loss_out" 2> "$owner_loss_err"; then
+  echo "expected a command after owner loss to require a replacement owner" >&2
+  cat "$owner_loss_out" >&2
+  exit 1
+fi
+if ! grep -Fq "lean-beam ensure --hold" "$owner_loss_err"; then
+  echo "expected owner-loss recovery to name ensure --hold" >&2
+  cat "$owner_loss_err" >&2
+  exit 1
+fi
+if [ -e "$registry" ]; then
+  echo "expected owner-loss recovery to remove the stale registry" >&2
+  cat "$registry" >&2
   exit 1
 fi
 
-busy_port_file="$(mktemp /tmp/beam-wrapper-busy-port-XXXXXX)"
-python3 - "$busy_port_file" <<'PY' &
-import http.server
-import socketserver
-import sys
-
-class Handler(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, format, *args):
-        pass
-
-with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
-    with open(sys.argv[1], "w") as f:
-        print(server.server_address[1], file=f, flush=True)
-    server.serve_forever()
-PY
-busy_pid=$!
-for _ in $(seq 1 100); do
-  if [ -s "$busy_port_file" ]; then
-    break
-  fi
-  if ! kill -0 "$busy_pid" 2>/dev/null; then
-    echo "expected temporary busy-port server to stay alive" >&2
-    exit 1
-  fi
-  sleep 0.05
-done
-if [ ! -s "$busy_port_file" ]; then
-  echo "timed out waiting for temporary busy-port server" >&2
-  exit 1
-fi
-busy_port="$(cat "$busy_port_file")"
-
-(
-  cd "$tmp3"
-  busy_out="$(mktemp /tmp/beam-wrapper-busy-port-out-XXXXXX)"
-  busy_err="$(mktemp /tmp/beam-wrapper-busy-port-err-XXXXXX)"
-  if "$beam_script" --port "$busy_port" ensure lean >"$busy_out" 2>"$busy_err"; then
-    echo "expected wrapper ensure to reject a port already used by a non-Beam process" >&2
-    cat "$busy_out" >&2
-    cat "$busy_err" >&2
-    rm -f "$busy_out" "$busy_err"
-    exit 1
-  fi
-  if ! grep -q 'already in use' "$busy_err"; then
-    echo "expected non-Beam port collision failure to report the occupied endpoint" >&2
-    cat "$busy_out" >&2
-    cat "$busy_err" >&2
-    rm -f "$busy_out" "$busy_err"
-    exit 1
-  fi
-  if [ -f "$tmp3/.beam/beam-daemon.json" ]; then
-    echo "expected non-Beam port collision failure not to write a registry" >&2
-    cat "$tmp3/.beam/beam-daemon.json" >&2
-    rm -f "$busy_out" "$busy_err"
-    exit 1
-  fi
-  rm -f "$busy_out" "$busy_err"
-)
-kill "$busy_pid" > /dev/null 2>&1 || true
-wait "$busy_pid" 2>/dev/null || true
-busy_pid=""
-rm -f "$busy_port_file"
-
-# Git removes the project-local registry together with a worktree. The daemon must observe the
-# missing canonical root and stop itself, because no later wrapper invocation can discover it.
-removed_root_pid="$pid1"
+start_owner "$tmp1" "owner-4"
+daemon4_pid="$(read_json_field "$registry" pid)"
 remove_owned_tmp_tree "$tmp1"
-if ! wait_for_exit "$removed_root_pid" "daemon whose worktree was removed" 100 0.1; then
-  echo "expected Beam daemon $removed_root_pid to exit after its project root disappeared" >&2
+root_removed="true"
+if ! wait_for_exit "$daemon4_pid" "daemon whose project root disappeared" 200 0.05; then
+  echo "expected root disappearance to stop the owned daemon" >&2
   exit 1
 fi
-removed_root_pid=""
-
-removed_root_err="$(mktemp /tmp/beam-wrapper-removed-root-XXXXXX)"
-if "$beam_script" --root "$tmp1" ensure lean > /dev/null 2>"$removed_root_err"; then
-  echo "expected a wrapper request for the removed worktree to fail" >&2
+if ! wait_for_exit "$hold_pid" "owner whose project root disappeared" 200 0.05; then
+  echo "expected root disappearance to release the foreground owner" >&2
   exit 1
 fi
-if ! grep -Fq 'workspace root does not resolve' "$removed_root_err"; then
-  echo "expected a removed-worktree request to report that its workspace root no longer resolves" >&2
-  cat "$removed_root_err" >&2
+set +e
+wait "$hold_pid"
+root_owner_status="$?"
+set -e
+hold_pid=""
+if [ "$root_owner_status" -ne 0 ]; then
+  echo "expected root-disappearance owner to exit cleanly, got $root_owner_status" >&2
   exit 1
 fi
-rm -f "$removed_root_err"
-removed_root_err=""

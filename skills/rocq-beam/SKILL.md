@@ -52,7 +52,8 @@ mutation.
 
 Supported command families:
 
-- bootstrap the Rocq backend: `lean-beam ensure rocq`
+- start and own a Rocq wrapper session: `lean-beam ensure rocq --hold`
+- check and warm an already-owned Rocq session: `lean-beam ensure rocq`
 - inspect goals after an existing sentence: `lean-beam rocq-goals-after`
 - inspect goals before a sentence or after speculative sentence text within that basis:
   `lean-beam rocq-goals-prev`
@@ -67,6 +68,8 @@ What to treat as the current agent workflow surface:
 Core workflow contract:
 
 - use `lean-beam`, not raw JSON and not raw LSP
+- before issuing wrapper probes, start one foreground `lean-beam ensure rocq --hold` process and
+  keep it running; interrupt it or run `lean-beam shutdown` when finished
 - save the `.v` file before every new probe after a real edit
 - `lean-beam` only sees the on-disk file, not unsaved editor buffers
 - treat `<line> <character>` as LSP-style coordinates for the saved file: line `0` is the first
@@ -85,9 +88,12 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 - infers the target project root from the current directory or `--root`
 - keeps one Beam daemon per project root and records it in `<root>/.beam/beam-daemon.json`
   - in sandboxed or read-only project trees, set `BEAM_CONTROL_DIR` to a writable directory
-- owns Beam daemon startup, shutdown, and registry handling
+- gives daemon startup authority only to `lean-beam ensure rocq --hold`; ordinary commands attach
+  to its registry generation and never start a daemon implicitly
+- owns shutdown and registry handling
 - resolves `coq-lsp` from the target project's local `_opam` when available
-- starts a Rocq-capable Beam daemon with explicit startup args instead of relying on inherited editor state
+- the explicit owner starts a Rocq-capable Beam daemon with startup args instead of relying on
+  inherited editor state
 - wrapper commands talk to the per-project Beam daemon over localhost TCP; they are not direct in-process Rocq calls
 - in Codex-style sandboxes, Beam daemon startup may still require elevated permissions even when all paths resolve correctly
 - in the same environments, localhost TCP bind/connect for the Beam daemon and client may also require elevated permissions
@@ -106,10 +112,14 @@ Default rules:
 
 ## Workflow
 
-Ensure the Rocq backend:
+Start the Rocq wrapper-session owner in one terminal or long-lived agent process, then inspect it
+from another:
 
 ```bash
-lean-beam ensure rocq
+# terminal/session 1: keep running
+lean-beam ensure rocq --hold
+
+# terminal/session 2
 lean-beam stats
 ```
 
@@ -150,7 +160,7 @@ Execution model:
 Default loop:
 
 ```bash
-lean-beam ensure rocq
+# with `lean-beam ensure rocq --hold` running in another process
 lean-beam rocq-goals-after "Demo.v" 12 4
 
 # make a real edit, save the file
@@ -162,14 +172,14 @@ Use cases:
 1. Inspect the current proof state after a sentence
 
 ```bash
-lean-beam ensure rocq
+# with `lean-beam ensure rocq --hold` running in another process
 lean-beam rocq-goals-after "Demo.v" 12 4
 ```
 
 2. Inspect an intermediate tactic state inside one sentence
 
 ```bash
-lean-beam ensure rocq
+# with `lean-beam ensure rocq --hold` running in another process
 lean-beam rocq-goals-prev "Demo.v" 12 4 "intro x."
 lean-beam rocq-goals-prev "Demo.v" 12 4 "split."
 ```
@@ -179,7 +189,7 @@ lean-beam rocq-goals-prev "Demo.v" 12 4 "split."
 Save the file first, then probe again from the saved document.
 
 ```bash
-lean-beam ensure rocq
+# with `lean-beam ensure rocq --hold` running in another process
 lean-beam rocq-goals-after "Demo.v" 12 4
 
 # make a real edit in Demo.v and save it

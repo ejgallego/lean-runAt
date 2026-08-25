@@ -115,7 +115,7 @@ private def jsonNonNullField (json : Json) (field : String) : Bool :=
 
 def daemonDebugWarnings (debug : Json) : Array String := Id.run do
   let mut warnings := #[]
-  let recoveryHint := "Run `lean-beam shutdown`, then `lean-beam ensure` from the project root to refresh daemon registry state."
+  let recoveryHint := "Run `lean-beam shutdown`, then start `lean-beam ensure --hold` from the project root to refresh the owned session."
   if jsonNonNullField debug "registry" then
     match jsonStringField? debug "registryPidStatus" with
     | some "not alive" =>

@@ -14,17 +14,33 @@ cd "$(dirname "$0")/.."
 . tests/lib/ci-steps.sh
 # shellcheck source=tests/lib/install-fixtures.sh
 . tests/lib/install-fixtures.sh
+# shellcheck source=tests/lib/wait.sh
+. tests/lib/wait.sh
 
 BEAM_TEST_SUITE="${BEAM_TEST_SUITE:-install}"
 BEAM_INSTALL_TEST_PRESEED_ELAN="${BEAM_INSTALL_TEST_PRESEED_ELAN:-auto}"
 
 tmp_root="$(mktemp -d /tmp/beam-install-XXXXXX)"
+declare -a installed_owner_pids=()
+declare -a installed_owner_roots=()
 host_elan_home="${ELAN_HOME:-}"
 if [ -z "$host_elan_home" ] && [ -d "$HOME/.elan" ]; then
   host_elan_home="$HOME/.elan"
 fi
 
 cleanup() {
+  local owner_pid owner_root
+  if [ -x "${installed_lean_beam:-}" ]; then
+    for owner_root in ${installed_owner_roots[@]+"${installed_owner_roots[@]}"}; do
+      "$installed_lean_beam" --root "$owner_root" shutdown > /dev/null 2>&1 || true
+    done
+  fi
+  for owner_pid in ${installed_owner_pids[@]+"${installed_owner_pids[@]}"}; do
+    if kill -0 "$owner_pid" 2>/dev/null; then
+      kill -INT "$owner_pid" 2>/dev/null || true
+    fi
+    wait "$owner_pid" 2>/dev/null || true
+  done
   expect_owned_tmp_dir "$tmp_root"
   rm -rf -- "$tmp_root"
 }
@@ -714,6 +730,24 @@ installed_helper="$HOME/.local/bin/lean-beam-search"
 installed_mcp="$HOME/.local/bin/lean-beam-mcp"
 installed_runtime_root="$BEAM_INSTALL_ROOT/current"
 
+start_installed_owner() {
+  local root="$1"
+  local label="$2"
+  local owner_out="$tmp_root/$label-owner.out"
+  local owner_err="$tmp_root/$label-owner.err"
+  local owner_pid
+  "$installed_lean_beam" --root "$root" ensure --hold > "$owner_out" 2> "$owner_err" &
+  owner_pid="$!"
+  installed_owner_pids+=("$owner_pid")
+  installed_owner_roots+=("$root")
+  if ! wait_for_file_text "$owner_err" "owning Beam session" "$label session owner" 600 0.1; then
+    echo "expected installed wrapper owner to become ready for $root" >&2
+    cat "$owner_out" >&2
+    cat "$owner_err" >&2
+    return 1
+  fi
+}
+
 if [ ! -L "$installed_lean_beam" ]; then
   echo "expected installed lean-beam symlink at $installed_lean_beam" >&2
   exit 1
@@ -943,8 +977,16 @@ run_custom_toolchain_install_test() (
   assert_doctor_contains "custom toolchain" "$custom_doctor_out" 'project toolchain accepted: true'
   assert_doctor_contains "custom toolchain" "$custom_doctor_out" 'bundle source: installed'
   assert_doctor_contains "custom toolchain" "$custom_doctor_out" 'bundle toolchain fingerprint: '
-  ELAN_HOME="$custom_elan_home" "$custom_installed_lean_beam" --root "$custom_project_root" ensure > /dev/null
+  custom_owner_err="$custom_project_root/custom-owner.err"
+  ELAN_HOME="$custom_elan_home" "$custom_installed_lean_beam" --root "$custom_project_root" ensure --hold \
+    > /dev/null 2>"$custom_owner_err" &
+  custom_owner_pid="$!"
+  if ! wait_for_file_text "$custom_owner_err" "owning Beam session" "custom-toolchain session owner" 600 0.1; then
+    exit 1
+  fi
   ELAN_HOME="$custom_elan_home" "$custom_installed_lean_beam" --root "$custom_project_root" shutdown > /dev/null
+  wait_for_exit "$custom_owner_pid" "custom-toolchain session owner" 120 0.1
+  wait "$custom_owner_pid"
 )
 
 run_step "install custom toolchain runtime" run_custom_toolchain_install_test
@@ -1589,6 +1631,8 @@ remove_tmp_file "$unsupported_err"
   printf 'def bVal : Nat := "broken"\n' > SaveSmoke/B.lean
 )
 
+start_installed_owner "$project_root" "installed-stale"
+
 stale_sync_err="$(mktemp "$tmp_root/install-stale-sync-XXXXXX")"
 if "$installed_lean_beam" --root "$project_root" sync SaveSmoke/A.lean >"$stale_sync_err" 2>&1; then
   echo "expected installed wrapper sync to fail on a stale imported target" >&2
@@ -1619,6 +1663,8 @@ import SaveSmoke.B
 
 #check bVal
 EOF
+
+start_installed_owner "$project_root_standalone" "installed-standalone"
 
 standalone_sync="$("$installed_lean_beam" --root "$project_root_standalone" sync StandaloneSaveSmoke.lean)"
 if ! printf '%s\n' "$standalone_sync" | python3 -c 'import json,sys; payload=json.load(sys.stdin); sys.exit(0 if payload.get("error") is None else 1)'; then

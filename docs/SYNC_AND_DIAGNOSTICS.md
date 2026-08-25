@@ -128,10 +128,11 @@ by exactly one terminal `response`; the response is last and no later message be
 request.
 
 When `beam-client` targets the per-project daemon managed by `lean-beam` in a PID-reaping command
-runner, keep one `lean-beam ensure --hold` process active for the request lifetime. Raw broker
-requests do not carry wrapper leases, so the wrapper retirement fence does not own their admission.
-A separately launched standalone daemon has its own explicit process owner and does not need the
-wrapper hold.
+runner, keep the session's `lean-beam ensure --hold` owner active for the request lifetime. The same
+rule applies to wrapper commands: only the holder starts the daemon, while every other command
+attaches to its endpoint. Raw broker requests participate in the daemon's typed request admission
+and cancellation, but do not own the daemon process. A separately launched standalone daemon has
+its own explicit process owner and does not use the wrapper holder.
 
 Every stream variant uses the same `kind`, `payload`, and optional correlation envelope. When the
 request supplies `clientRequestId`, each message repeats it on that outer stream envelope:

@@ -63,14 +63,6 @@ private structure WrapperBrokerRequest where
   request : Request
   visibleClientRequestId? : Option String
 
-private def attachProjectDaemonLease
-    (client : ProjectDaemonClient)
-    (req : Request) : Request :=
-  if req.op.acceptsWrapperLease then
-    { req with wrapperLease? := some client.wrapperLease }
-  else
-    req
-
 private def mkWrapperClientRequestId (req : Request) : IO String := do
   let pid ← IO.Process.getPID
   let stamp ← IO.monoNanosNow
@@ -92,9 +84,8 @@ private def withWrapperClientRequestId (req : Request) : IO WrapperBrokerRequest
       }
 
 private def prepareWrapperBrokerRequest
-    (client : ProjectDaemonClient)
     (req : Request) : IO WrapperBrokerRequest :=
-  withWrapperClientRequestId <| attachProjectDaemonLease client (inProjectDaemonWorkspace req)
+  withWrapperClientRequestId <| inProjectDaemonWorkspace req
 
 private def mkInterruptWatcher? (clientRequestId? : Option String) : IO (Option InterruptWatcher) := do
   match clientRequestId? with
@@ -201,14 +192,14 @@ private def requestBrokerResponse
     (client : ProjectDaemonClient)
     (req : Request) : IO WrapperBrokerResponse :=
   withBrokerErrorContext root do
-    let wrapperReq ← prepareWrapperBrokerRequest client req
+    let wrapperReq ← prepareWrapperBrokerRequest req
     let req := wrapperReq.request
     let response ← awaitBrokerResponseWithInterrupts client.endpoint req
       wrapperReq.visibleClientRequestId? none <|
       sendRequest client.endpoint req
     pure { response, visibleClientRequestId? := wrapperReq.visibleClientRequestId? }
 
-/-- Send one lease-fenced wrapper request without printing or interpreting its response. -/
+/-- Send one wrapper request without printing or interpreting its response. -/
 def requestBroker
     (root : System.FilePath)
     (client : ProjectDaemonClient)
@@ -431,7 +422,7 @@ def callBrokerWithProgress
     (req : Request)
     (spec : BrokerWaitSpec) : IO Unit :=
   withBrokerErrorContext root do
-    let wrapperReq ← prepareWrapperBrokerRequest client req
+    let wrapperReq ← prepareWrapperBrokerRequest req
     let req := wrapperReq.request
     let visibleClientRequestId? := wrapperReq.visibleClientRequestId?
     let showProgress ← progressEnabled

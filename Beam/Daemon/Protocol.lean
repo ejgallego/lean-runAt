@@ -19,6 +19,8 @@ structure RegistryEntry where
   daemonId : String
   pid : Nat
   pidDomain? : Option String := none
+  ownerPid : Nat
+  ownerPidDomain? : Option String := none
   port? : Option Nat := none
   root : String
   configHash : String

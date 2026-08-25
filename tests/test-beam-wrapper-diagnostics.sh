@@ -19,6 +19,13 @@ warn_full_root="$(beam_wrapper_prepare_project_root diagnostics-warn-full)"
 stale_root="$(beam_wrapper_prepare_project_root diagnostics-stale)"
 renamed_stale_root="$(beam_wrapper_prepare_project_root diagnostics-renamed-stale)"
 
+beam_wrapper_start_owner "$broken_root"
+beam_wrapper_start_owner "$guard_msgs_io_stderr_root"
+beam_wrapper_start_owner "$warn_root"
+beam_wrapper_start_owner "$warn_full_root"
+beam_wrapper_start_owner "$stale_root"
+beam_wrapper_start_owner "$renamed_stale_root"
+
 fail_json() {
   local message="$1"
   local json_payload="$2"

@@ -14,6 +14,8 @@ beam_wrapper_init
 
 lifecycle_root="$(beam_wrapper_prepare_project_root sync-save)"
 standalone_root="$(beam_wrapper_prepare_project_root standalone-save)"
+beam_wrapper_start_owner "$lifecycle_root"
+beam_wrapper_start_owner "$standalone_root"
 
 (
   cd "$lifecycle_root"

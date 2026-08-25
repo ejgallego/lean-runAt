@@ -25,12 +25,6 @@ def registryPath (root : System.FilePath) : IO System.FilePath := do
 def daemonStartupLogPath (root : System.FilePath) : IO System.FilePath := do
   pure ((← controlDir root) / "beam-daemon-startup.log")
 
-def wrapperLeaseDir (root : System.FilePath) : IO System.FilePath := do
-  pure ((← controlDir root) / "wrapper-leases")
-
-def daemonRetirementPath (root : System.FilePath) : IO System.FilePath := do
-  pure ((← controlDir root) / "daemon-retirement.json")
-
 def daemonFailureIncidentDir (root : System.FilePath) : IO System.FilePath := do
   pure ((← controlDir root) / "daemon-failures")
 

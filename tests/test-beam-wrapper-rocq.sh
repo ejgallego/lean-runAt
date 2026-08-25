@@ -9,6 +9,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=tests/lib/tmp-guards.sh
 . tests/lib/tmp-guards.sh
+# shellcheck source=tests/lib/wait.sh
+. tests/lib/wait.sh
 
 beam_script="$PWD/scripts/lean-beam"
 rocq_cmd="${BEAM_ROCQ_CMD:-}"
@@ -69,10 +71,17 @@ rsync -a \
     echo "expected doctor rocq to remain read-only and not build Beam daemon helpers" >&2
     exit 1
   fi
+  rocq_owner_err="$tmp_repo/rocq-owner.err"
   if [ -n "$rocq_cmd" ]; then
-    BEAM_ROCQ_CMD="$rocq_cmd" "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" ensure rocq > /dev/null
+    BEAM_ROCQ_CMD="$rocq_cmd" "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" ensure rocq --hold \
+      > /dev/null 2>"$rocq_owner_err" &
   else
-    "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" ensure rocq > /dev/null
+    "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" ensure rocq --hold \
+      > /dev/null 2>"$rocq_owner_err" &
+  fi
+  rocq_owner_pid="$!"
+  if ! wait_for_file_text "$rocq_owner_err" "owning Beam session" "Rocq session owner" 600 0.1; then
+    exit 1
   fi
   if [ ! -x ".lake/build/bin/beam-daemon" ] || [ ! -x ".lake/build/bin/beam-client" ]; then
     echo "expected rocq CLI startup to build missing Beam daemon helpers on demand" >&2
@@ -83,4 +92,6 @@ rsync -a \
   else
     "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" shutdown > /dev/null
   fi
+  wait_for_exit "$rocq_owner_pid" "Rocq session owner" 120 0.1
+  wait "$rocq_owner_pid"
 )

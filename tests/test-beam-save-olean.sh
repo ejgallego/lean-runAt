@@ -35,6 +35,23 @@ beam() {
   LAKE_ARTIFACT_CACHE=false "$beam_script" "$@"
 }
 
+declare -a beam_owner_pids=()
+beam_owner_last_pid=""
+
+beam_start_owner() {
+  local root="$1"
+  local owner_out="$root/.beam-test-owner.out"
+  local owner_err="$root/.beam-test-owner.err"
+  beam --root "$root" ensure --hold >"$owner_out" 2>"$owner_err" &
+  beam_owner_last_pid="$!"
+  beam_owner_pids+=("$beam_owner_last_pid")
+  if ! wait_for_file_text "$owner_err" "owning Beam session" "save-replay session owner" 600 0.1; then
+    cat "$owner_out" >&2
+    cat "$owner_err" >&2
+    exit 1
+  fi
+}
+
 expect_owned_tmp_path() {
   case "$1" in
     /tmp/beam-save-olean-*|/tmp/tmp.*|/tmp/beam-validate-*/tmp/beam-save-olean-*|/tmp/beam-validate-*/tmp/tmp.*)
@@ -351,6 +368,16 @@ save_race_broker_trace="${BEAM_SAVE_RACE_BROKER_TRACE:-1}"
 save_race_watchdog_ms="${BEAM_SAVE_RACE_WAIT_DIAGNOSTICS_WATCHDOG_MS:-10000}"
 
 cleanup() {
+  local root owner_pid
+  for root in "$tmp2" "$tmp3" "$tmp4" "$tmp5" "$tmp6" "$tmp7" "$tmp8"; do
+    if [ -d "$root" ]; then
+      beam --root "$root" shutdown > /dev/null 2>&1 || true
+    fi
+  done
+  for owner_pid in ${beam_owner_pids[@]+"${beam_owner_pids[@]}"}; do
+    kill -INT "$owner_pid" > /dev/null 2>&1 || true
+    wait "$owner_pid" 2>/dev/null || true
+  done
   remove_owned_tmp_tree "$tmp1"
   remove_owned_tmp_tree "$tmp2"
   remove_owned_tmp_tree "$tmp3"
@@ -394,9 +421,9 @@ fi
 
 (cd "$tmp2" && lake_build > /dev/null)
 edit_b "$tmp2"
+beam_start_owner "$tmp2"
 (
   cd "$tmp2"
-  beam --root "$tmp2" shutdown > /dev/null 2>&1 || true
   save_json="$(beam --root "$tmp2" lean-close-save SaveSmoke/B.lean)"
   if [ "$(BEAM_JSON_PAYLOAD="$save_json" python3 - <<'PY'
 import json, os
@@ -504,9 +531,9 @@ fi
 
 (cd "$tmp8" && lake_build SaveSmoke/ModuleB.lean > /dev/null)
 edit_module_b "$tmp8"
+beam_start_owner "$tmp8"
 (
   cd "$tmp8"
-  beam --root "$tmp8" shutdown > /dev/null 2>&1 || true
   module_save_json="$(beam --root "$tmp8" lean-close-save SaveSmoke/ModuleB.lean)"
   for artifact_key in olean oleanServer oleanPrivate ir; do
     artifact="$(BEAM_JSON_PAYLOAD="$module_save_json" BEAM_ARTIFACT_KEY="$artifact_key" python3 - <<'PY'
@@ -539,9 +566,9 @@ fi
 (cd "$tmp7" && LAKE_ARTIFACT_CACHE=false "$lake_cmd" env lean CheckBatchOnly.lean > /dev/null)
 (cd "$tmp7" && LAKE_ARTIFACT_CACHE=false "$lake_cmd" env lean CheckStructured.lean > /dev/null)
 edit_structured_setup "$tmp7"
+beam_start_owner "$tmp7"
 (
   cd "$tmp7"
-  beam --root "$tmp7" shutdown > /dev/null 2>&1 || true
   structured_save="$(beam --root "$tmp7" lean-save StructuredSetup/UsesOption.lean)"
   if [ "$(BEAM_JSON_PAYLOAD="$structured_save" python3 - <<'PY'
 import json, os
@@ -596,10 +623,13 @@ PY
 )
 
 (cd "$tmp3" && lake_build > /dev/null)
+remove_owned_tmp_file "$race_sentinel"
+LEAN_BEAM_BROKER_TRACE="$save_race_broker_trace" \
+  LEAN_BEAM_BROKER_WAIT_DIAGNOSTICS_WATCHDOG_MS="$save_race_watchdog_ms" \
+  LEAN_BEAM_SAVE_RACE_SENTINEL="$race_sentinel" \
+  beam_start_owner "$tmp3"
 (
   cd "$tmp3"
-  beam --root "$tmp3" shutdown > /dev/null 2>&1 || true
-  remove_owned_tmp_file "$race_sentinel"
   LEAN_BEAM_BROKER_TRACE="$save_race_broker_trace" \
     LEAN_BEAM_BROKER_WAIT_DIAGNOSTICS_WATCHDOG_MS="$save_race_watchdog_ms" \
     LEAN_BEAM_SAVE_RACE_SENTINEL="$race_sentinel" \
@@ -637,16 +667,15 @@ fi
 
 (cd "$tmp4" && lake_build > /dev/null)
 edit_b_slow "$tmp4"
+remove_owned_tmp_file "$cancel_sentinel"
+LEAN_BEAM_BROKER_TRACE="$save_race_broker_trace" \
+  LEAN_BEAM_BROKER_WAIT_DIAGNOSTICS_WATCHDOG_MS="$save_race_watchdog_ms" \
+  LEAN_BEAM_SAVE_RACE_SENTINEL="$cancel_sentinel" \
+  beam_start_owner "$tmp4"
 (
   cd "$tmp4"
-  beam --root "$tmp4" shutdown > /dev/null 2>&1 || true
   close_out="$(mktemp /tmp/beam-close-save-cancel-out-XXXXXX)"
   close_err="$(mktemp /tmp/beam-close-save-cancel-err-XXXXXX)"
-  remove_owned_tmp_file "$cancel_sentinel"
-  LEAN_BEAM_BROKER_TRACE="$save_race_broker_trace" \
-    LEAN_BEAM_BROKER_WAIT_DIAGNOSTICS_WATCHDOG_MS="$save_race_watchdog_ms" \
-    LEAN_BEAM_SAVE_RACE_SENTINEL="$cancel_sentinel" \
-    beam --root "$tmp4" ensure lean > /dev/null
   LEAN_BEAM_SAVE_RACE_SENTINEL="$cancel_sentinel" BEAM_REQUEST_ID=cancel-close-save \
     beam --root "$tmp4" lean-close-save SaveSmoke/B.lean >"$close_out" 2>"$close_err" &
   close_pid=$!
@@ -682,14 +711,14 @@ edit_b_slow "$tmp4"
     exit 1
   fi
   beam --root "$tmp4" stats > /dev/null
+  beam --root "$tmp4" shutdown > /dev/null
   rm -f "$close_out" "$close_err"
 )
 
 (cd "$tmp6" && lake_build SaveSmoke/A.lean > /dev/null)
+beam_start_owner "$tmp6"
 (
   cd "$tmp6"
-  beam --root "$tmp6" shutdown > /dev/null 2>&1 || true
-  beam --root "$tmp6" ensure lean > /dev/null
   beam --root "$tmp6" lean-sync SaveSmoke/A.lean > /dev/null
   edit_b "$tmp6"
   save_out="$(mktemp /tmp/beam-stale-trace-save-out-XXXXXX)"
@@ -716,15 +745,15 @@ edit_b_slow "$tmp4"
     exit 1
   fi
   beam --root "$tmp6" stats > /dev/null
+  beam --root "$tmp6" shutdown > /dev/null
   rm -f "$save_out" "$save_err"
 )
 
 (cd "$tmp5" && lake_build SaveSmoke/A.lean > /dev/null)
 printf 'def bVal : Nat := "broken"\n' > "$tmp5/SaveSmoke/B.lean"
+beam_start_owner "$tmp5"
 (
   cd "$tmp5"
-  beam --root "$tmp5" shutdown > /dev/null 2>&1 || true
-  beam --root "$tmp5" ensure lean > /dev/null
   sync_out="$(mktemp /tmp/beam-stale-sync-out-XXXXXX)"
   sync_err="$(mktemp /tmp/beam-stale-sync-err-XXXXXX)"
   save_out="$(mktemp /tmp/beam-stale-save-out-XXXXXX)"
@@ -779,5 +808,6 @@ printf 'def bVal : Nat := "broken"\n' > "$tmp5/SaveSmoke/B.lean"
     exit 1
   fi
   beam --root "$tmp5" stats > /dev/null
+  beam --root "$tmp5" shutdown > /dev/null
   rm -f "$sync_out" "$sync_err" "$save_out" "$save_err"
 )

@@ -132,10 +132,10 @@ reuse matching speculative execution rather than replaying it from scratch. Beam
 apply the source edit.
 
 For programmatic local consumers, the preferred machine-readable surface is the JSON stream exposed
-by `beam-client request-stream`; wrapper stderr should be treated as human-facing. When that client
-targets a wrapper-managed daemon in a PID-reaping command runner, keep `lean-beam ensure --hold`
-active for the duration; the wrapper retirement fence does not close admission for unfenced raw
-broker clients. A separately launched standalone daemon has its own explicit process owner. Broker
+by `beam-client request-stream`; wrapper stderr should be treated as human-facing. A wrapper-managed
+daemon exists only while its foreground `lean-beam ensure --hold` owner is alive. Keep that owner
+active for wrapper and raw-client requests; those requests attach to the session but do not acquire
+daemon ownership. A separately launched standalone daemon has its own explicit process owner. Broker
 responses require an explicit top-level `ok` boolean, giving projection layers an unambiguous
 success/error discriminator. A successful response always includes `result`; response and stream
 envelopes reject undeclared fields, and typed save/close-save results reject incomplete or extended
@@ -181,16 +181,14 @@ Exact event ordering and examples live in
 
 - In sandboxed agent environments, Beam daemon startup itself may require elevated permissions even
   when the installed bundle and project-local `.beam` paths resolve correctly.
-- PID-isolated wrapper calls acquire heartbeat leases before observing a project daemon. A wrapper
-  that starts a daemon remains alive until overlapping calls drain, while a killed cross-namespace
-  wrapper lease normally becomes recoverable after about five seconds. Use `lean-beam ensure --hold`
-  when separate sandbox commands need one explicit foreground daemon owner. A wrapper reusing an
-  existing daemon fails or cancels its request if it cannot continue renewing that lease. Lease
-  expiry writes a persistent revocation fence: already-admitted broker work keeps the owner alive
-  until it drains, while a suspended wrapper resumed after revocation cannot re-admit work through
-  the old lease. Retirement stats probes are bounded; an owner releases a dead current generation
-  only when same-PID-domain liveness or zombie state proves that the exact registered daemon process
-  is gone.
+- Wrapper sessions use explicit ownership. `lean-beam ensure --hold` is the only wrapper command that
+  starts a project daemon; it passes the daemon an inherited pipe and remains alive as the owner.
+  Ordinary wrapper calls, including plain `lean-beam ensure`, only attach to that generation and
+  fail with the exact owner-start command when none is live. Owner EOF shuts down request admission,
+  backend sessions, and the daemon without heartbeat timeouts or filesystem leases. This works
+  across PID namespaces because endpoint/root validation is authoritative when PID identity is not
+  locally observable. A paused owner retains the session; a killed owner closes the pipe; explicit
+  `lean-beam shutdown` revokes the registry generation so the holder closes it cleanly.
 - A startup failure that reports `operation not permitted` through `.beam/beam-daemon-startup.log` is
   usually an environment restriction, not a bundle-resolution mismatch.
 - Beam daemon disappearance errors include registry/log context and write a JSON incident record under
@@ -252,8 +250,8 @@ Exact event ordering and examples live in
   worker has already applied them; batch-only `moreLeanArgs` fail with `saveUnsupportedSetup`.
 - Beam does not detect Lake workspace configuration changes during a running Lean session. After
   editing a lakefile, manifest, package override, `lean-toolchain`, Lean options, plugins, or dynamic
-  libraries, run `lean-beam shutdown` before the next command that uses the Lean server;
-  `lean-beam refresh` does not restart the server.
+  libraries, run `lean-beam shutdown`, then start a new `lean-beam ensure --hold` owner before the
+  next wrapper command that uses the Lean server; `lean-beam refresh` does not restart the server.
 - A Beam checkpoint contains the Lean server's accepted environment. Elaborators can
   distinguish server execution from batch execution, so exceptional custom elaboration can produce
   an artifact that differs from a fresh `lake build` artifact. Successful checkpoints are normally
