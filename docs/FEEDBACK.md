@@ -4,7 +4,7 @@
 for bug reports and project feedback. Both entry points return the report to their caller and may
 write a local bundle; Beam itself does not upload or submit feedback. The surrounding MCP client may
 retain or transmit returned tool output under its own data policy; Beam does not control that client.
-Sharing through [GitHub issues](https://github.com/ejgallego/lean-beam/issues),
+Sharing through [GitHub issues](https://github.com/leanprover/lean-beam/issues),
 [Lean Zulip](https://leanprover.zulipchat.com), or another channel is a separate action.
 
 The output is JSON with a pasteable Markdown `markdown` field, structured `metadata`, non-fatal

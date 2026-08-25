@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 
 beam_script="$PWD/scripts/lean-beam"
 lake_cmd="$(command -v lake)"
-ci_timeout_tracker="https://github.com/ejgallego/lean-beam/issues/110"
+ci_timeout_tracker="https://github.com/leanprover/lean-beam/issues/110"
 
 if [ ! -x "$beam_script" ]; then
   echo "missing lean-beam wrapper at $beam_script" >&2

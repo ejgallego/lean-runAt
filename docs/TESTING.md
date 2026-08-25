@@ -229,7 +229,7 @@ restart. The slow Beam suite runs
 one MCP process keeps both project-specific Lean sessions active.
 
 If this scheduler-sensitive timeout appears on an unrelated CI PR, copy the timeout headline and
-diagnostic excerpt to [#110](https://github.com/ejgallego/lean-beam/issues/110) so repeated
+diagnostic excerpt to [#110](https://github.com/leanprover/lean-beam/issues/110) so repeated
 occurrences can be correlated in one place. Include the PR URL and branch, failing run URL, failing
 job URL, job name, runner OS/arch, run attempt, commit SHA, failing test or scenario, relevant
 request/progress or sentinel diagnostics from the log, and the rerun URL plus whether it passed or

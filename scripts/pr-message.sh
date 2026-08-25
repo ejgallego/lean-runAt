@@ -21,7 +21,7 @@ Options:
   --change TEXT    Add one optional behavior/review bullet. Repeat as needed.
   --base REF       Override the base branch shown in the scaffold. Defaults to main.
   --repo OWNER/REPO
-                   Override the repository shown in the scaffold. Defaults to ejgallego/lean-beam.
+                   Override the repository shown in the scaffold. Defaults to leanprover/lean-beam.
   -h, --help       Show this help.
 USAGE
 }
@@ -38,7 +38,7 @@ current_commit_subject() {
   git log -1 --pretty=%s
 }
 
-repo="ejgallego/lean-beam"
+repo="leanprover/lean-beam"
 base="main"
 title="$(current_commit_subject)"
 summary="This PR <short summary of the problem solved and useful outcome>."

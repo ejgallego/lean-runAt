@@ -1,9 +1,9 @@
 # Lean Beam
 
-Lean Beam is an experimental project for efficient interaction with Lean from AI-assisted and
-tool-assisted workflows. It combines new [Lean LSP extensions](docs/STATUS.md#core-lean-surface)
-with a thin local broker. The extensions provide Lean-specific capabilities, and the broker exposes
-them through a [`lean-beam` CLI](docs/SETUP.md#use-beam-from-a-lean-project) and an
+Lean Beam is a preview project for efficient interaction with Lean from AI agents and other tools.
+It combines new [Lean LSP extensions](docs/STATUS.md#core-lean-surface) with a thin local broker.
+The extensions provide Lean-specific capabilities, and the broker exposes them through a
+[`lean-beam` CLI](docs/SETUP.md#use-beam-from-a-lean-project) and an
 [MCP server](docs/SETUP.md#mcp-setup) for agent- and tool-facing workflows.
 
 ```mermaid
@@ -68,8 +68,10 @@ checkout, `lean-beam feedback-report --stdin` can produce a pasteable report car
 set `"confidential": true` in the feedback input JSON for a non-public workspace and never post that
 report publicly. Beam does not upload or submit the report.
 
-Lean Beam is experimental beta software. It is not an official Lean FRO product. Current
-scope, limitations, and release direction are tracked in [docs/STATUS.md](docs/STATUS.md).
+Lean Beam is currently available as a preview. We are working to stabilize it into dependable agent
+tooling for everyday Lean use and prepare it for distribution with Lean. Until that work lands,
+Beam is installed separately, its interfaces may change, and its current scope and limitations are
+tracked in [docs/STATUS.md](docs/STATUS.md).
 
 Most readers should start with [Install](#install), then use [docs/SETUP.md](docs/SETUP.md) for
 toolchains, first CLI commands, agent-skill setup, and MCP registration. Release-facing changes are
@@ -164,7 +166,7 @@ For contributors and maintainers:
 
 The main goal of the beta development cycle is to gather feedback from Lean users and tool authors.
 Bug reports, design feedback, and documentation improvements are welcome through
-[GitHub issues](https://github.com/ejgallego/lean-beam/issues). Discussion is also welcome on the
+[GitHub issues](https://github.com/leanprover/lean-beam/issues). Discussion is also welcome on the
 [Lean Zulip](https://leanprover.zulipchat.com).
 
 Before contributing code or docs, read [CONTRIBUTING.md](CONTRIBUTING.md). Maintainer workflow notes

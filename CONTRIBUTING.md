@@ -85,7 +85,7 @@ handle in this form:
 
 ```markdown
 - Describe the user-visible outcome
-  ([#216](https://github.com/ejgallego/lean-beam/pull/216), @ejgallego).
+  ([#216](https://github.com/leanprover/lean-beam/pull/216), @ejgallego).
 ```
 
 Use the pull request author unless the contributors agree that another primary author is more

@@ -30,7 +30,7 @@ from mcp_test_util import (
 )
 
 
-CI_TIMEOUT_TRACKER = "https://github.com/ejgallego/lean-beam/issues/110"
+CI_TIMEOUT_TRACKER = "https://github.com/leanprover/lean-beam/issues/110"
 CI_TIMEOUT_TRACKER_NOTE = "\n".join(
     [
         f"Comment on {CI_TIMEOUT_TRACKER} if this scheduler-sensitive timeout hits an unrelated CI PR.",

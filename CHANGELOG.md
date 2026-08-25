@@ -15,7 +15,7 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
   application.
 - Confidential feedback report cards omit project-derived debug context and caller-supplied
   request, response, and evidence payloads from CLI, MCP, and bundle output
-  ([#220](https://github.com/ejgallego/lean-beam/pull/220), @ejgallego).
+  ([#220](https://github.com/leanprover/lean-beam/pull/220), @ejgallego).
 - `lean-beam prune` previews obsolete installed runtime snapshots; `--apply` removes them, and
   `--bundles` also selects stale or incomplete installed bundle-cache entries.
 - Installed runtime identities report whether the running CLI or MCP process still belongs to the
@@ -26,10 +26,10 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 - Validated Lean `v4.34.0-rc1` support.
 - Validated Lean `v4.33.0` support and made it the repository's default Lean toolchain.
 - Validated Lean `v4.32.0` support and made it the repository's default Lean toolchain
-  ([#219](https://github.com/ejgallego/lean-beam/pull/219), @ejgallego).
+  ([#219](https://github.com/leanprover/lean-beam/pull/219), @ejgallego).
 - Mistral Vibe skill installation and MCP registration support through `--vibe`, `--vibe-mcp`,
   `--vibe-home`, and `VIBE_HOME`
-  ([#213](https://github.com/ejgallego/lean-beam/pull/213), @archiebrowne).
+  ([#213](https://github.com/leanprover/lean-beam/pull/213), @archiebrowne).
 
 ### Changed
 
@@ -49,7 +49,7 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 - Feedback report-card entry points are now named `lean-beam feedback-report` and MCP
   `beam_feedback_report`; their help and tool descriptions state that Beam returns reports to callers
   and does not upload or submit them
-  ([#233](https://github.com/ejgallego/lean-beam/pull/233)).
+  ([#233](https://github.com/leanprover/lean-beam/pull/233)).
 - Broker-backed Lean MCP operations, feedback collection, and delayed `lean_drop_workspace` calls
   without `_meta.progressToken` now emit at most one structured `beam.status` notice when Lake setup
   is observed or the call remains pending for two seconds and the active logging policy admits
@@ -79,7 +79,7 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
   probes need not be serialized by the client.
 - Feedback input now rejects unknown JSON fields so misspelled privacy controls cannot silently
   produce a non-confidential report
-  ([#220](https://github.com/ejgallego/lean-beam/pull/220), @ejgallego).
+  ([#220](https://github.com/leanprover/lean-beam/pull/220), @ejgallego).
 - `lean-save` and `lean-close-save` now reuse the accepted server snapshot for structured Lake
   `leanOptions`, dynamic libraries, and plugins. Modules with batch-only `moreLeanArgs` still fail
   with `saveUnsupportedSetup`, now with guidance to use `leanOptions` or `lake build`. Running Lean
@@ -95,30 +95,30 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 - `lean-beam ensure --hold` now exits cleanly and promptly after `SIGINT`.
 - `lean-save` and `lean-close-save` now stage and commit complete artifact sets, preserving prior
   outputs on reported failure or cancellation and preventing same-worker saves from mixing files
-  ([#217](https://github.com/ejgallego/lean-beam/pull/217), @ejgallego).
+  ([#217](https://github.com/leanprover/lean-beam/pull/217), @ejgallego).
 - `lean-save` and `lean-close-save` now invalidate prior Lake trace metadata before publishing
   artifacts and replace the new trace atomically, preventing prior metadata from describing newly
   published artifacts after a trace-write failure
-  ([#218](https://github.com/ejgallego/lean-beam/pull/218), @ejgallego).
+  ([#218](https://github.com/leanprover/lean-beam/pull/218), @ejgallego).
 - Module-mode `lean-save` and `lean-close-save` now checkpoint the complete Lake artifact family,
   preventing replay from reusing stale `.olean.server`, `.olean.private`, or `.ir` files
-  ([#214](https://github.com/ejgallego/lean-beam/pull/214), @ejgallego).
+  ([#214](https://github.com/leanprover/lean-beam/pull/214), @ejgallego).
 - Save-readiness decoding now rejects incomplete response envelopes instead of inferring that a
   document is ready to save
-  ([#214](https://github.com/ejgallego/lean-beam/pull/214), @ejgallego).
+  ([#214](https://github.com/leanprover/lean-beam/pull/214), @ejgallego).
 - `lean-beam-mcp --self-check` now waits long enough for valid first-use local bundle builds and
   documents the `LEAN_BEAM_MCP_SELF_CHECK_TIMEOUT_MS` override
-  ([#208](https://github.com/ejgallego/lean-beam/pull/208), @ejgallego).
+  ([#208](https://github.com/leanprover/lean-beam/pull/208), @ejgallego).
 
 ### Documentation
 
 - Clarify that zero-build saves are development checkpoints for the inner loop, make clean CI the
   preferred final batch validation, and use one clean local build when no clean CI result is
   available
-  ([#216](https://github.com/ejgallego/lean-beam/pull/216), @ejgallego).
+  ([#216](https://github.com/leanprover/lean-beam/pull/216), @ejgallego).
 - Align the status page with the current broker protocol, which requires explicit `ok` / `error`
   response envelopes
-  ([#216](https://github.com/ejgallego/lean-beam/pull/216), @ejgallego).
+  ([#216](https://github.com/leanprover/lean-beam/pull/216), @ejgallego).
 
 ## 0.1.0 - 2026-07-07
 
