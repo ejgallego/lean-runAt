@@ -127,8 +127,7 @@ private def checkActiveRegistryCloseDrain : IO Unit := do
     ← ActiveRequestRegistry.register registry (some "closing-request")
   let anonymous ← expectRegistered "register anonymous request before close" <|
     ← ActiveRequestRegistry.register registry none
-  require "first admission close should lead closure"
-    (← ActiveRequestRegistry.closeAdmission registry)
+  ActiveRequestRegistry.closeAdmission registry
   for active in #[named, anonymous] do
     match ← ensureRequestNotCancelled (some active.cancelRef) with
     | .ok _ => throw <| IO.userError "admission close did not cancel an active request"
@@ -150,8 +149,9 @@ private def checkActiveRegistryCloseDrain : IO Unit := do
   match ← IO.wait drainTask with
   | .ok () => pure ()
   | .error err => throw err
-  require "repeated admission close should be idempotent"
-    (!(← ActiveRequestRegistry.closeAdmission registry))
+  ActiveRequestRegistry.closeAdmission registry
+  require "repeated admission close should preserve the drained state"
+    ((← ActiveRequestRegistry.count registry) == 0)
 
 private def checkPendingCancellationIdentity : IO Unit := do
   let registry ← ActiveRequestRegistry.create

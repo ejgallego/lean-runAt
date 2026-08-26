@@ -62,7 +62,7 @@ private partial def waitForBrokerExit
   if (← broker.tryWait).isSome then
     pure ()
   else if tries == 0 then
-    throw <| IO.userError "daemon remained alive after its shutdown client disconnected"
+    throw <| IO.userError "daemon remained alive after shutdown"
   else
     IO.sleep 25
     waitForBrokerExit broker (tries - 1)
@@ -84,6 +84,24 @@ private def sendShutdownAndResetConnection (port : UInt16) : IO Unit := do
   if out.exitCode != 0 then
     throw <| IO.userError s!"failed to reset shutdown connection\n{out.stderr}"
 
+private def checkShutdownResponseBeforeExit (root : System.FilePath) : IO Unit := do
+  let port ← freshTcpPort
+  let endpoint : Beam.Broker.Endpoint := .tcp port
+  let broker ← spawnLeanBroker endpoint root
+  try
+    waitForBrokerReadyForRoot endpoint root
+    discard <| expectOk (← runClient endpoint { op := .shutdown })
+    waitForBrokerExit broker
+  finally
+    try
+      broker.kill
+    catch _ =>
+      pure ()
+    try
+      discard <| broker.tryWait
+    catch _ =>
+      pure ()
+
 def main : IO Unit := do
   let port ← freshTcpPort
   let endpoint : Beam.Broker.Endpoint := .tcp port
@@ -96,14 +114,25 @@ def main : IO Unit := do
   let broker ← spawnLeanBroker endpoint root (identity? := some identity)
   try
     waitForBrokerReadyForRoot endpoint root
-    if !(← Beam.Daemon.daemonServesGeneration endpoint testWorkspaceId root identity) then
-      throw <| IO.userError "daemon did not report its expected generation identity"
-    if ← Beam.Daemon.daemonServesGeneration endpoint testWorkspaceId root
-        { identity with daemonId := identity.daemonId ++ "-other" } then
-      throw <| IO.userError "daemon accepted a mismatched generation identity"
-    if ← Beam.Daemon.daemonServesGeneration endpoint testWorkspaceId root
-        { identity with configHash := identity.configHash ++ "-other" } then
-      throw <| IO.userError "daemon accepted a mismatched configuration identity"
+    match ← Beam.Daemon.daemonGenerationStatus endpoint testWorkspaceId root identity with
+    | .exact => pure ()
+    | status =>
+        throw <| IO.userError
+          s!"daemon did not report its expected generation identity: {repr status}"
+    for mismatched in #[
+        { identity with daemonId := identity.daemonId ++ "-other" },
+        { identity with configHash := identity.configHash ++ "-other" }
+      ] do
+      match ← Beam.Daemon.daemonGenerationStatus endpoint testWorkspaceId root mismatched with
+      | .wrongGeneration _ => pure ()
+      | status =>
+          throw <| IO.userError s!"daemon generation mismatch was classified as {repr status}"
+    let otherRoot := root / "other-root"
+    IO.FS.createDirAll otherRoot
+    match ← Beam.Daemon.daemonGenerationStatus endpoint testWorkspaceId otherRoot identity with
+    | .wrongRoot _ => pure ()
+    | status =>
+        throw <| IO.userError s!"daemon root mismatch was classified as {repr status}"
     discard <| expectOk (← runClient endpoint { op := .ensure, root? := some root.toString })
 
     let todoVersion ← syncVersion endpoint root BeamTest.Fixtures.TodoFixture.brokerPath
@@ -287,6 +316,11 @@ def main : IO Unit := do
 
     sendShutdownAndResetConnection port
     waitForBrokerExit broker
+    match ← Beam.Daemon.daemonGenerationStatus endpoint testWorkspaceId root identity with
+    | .unavailable => pure ()
+    | status =>
+        throw <| IO.userError s!"stopped daemon was classified as {repr status}"
+    checkShutdownResponseBeforeExit root
   finally
     try
       broker.kill

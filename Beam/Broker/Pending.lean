@@ -450,25 +450,21 @@ def count (registry : ActiveRequestRegistry) : IO Nat := do
   registry.mutex.atomically do
     pure (activeRequestCount (← get))
 
-/--
-Atomically close request admission and mark every admitted request for cancellation. Return `true`
-only to the caller that changed the registry from accepting to closed.
--/
-def closeAdmission (registry : ActiveRequestRegistry) : IO Bool := do
-  let (firstClose, active, shouldResolve) ← registry.mutex.atomically do
+/-- Atomically close request admission and mark every admitted request for cancellation. -/
+def closeAdmission (registry : ActiveRequestRegistry) : IO Unit := do
+  let (active, shouldResolve) ← registry.mutex.atomically do
     let state : ActiveRequestRegistryState ← get
     if !state.accepting then
-      pure (false, #[], false)
+      pure (#[], false)
     else
       let (state, shouldResolve) := markDrainedIfReady { state with accepting := false }
       set state
       let named := state.requests.toList.map Prod.snd |>.toArray
       let anonymous := state.anonymousRequests.toList.map Prod.snd |>.toArray
-      pure (true, named ++ anonymous, shouldResolve)
+      pure (named ++ anonymous, shouldResolve)
   for request in active do
     request.cancelRef.set true
   resolveDrainedIfNeeded registry shouldResolve
-  pure firstClose
 
 /-- Wait until admission is closed and every request admitted before closure has unregistered. -/
 def awaitDrained (registry : ActiveRequestRegistry) : IO Unit := do

@@ -115,25 +115,22 @@ def finishRegistryDaemonShutdown (entry : RegistryEntry) : IO Unit := do
       pure ()
 
 private def stopDaemonEntry (entry : RegistryEntry) : IO Unit := do
-  let mayKillPid ←
-    match registryEndpoint? entry with
-    | some endpoint =>
-        if ← daemonServesGeneration endpoint projectDaemonWorkspaceId
-            (System.FilePath.mk entry.root) entry.identity then
+  match registryEndpoint? entry with
+  | none =>
+      finishRegistryDaemonShutdown entry
+  | some endpoint =>
+      match ← daemonGenerationStatus endpoint projectDaemonWorkspaceId
+          (System.FilePath.mk entry.root) entry.identity with
+      | .exact =>
           try
-            let _ ← sendRequest endpoint { op := .shutdown }
-            pure ()
+            discard <| sendRequest endpoint { op := .shutdown }
           catch _ =>
             pure ()
-          pure true
-        else if (← daemonRoot? endpoint projectDaemonWorkspaceId).isNone then
-          pure true
-        else
-          pure false
-    | none =>
-        pure true
-  if mayKillPid then
-    finishRegistryDaemonShutdown entry
+          finishRegistryDaemonShutdown entry
+      | .unavailable =>
+          finishRegistryDaemonShutdown entry
+      | .wrongRoot _ | .wrongGeneration _ =>
+          pure ()
 
 def stopRegisteredDaemon (root : System.FilePath) : IO Unit := do
   match ← readRegistry? root with
@@ -385,16 +382,19 @@ private partial def waitForDaemon
     (root : System.FilePath)
     (identity : DaemonIdentity)
     (tries : Nat := 300) : IO (Except DaemonStartupFailure Unit) := do
-  if ← daemonServesGeneration endpoint projectDaemonWorkspaceId root identity then
-    pure (.ok ())
-  else
-    match ← daemonRoot? endpoint projectDaemonWorkspaceId with
-    | some daemonRoot =>
-        pure <| .error {
-          message := endpointOccupancyError endpoint (System.FilePath.mk daemonRoot) root
-          endpointInUse := true
-        }
-    | none =>
+  match ← daemonGenerationStatus endpoint projectDaemonWorkspaceId root identity with
+  | .exact => pure (.ok ())
+  | .wrongRoot daemonRoot =>
+      pure <| .error {
+        message := endpointOccupancyError endpoint (System.FilePath.mk daemonRoot) root
+        endpointInUse := true
+      }
+  | .wrongGeneration daemonRoot =>
+      pure <| .error {
+        message := endpointGenerationMismatchError endpoint (System.FilePath.mk daemonRoot)
+        endpointInUse := true
+      }
+  | .unavailable =>
       if (← child.tryWait).isSome then
         .error <$> daemonStartupFailure endpoint logPath "Beam daemon process exited before responding"
       else if tries == 0 then
@@ -547,10 +547,9 @@ def registryLiveFor
         | some endpoint =>
             -- The owner pipe makes endpoint liveness authoritative across PID domains. A
             -- same-domain dead owner is rejected immediately; another domain is never probed.
-            if ← daemonServesGeneration endpoint projectDaemonWorkspaceId root entry.identity then
-              pure (some entry)
-            else
-              pure none
+            match ← daemonGenerationStatus endpoint projectDaemonWorkspaceId root entry.identity with
+            | .exact => pure (some entry)
+            | .unavailable | .wrongRoot _ | .wrongGeneration _ => pure none
 
 private abbrev detachedDaemonStdio : IO.Process.StdioConfig where
   stdin := .null

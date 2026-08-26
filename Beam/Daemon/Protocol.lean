@@ -101,6 +101,12 @@ def endpointOccupancyError
 def endpointInUseError (endpoint : Transport.Endpoint) : String :=
   s!"selected endpoint {endpointSummary endpoint} is already in use"
 
+def endpointGenerationMismatchError
+    (endpoint : Transport.Endpoint)
+    (daemonRoot : System.FilePath) : String :=
+  s!"selected endpoint {endpointSummary endpoint} already serves Beam root {daemonRoot} " ++
+    "with another daemon generation"
+
 def startupLogSuggestsEndpointInUse (logText : String) : Bool :=
   logText.contains "address already in use" ||
   logText.contains "Address already in use"
@@ -111,29 +117,28 @@ def shouldRetryAutomaticStartup
     (endpointOccupied startupAddressInUse : Bool) : Bool :=
   usesAutomaticEndpoint && tries > 0 && (endpointOccupied || startupAddressInUse)
 
--- A listening TCP port is not enough evidence that it belongs to this project:
--- random auto-port selection can collide with an unrelated Beam daemon.
-def daemonServesRoot
-    (endpoint : Transport.Endpoint)
-    (workspaceId : WorkspaceId)
-    (root : System.FilePath) : IO Bool := do
-  match ← daemonRoot? endpoint workspaceId with
-  | some daemonRoot => Beam.sameFilePath (System.FilePath.mk daemonRoot) root
-  | none => pure false
+inductive DaemonGenerationStatus where
+  | unavailable
+  | wrongRoot (daemonRoot : String)
+  | wrongGeneration (daemonRoot : String)
+  | exact
+  deriving Repr
 
-/-- Whether an endpoint serves the expected root and exact wrapper-owned daemon generation. -/
-def daemonServesGeneration
+/-- Classify one endpoint observation against the expected root and wrapper daemon generation. -/
+def daemonGenerationStatus
     (endpoint : Transport.Endpoint)
     (workspaceId : WorkspaceId)
     (root : System.FilePath)
-    (identity : DaemonIdentity) : IO Bool := do
+    (identity : DaemonIdentity) : IO DaemonGenerationStatus := do
   match ← daemonProbe? endpoint workspaceId with
+  | none => pure .unavailable
   | some probe =>
-      if probe.identity? != some identity then
-        pure false
+      unless ← Beam.sameFilePath (System.FilePath.mk probe.root) root do
+        return .wrongRoot probe.root
+      if probe.identity? == some identity then
+        pure .exact
       else
-        Beam.sameFilePath (System.FilePath.mk probe.root) root
-  | none => pure false
+        pure <| .wrongGeneration probe.root
 
 def endpointAcceptsConnection (endpoint : Transport.Endpoint) : IO Bool := do
   try

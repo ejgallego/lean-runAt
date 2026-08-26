@@ -1009,7 +1009,7 @@ def ServerRuntime.close (server : ServerRuntime) : IO Unit := do
   if leadsClose then
     let outcome ←
       try
-        discard <| ActiveRequestRegistry.closeAdmission server.activeRequests
+        ActiveRequestRegistry.closeAdmission server.activeRequests
         -- The first sweep unblocks requests already waiting on a backend. An admitted request may
         -- have been between admission and session creation when closure began, so repeat the sweep
         -- after every dispatch scope has drained to guarantee that no late session survives.
@@ -2525,12 +2525,16 @@ private def handleClient (server : ServerRuntime) (client : Transport.Connection
         let resp ← server.dispatchRequestWithHandle req (fun handle => do
           let _ ← IO.asTask (prio := Task.Priority.dedicated) <| watchClientDisconnect client handle
           pure true) (some emitProgress) (some emitDiagnostic)
-        -- Stopping only wakes the listener; the accepted connection remains available for the
-        -- terminal response. Do this first so a disconnected shutdown caller cannot strand a
-        -- closed runtime behind a live listener.
         if stopsTransport then
-          requestStop server
-        sendResponse req.clientRequestId? resp
+          -- A successful send is the transport's flush boundary. Wake the listener only after the
+          -- terminal response has been handed off, but do so even when the caller disconnected so
+          -- a closed runtime cannot remain behind a live listener.
+          try
+            sendResponse req.clientRequestId? resp
+          finally
+            requestStop server
+        else
+          sendResponse req.clientRequestId? resp
   catch e =>
     unless ← terminalSentRef.get do
       let clientRequestId? ← clientRequestIdRef.get
