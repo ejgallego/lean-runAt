@@ -105,11 +105,16 @@ private def shutdownProjectDaemon (opts : CliOptions) : IO Unit := do
     match ← registryLiveFor root with
     | some entry =>
         if let some endpoint := Beam.Daemon.registryEndpoint? entry then
-          let resp ← sendRequest endpoint { op := .shutdown }
-          printResponse resp
-          -- Unpublishing this exact generation releases its wrapper owner. The owner remains the
-          -- sole process responsible for closing the inherited pipe and reaping its daemon child.
-          removeRegistry root
+          let result ← requestDaemonShutdown endpoint
+          try
+            match result with
+            | .ok resp => printResponse resp
+            | .error failure =>
+                throw <| IO.userError (← daemonFailureMessage root failure)
+          finally
+            -- Unpublishing this exact generation releases its wrapper owner. The owner remains the
+            -- sole process responsible for closing the inherited pipe and reaping its daemon child.
+            removeRegistryGeneration root entry.daemonId
         else
           stopRegisteredDaemon root
           printJsonLine <| Json.mkObj [

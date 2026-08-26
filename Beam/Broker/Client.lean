@@ -32,6 +32,14 @@ def BrokerClientFailure.detail : BrokerClientFailure → String
   | .responseTimeout timeoutMs =>
       s!"Beam daemon response timed out after {timeoutMs} ms"
 
+instance : Repr BrokerClientFailure where
+  reprPrec failure _ := Std.Format.text <|
+    match failure with
+    | .transport error => s!"BrokerClientFailure.transport {error}"
+    | .invalidResponse detail => s!"BrokerClientFailure.invalidResponse {detail}"
+    | .streamCallback error => s!"BrokerClientFailure.streamCallback {error}"
+    | .responseTimeout timeoutMs => s!"BrokerClientFailure.responseTimeout {timeoutMs}"
+
 private def BrokerClientFailure.toIOError : BrokerClientFailure → IO.Error
   | .transport error | .streamCallback error => error
   | .invalidResponse detail => IO.userError detail

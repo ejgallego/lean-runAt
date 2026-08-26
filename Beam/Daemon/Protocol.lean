@@ -143,7 +143,7 @@ def endpointAcceptsConnection (endpoint : Transport.Endpoint) : IO Bool := do
 
 inductive DaemonGenerationStatus where
   | unavailable
-  | unrecognized (detail : String)
+  | unrecognized (failure : BrokerClientFailure)
   | wrongRoot (daemonRoot : String)
   | wrongGeneration (daemonRoot : String)
   | exact
@@ -160,11 +160,11 @@ def daemonGenerationStatus
       match failure with
       | .transport _ =>
           if ← endpointAcceptsConnection endpoint then
-            pure <| .unrecognized failure.detail
+            pure <| .unrecognized failure
           else
             pure .unavailable
       | .invalidResponse _ | .streamCallback _ | .responseTimeout _ =>
-          pure <| .unrecognized failure.detail
+          pure <| .unrecognized failure
   | .ok probe =>
       unless ← Beam.sameFilePath (System.FilePath.mk probe.root) root do
         return .wrongRoot probe.root

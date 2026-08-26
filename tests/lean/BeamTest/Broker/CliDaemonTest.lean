@@ -145,14 +145,19 @@ private partial def withBrokerListener
   let stamp ← IO.monoNanosNow
   let portNat := 30000 + ((stamp + tries) % 20000)
   let endpoint := Beam.Broker.Transport.Endpoint.tcp portNat.toUInt16
-  try
-    let listener ← Beam.Broker.Transport.bindAndListen endpoint 2
-    act listener endpoint
-  catch err =>
+  let listenerResult ←
+    try
+      pure <| Except.ok (← Beam.Broker.Transport.bindAndListen endpoint 2)
+    catch err =>
+      pure <| Except.error err
+  match listenerResult with
+  | .error err =>
     if tries == 0 then
       throw err
     else
       withBrokerListener act (tries - 1)
+  | .ok listener =>
+      act listener endpoint
 
 private def checkSilentEndpointProbeTimeout : IO Unit := do
   withBrokerListener fun listener endpoint => do
@@ -166,11 +171,32 @@ private def checkSilentEndpointProbeTimeout : IO Unit := do
       }
       match ← Beam.Daemon.daemonGenerationStatus endpoint
           Beam.Cli.projectDaemonWorkspaceId (System.FilePath.mk "/tmp") identity with
-      | .unrecognized detail =>
-          require "silent endpoint should report its bounded response timeout"
-            (detail.contains "response timed out")
+      | .unrecognized (.responseTimeout timeoutMs) =>
+          require "silent endpoint should preserve its typed response timeout"
+            (timeoutMs == 2000)
+      | .unrecognized failure =>
+          throw <| IO.userError s!"silent endpoint reported {repr failure}"
       | status =>
           throw <| IO.userError s!"silent endpoint was classified as {repr status}"
+    finally
+      release.resolve ()
+      match ← IO.wait serverTask with
+      | .ok () => pure ()
+      | .error err => throw err
+
+private def checkSilentShutdownTimeout : IO Unit := do
+  withBrokerListener fun listener endpoint => do
+    let release ← IO.Promise.new
+    let serverTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      holdAcceptedConnection listener release
+    try
+      match ← Beam.Cli.requestDaemonShutdown endpoint 50 with
+      | .error (.responseTimeout timeoutMs) =>
+          require "silent shutdown should preserve its typed response timeout" (timeoutMs == 50)
+      | .error failure =>
+          throw <| IO.userError s!"silent shutdown reported {repr failure}"
+      | .ok response =>
+          throw <| IO.userError s!"silent shutdown returned {toJson response}"
     finally
       release.resolve ()
       match ← IO.wait serverTask with
@@ -1303,6 +1329,7 @@ def main : IO Unit := do
   checkDaemonFailureUnreadableStartupLog
   checkTypedDaemonFailureClassification
   checkSilentEndpointProbeTimeout
+  checkSilentShutdownTimeout
   checkPlainBrokerTaskCancellation
   checkBrokerConnectionClosedIncident
   checkDaemonFailureIncidentRetention

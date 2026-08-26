@@ -396,9 +396,11 @@ admitted requests for cancellation, shuts down backend sessions, and stops the l
 no wrapper heartbeat, lease file, revocation tombstone, or retirement fence.
 
 Ordinary wrapper commands never start a daemon. Under the per-project control lock they require a
-  registry whose root and effective configuration match, whose owner is not known dead in the current
-  PID domain, and whose endpoint answers for the CLI's private workspace, canonical project root, and
-  exact daemon generation identity.
+registry whose root and effective configuration match, whose owner is not known dead in the current
+PID domain, and whose endpoint answers for the CLI's private workspace, canonical project root, and
+exact daemon generation identity. Identity probes have a bounded response deadline. An endpoint
+that accepts a connection but stays silent or returns malformed data is unrecognized, so validation
+fails closed and PID fallback is not permitted.
 Endpoint/root validation is authoritative across PID namespaces because numeric PID observations
 from another domain are not safe process identity. A same-domain dead owner or a dead endpoint makes
 the registry stale; cleanup remains generation-scoped and PID fallback is permitted only through the

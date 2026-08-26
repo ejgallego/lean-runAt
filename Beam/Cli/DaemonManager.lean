@@ -83,6 +83,25 @@ def removeRegistry (root : System.FilePath) : IO Unit := do
   if ← path.pathExists then
     IO.FS.removeFile path
 
+/-- Remove a registry entry only when it still names the observed daemon generation. -/
+def removeRegistryGeneration (root : System.FilePath) (daemonId : String) : IO Unit := do
+  match ← readRegistry? root with
+  | some current =>
+      if current.daemonId == daemonId then
+        removeRegistry root
+  | none => pure ()
+
+private def daemonShutdownResponseTimeoutMs : Nat :=
+  30000
+
+/-- Ask a daemon to shut down without allowing its response stream to hold CLI control forever. -/
+def requestDaemonShutdown
+    (endpoint : Transport.Endpoint)
+    (responseTimeoutMs : Nat := daemonShutdownResponseTimeoutMs) :
+    IO (Except BrokerClientFailure Response) := do
+  sendRequestWithStreamTimeoutResult endpoint { op := .shutdown }
+    responseTimeoutMs (fun _ => pure ())
+
 private partial def waitForRecordedPidGone
     (recorded : Beam.RecordedPid)
     (tries : Nat := 20) : IO Unit := do
@@ -115,22 +134,24 @@ def finishRegistryDaemonShutdown (entry : RegistryEntry) : IO Unit := do
       pure ()
 
 private def stopDaemonEntry (entry : RegistryEntry) : IO Unit := do
+  let root := System.FilePath.mk entry.root
+  let releaseGeneration := removeRegistryGeneration root entry.daemonId
+  let releaseAndFinish := do
+    releaseGeneration
+    finishRegistryDaemonShutdown entry
   match registryEndpoint? entry with
   | none =>
-      finishRegistryDaemonShutdown entry
+      releaseAndFinish
   | some endpoint =>
       match ← daemonGenerationStatus endpoint projectDaemonWorkspaceId
-          (System.FilePath.mk entry.root) entry.identity with
+          root entry.identity with
       | .exact =>
-          try
-            discard <| sendRequest endpoint { op := .shutdown }
-          catch _ =>
-            pure ()
-          finishRegistryDaemonShutdown entry
+          discard <| requestDaemonShutdown endpoint
+          releaseAndFinish
       | .unavailable =>
-          finishRegistryDaemonShutdown entry
+          releaseAndFinish
       | .unrecognized _ | .wrongRoot _ | .wrongGeneration _ =>
-          pure ()
+          releaseGeneration
 
 def stopRegisteredDaemon (root : System.FilePath) : IO Unit := do
   match ← readRegistry? root with
@@ -138,7 +159,6 @@ def stopRegisteredDaemon (root : System.FilePath) : IO Unit := do
       removeRegistry root
   | some entry =>
       stopDaemonEntry entry
-      removeRegistry root
 
 private def requestedPortNat? (opts : CliOptions) : Option Nat :=
   opts.requestedPort?.map (·.toNat)
@@ -411,8 +431,8 @@ private partial def waitForDaemon
         message := endpointGenerationMismatchError endpoint (System.FilePath.mk daemonRoot)
         endpointInUse := true
       }
-  | .unrecognized detail =>
-      retryOrFail (endpointProtocolError endpoint detail)
+  | .unrecognized failure =>
+      retryOrFail (endpointProtocolError endpoint failure.detail)
   | .unavailable =>
       retryOrFail "Beam daemon did not become ready before timeout"
 
@@ -650,11 +670,7 @@ private partial def waitForOwnedDaemonExit
 private def removeOwnedRegistry (root : System.FilePath) (daemonId : String) : IO Unit := do
   try
     withProjectControlLock root do
-      match ← readRegistry? root with
-      | some current =>
-          if current.daemonId == daemonId then
-            removeRegistry root
-      | none => pure ()
+      removeRegistryGeneration root daemonId
   catch _ =>
     pure ()
 
