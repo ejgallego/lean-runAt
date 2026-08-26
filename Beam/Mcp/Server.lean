@@ -471,10 +471,9 @@ private def ensureBrokerWorkspace
       match ← Runtime.mkBrokerConfig (runtimeOptions opts) root with
       | .error err => pure <| .error err
       | .ok config =>
-          let brokerResp ← runtime.initWorkspaceWithConfig workspaceId config (some .set)
-          match brokerResp with
-          | .successResult .. => pure <| .ok config.root
-          | .errorResult failure =>
+          match ← runtime.initWorkspaceWithConfig workspaceId config (some .set) with
+          | .ok initialized => pure <| .ok initialized.root
+          | .error failure =>
               pure <| .error <| RpcError.invalidRequest failure.error.message
 
 private def ensureRuntimeForWorkspace
@@ -589,20 +588,11 @@ private def handleDropWorkspace
   | none =>
       pure <| callToolResult <| resultJson false false (some "notFound")
   | some runtime =>
-      let (brokerResp, _) ← runtime.dispatchRequest {
-        op := .dropWorkspace
-        workspaceId? := some workspace.workspaceId
-      }
-      match brokerResp with
-      | .successResult payload .. =>
-          match fromJson? (α := Beam.Workspace.DropResult) payload with
-          | .ok dropped =>
-              pure <| callToolResult <|
-                resultJson dropped.dropped dropped.invalidatedHandles dropped.reason?
-          | .error err =>
-              pure <| callToolErrorResult <| ToolError.invalidResult
-                s!"invalid workspace drop result: {err}"
-      | .errorResult failure =>
+      match ← runtime.dropWorkspace workspace.workspaceId with
+      | .ok dropped =>
+          pure <| callToolResult <|
+            resultJson dropped.dropped dropped.invalidatedHandles dropped.reason?
+      | .error failure =>
           pure <| callToolErrorResult <| ToolError.fromBrokerError failure.error
 
 private def resolvedBeamHome? : IO (Option System.FilePath) := do

@@ -944,11 +944,6 @@ private def brokerConfigSame (left right : BrokerConfig) : Bool :=
     left.leanPlugin? == right.leanPlugin? &&
     left.rocqCmd? == right.rocqCmd?
 
-private def shutdownWorkspaceSessions (workspace : WorkspaceState) : IO Unit := do
-  for session? in [workspace.lean.session?, workspace.rocq.session?] do
-    if let some session := session? then
-      shutdownSession session
-
 private def detachBackendSession
     (backend : BackendState) : BackendState × Option Session :=
   match backend.session? with
@@ -956,18 +951,28 @@ private def detachBackendSession
   | some session =>
       ({ backend with session? := none, nextEpoch := backend.nextEpoch + 1 }, some session)
 
+private def collectSessions
+    (left? right? : Option Session) : Array Session :=
+  match left?, right? with
+  | none, none => #[]
+  | some left, none => #[left]
+  | none, some right => #[right]
+  | some left, some right => #[left, right]
+
+private def detachWorkspaceSessions
+    (workspace : WorkspaceState) : WorkspaceState × Array Session :=
+  let (lean, leanSession?) := detachBackendSession workspace.lean
+  let (rocq, rocqSession?) := detachBackendSession workspace.rocq
+  ({ workspace with lean, rocq }, collectSessions leanSession? rocqSession?)
+
 private def detachRuntimeSessions (server : ServerRuntime) : IO (Array Session) := do
   server.withState do
     let state ← get
-    let mut sessions := #[]
-    for (workspaceId, workspace) in state.workspaces.toList do
-      let (lean, leanSession?) := detachBackendSession workspace.lean
-      let (rocq, rocqSession?) := detachBackendSession workspace.rocq
-      if let some session := leanSession? then
-        sessions := sessions.push session
-      if let some session := rocqSession? then
-        sessions := sessions.push session
-      modify fun state => setWorkspace state workspaceId { workspace with lean, rocq }
+    let (state, sessions) := state.workspaces.toList.foldl (init := (state, #[])) fun
+        (state, sessions) (workspaceId, workspace) =>
+      let (workspace, detached) := detachWorkspaceSessions workspace
+      (setWorkspace state workspaceId workspace, sessions ++ detached)
+    set state
     pure sessions
 
 private def shutdownRuntimeSessions (server : ServerRuntime) : IO Unit := do
@@ -1040,46 +1045,106 @@ private def duplicateRootWorkspace?
     else
       none
 
-def ServerRuntime.initWorkspaceWithConfig
-    (server : ServerRuntime)
+private structure WorkspaceTransition (α : Type) where
+  state : State
+  result : Except ResponseFailure α
+  detachedSessions : Array Session := #[]
+
+private def initWorkspaceTransition
+    (state : State)
     (workspaceId : WorkspaceId)
     (config : BrokerConfig)
-    (mode? : Option Beam.Workspace.InitMode := none) : IO Response := do
+    (mode? : Option Beam.Workspace.InitMode) : WorkspaceTransition Beam.Workspace.InitResult :=
   if !validWorkspaceId workspaceId then
-    return errorResponseFor .invalidParams "workspace id must be non-empty"
-  let mode := mode?.getD .set
-  server.withState do
-    let state ← get
+    { state, result := .error <| responseFailureFor .invalidParams
+        "workspace id must be non-empty" }
+  else
+    let mode := mode?.getD .set
     match getWorkspace? state workspaceId with
     | some current =>
         if mode == .reset then
           if let some otherId := duplicateRootWorkspace? state workspaceId config then
-            pure <| errorResponseFor .invalidParams <|
-              s!"workspace root {config.root} is already owned by workspace '{otherId}'"
+            { state, result := .error <| responseFailureFor .invalidParams <|
+                s!"workspace root {config.root} is already owned by workspace '{otherId}'" }
           else
-            shutdownWorkspaceSessions current
+            let (_, detachedSessions) := detachWorkspaceSessions current
             let replacement := mkWorkspaceState config
-            modify fun state => setWorkspace state workspaceId replacement
-            pure <| Response.success <| toJson <|
-              workspaceInitResult workspaceId config.root mode false true (some current.config.root)
+            {
+              state := setWorkspace state workspaceId replacement
+              result := .ok <|
+                workspaceInitResult workspaceId config.root mode false true
+                  (some current.config.root)
+              detachedSessions
+            }
         else if brokerConfigSame current.config config then
-          pure <| Response.success <| toJson <|
-            workspaceInitResult workspaceId current.config.root mode true false
+          { state, result := .ok <|
+              workspaceInitResult workspaceId current.config.root mode true false }
         else
-          pure <| errorResponseFor .invalidParams <|
-            s!"workspace '{workspaceId}' is already initialized for {current.config.root}; " ++
-            s!"use workspaceMode=reset to switch it explicitly to {config.root}"
+          { state, result := .error <| responseFailureFor .invalidParams <|
+              s!"workspace '{workspaceId}' is already initialized for {current.config.root}; " ++
+              s!"use workspaceMode=reset to switch it explicitly to {config.root}" }
     | none =>
         if mode == .verify then
-          pure <| errorResponseFor .invalidParams
-            s!"workspace '{workspaceId}' is not initialized; use workspaceMode=set first"
+          { state, result := .error <| responseFailureFor .invalidParams <|
+              s!"workspace '{workspaceId}' is not initialized; use workspaceMode=set first" }
         else if let some otherId := duplicateRootWorkspace? state workspaceId config then
-          pure <| errorResponseFor .invalidParams <|
-            s!"workspace root {config.root} is already owned by workspace '{otherId}'"
+          { state, result := .error <| responseFailureFor .invalidParams <|
+              s!"workspace root {config.root} is already owned by workspace '{otherId}'" }
         else
-          modify fun state => setWorkspace state workspaceId (mkWorkspaceState config)
-          pure <| Response.success <| toJson <|
-            workspaceInitResult workspaceId config.root mode false false
+          {
+            state := setWorkspace state workspaceId (mkWorkspaceState config)
+            result := .ok <| workspaceInitResult workspaceId config.root mode false false
+          }
+
+private def dropWorkspaceTransition
+    (state : State)
+    (workspaceId : WorkspaceId) : WorkspaceTransition Beam.Workspace.DropResult :=
+  if !validWorkspaceId workspaceId then
+    { state, result := .error <| responseFailureFor .invalidParams
+        "workspace id must be non-empty" }
+  else
+    match getWorkspace? state workspaceId with
+    | none =>
+        { state, result := .ok {
+            workspaceId
+            dropped := false
+            reason? := some "notFound"
+          } }
+    | some workspace =>
+        let (_, detachedSessions) := detachWorkspaceSessions workspace
+        {
+          state := { state with workspaces := state.workspaces.erase workspaceId }
+          result := .ok {
+            workspaceId
+            dropped := true
+            invalidatedHandles := true
+          }
+          detachedSessions
+        }
+
+private def ServerRuntime.runWorkspaceTransition
+    (server : ServerRuntime)
+    (transition : State → WorkspaceTransition α) : IO (Except ResponseFailure α) := do
+  let transition ← server.withState do
+    let transition := transition (← get)
+    set transition.state
+    pure transition
+  for session in transition.detachedSessions do
+    shutdownSession session
+  pure transition.result
+
+/--
+Initialize, verify, or reset a workspace through a typed in-process boundary. Reset commits the new
+workspace ownership atomically, then drains any detached backend sessions outside the state mutex.
+-/
+def ServerRuntime.initWorkspaceWithConfig
+    (server : ServerRuntime)
+    (workspaceId : WorkspaceId)
+    (config : BrokerConfig)
+    (mode? : Option Beam.Workspace.InitMode := none) :
+    IO (Except ResponseFailure Beam.Workspace.InitResult) :=
+  server.runWorkspaceTransition fun state =>
+    initWorkspaceTransition state workspaceId config mode?
 
 private def workspaceListPayload (state : State) : Json :=
   toJson ({
@@ -1091,28 +1156,18 @@ private def workspaceListPayload (state : State) : Json :=
     } : Beam.Workspace.ListEntry)
   } : Beam.Workspace.ListResult)
 
+private def responseOfTypedResult [ToJson α] : Except ResponseFailure α → Response
+  | .ok result => Response.success (toJson result)
+  | .error failure => failure.toResponse
+
+/--
+Remove a workspace through a typed in-process boundary. The workspace is erased atomically before
+its detached backend sessions are drained outside the state mutex.
+-/
 def ServerRuntime.dropWorkspace
     (server : ServerRuntime)
-    (workspaceId : WorkspaceId) : IO Response := do
-  if !validWorkspaceId workspaceId then
-    return errorResponseFor .invalidParams "workspace id must be non-empty"
-  server.withState do
-    let state ← get
-    match getWorkspace? state workspaceId with
-    | none =>
-        pure <| Response.success <| toJson ({
-          workspaceId
-          dropped := false
-          reason? := some "notFound"
-        } : Beam.Workspace.DropResult)
-    | some workspace =>
-      shutdownWorkspaceSessions workspace
-      modify fun state => { state with workspaces := state.workspaces.erase workspaceId }
-      pure <| Response.success <| toJson ({
-        workspaceId
-        dropped := true
-        invalidatedHandles := true
-      } : Beam.Workspace.DropResult)
+    (workspaceId : WorkspaceId) : IO (Except ResponseFailure Beam.Workspace.DropResult) :=
+  server.runWorkspaceTransition fun state => dropWorkspaceTransition state workspaceId
 
 private def requestRecordsMetrics : Op → Bool
   | .cancel | .stats | .resetStats | .shutdown | .openDocs | .listWorkspaces => false
@@ -2243,14 +2298,14 @@ private def handleRequestIO
           match ← initWorkspaceConfigFromRequest server req with
           | .error failure => pure (failure.toResponse, false)
           | .ok config =>
-              let resp ← server.initWorkspaceWithConfig workspaceId config req.workspaceMode?
-              pure (resp, false)
+              let result ← server.initWorkspaceWithConfig workspaceId config req.workspaceMode?
+              pure (responseOfTypedResult result, false)
   | .dropWorkspace =>
       match req.requireWorkspaceId with
       | .error err => pure (errorResponseFor .invalidParams err, false)
       | .ok workspaceId =>
-          let resp ← server.dropWorkspace workspaceId
-          pure (resp, false)
+          let result ← server.dropWorkspace workspaceId
+          pure (responseOfTypedResult result, false)
   | .cancel =>
       let targetClientRequestId ←
         match req.cancelRequestIdArg with

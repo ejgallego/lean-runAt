@@ -156,6 +156,12 @@ admission handle. The CLI scopes those requests before sending them.
 `Beam.Broker.Op.workspaceScope` is the shared operation classification; CLI and test adapters should
 use it instead of maintaining their own operation lists.
 
+Treat `ServerRuntime.state` transactions as pure ownership transitions. Never perform process I/O
+while holding that mutex: reset, drop, and runtime close must detach backend sessions and commit the
+new workspace state atomically, then wait for or terminate the detached processes after releasing
+the mutex. This keeps teardown of one workspace from blocking state access for every other
+workspace.
+
 ## MCP Projection Changes
 
 MCP work should go through the shared Lean operation layer in
@@ -171,6 +177,9 @@ carry `{"workspace":{"root":"/absolute/project"}}`. Resolve it through
 broker cache key, and never store a current/default workspace in MCP protocol state. MCP server
 state owns only the optional shared `ServerRuntime`; workspace membership and canonical roots remain
 broker-owned and must be observed through typed broker queries rather than a transport-side mirror.
+In-process MCP lifecycle calls use the broker's typed `initWorkspaceWithConfig` and `dropWorkspace`
+results directly; do not route them through broker JSON dispatch and decode them back into the same
+types.
 
 The executable path is split into importable modules:
 
