@@ -300,7 +300,10 @@ inert after that lexical scope, including when a later request reuses the same c
 Keep ordinary daemon and CLI dispatch on
 `ServerRuntime.dispatchRequest`; transport layers must not mutate the active-request registry
 directly. Pending LSP requests must retain the same per-admission cancellation identity; after a
-handle has been validated, never fall back to matching a reusable client request ID.
+handle has been validated, never fall back to matching a reusable client request ID. Pass and await
+the `PendingRequest` as one value instead of separating its promise from its cancellation reference.
+Once that reference is marked, cancellation takes precedence over a concurrent backend failure;
+an already-completed backend success remains successful.
 
 `ServerRuntime.close` is the shared runtime teardown boundary. It closes admission, marks every
 admitted request for cancellation, shuts down backend sessions to unblock pending work, waits for

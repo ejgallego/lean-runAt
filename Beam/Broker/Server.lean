@@ -404,18 +404,17 @@ private def startWaitDiagnosticsWatchdog
             s!"waitForDiagnostics watchdog after {timeoutMs}ms: {label}"
       pure ()
 
-private def awaitPending (promise : IO.Promise (Except ResponseFailure PendingResult)) :
-    HandlerM PendingResult := do
-  requestArg (← liftHandlerIO <| PendingRequest.awaitOutcome promise)
+private def awaitPending (pending : PendingRequest) : HandlerM PendingResult := do
+  requestArg (← liftHandlerIO pending.awaitOutcome)
 
 private def awaitWaitForDiagnosticsBarrier
     (label : String)
-    (promise : IO.Promise (Except ResponseFailure PendingResult)) : HandlerM PendingResult := do
+    (pending : PendingRequest) : HandlerM PendingResult := do
   let doneRef ← liftHandlerIO <| IO.mkRef false
   liftHandlerIO <| startWaitDiagnosticsWatchdog label doneRef
   let outcome ← liftHandlerIO <| do
     try
-      let outcome ← PendingRequest.awaitOutcome promise
+      let outcome ← pending.awaitOutcome
       doneRef.set true
       pure outcome
     catch e =>
@@ -459,7 +458,7 @@ partial def sessionReaderLoop (session : Session) : IO Unit := do
         pure ()
     sessionReaderLoop session
   catch e =>
-    PendingRequestStore.failAllRespectingCancellation session.pending <| BrokerFailure.toResponseFailure {
+    PendingRequestStore.failAll session.pending <| BrokerFailure.toResponseFailure {
       code := .workerExited
       message := e.toString
     }
@@ -483,14 +482,14 @@ private def startRequestJsonTrackedDetailed
     (diagnosticScope : DiagnosticScope := .errors)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none)
     (cancelRef? : Option (IO.Ref Bool) := none) :
-    IO (Session × IO.Promise (Except ResponseFailure PendingResult)) := do
+    IO (Session × PendingRequest) := do
   let (session, id) := nextRequestId session
   let progressRef ← IO.mkRef (initialProgress? <|> tracked.map (fun _ => {}))
   let diagnosticsRef ← IO.mkRef #[]
   let diagnosticsSeenRef ← IO.mkRef false
   let seenDiagnosticKeysRef ← IO.mkRef ({} : Std.TreeSet String compare)
   let promise ← IO.Promise.new
-  PendingRequestStore.insert session.pending id {
+  let pending : PendingRequest := {
       cancelRef? := cancelRef?
       promise := promise
       tracked? := tracked
@@ -503,12 +502,13 @@ private def startRequestJsonTrackedDetailed
       emitDiagnostic? := emitDiagnostic?
       : PendingRequest
     }
+  PendingRequestStore.insert session.pending id pending
   traceBroker
     s!"lsp request inserted id={id} method={method} clientRequestId={optionLabel clientRequestId?} tracked={tracked.isSome}"
   try
     writeLspRequest session.stdin ({ id, method, param : Lean.JsonRpc.Request Json })
     traceBroker s!"lsp request sent id={id} method={method}"
-    pure (session, promise)
+    pure (session, pending)
   catch e =>
     discard <| PendingRequestStore.remove session.pending id
     traceBroker s!"lsp request send failed id={id} method={method} error={e.toString}"
@@ -529,10 +529,10 @@ def sendRequestJsonTrackedDetailed
     (diagnosticScope : DiagnosticScope := .errors)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
     IO (Except ResponseFailure (Session × Json × Option SyncFileProgress × Array Diagnostic)) := do
-  let (session, promise) ←
+  let (session, pending) ←
     startRequestJsonTrackedDetailed session method param clientRequestId? tracked initialProgress?
       emitProgress? diagnosticScope emitDiagnostic?
-  match ← PendingRequest.awaitOutcome promise with
+  match ← pending.awaitOutcome with
   | .ok pending => pure <| .ok (session, pending.result, pending.progress?, pending.diagnostics)
   | .error failure => pure <| .error failure
 
@@ -1255,7 +1255,7 @@ private structure StartedSyncedRequest where
   version : Nat
   priorProgress? : Option SyncFileProgress := none
   tracked : Option (DocumentUri × Nat) := none
-  promise : IO.Promise (Except ResponseFailure PendingResult)
+  pending : PendingRequest
 
 private def trackedDocumentVersion (uri : DocumentUri) (docState : DocState) :
     Option (DocumentUri × Nat) :=
@@ -1305,7 +1305,7 @@ private def startSyncedDocumentRequest
       pure ()
   let tracked := trackedFor uri docState
   let params := mkParams uri docState
-  let (session, promise) ←
+  let (session, pending) ←
     startRequestJsonTrackedDetailed session method params
       (clientRequestId? := clientRequestId?)
       (tracked := tracked)
@@ -1321,7 +1321,7 @@ private def startSyncedDocumentRequest
     version := docState.version
     priorProgress? := docState.fileProgress?
     tracked
-    promise
+    pending
   }
 
 private def awaitSyncedDocumentRequest
@@ -1329,7 +1329,7 @@ private def awaitSyncedDocumentRequest
     (started : StartedSyncedRequest)
     (cancelRef? : Option (IO.Ref Bool) := none) : HandlerM PendingResult := do
   liftHandlerIO <| propagatePendingCancellation started.session cancelRef?
-  let pending ← awaitPending started.promise
+  let pending ← awaitPending started.pending
   if started.tracked.isSome then
     withFailureProgress pending.progress? <|
       liftHandlerIO <| mergeFileProgressIfCurrent server started.session started.uri pending.progress?
@@ -1358,7 +1358,7 @@ private structure StartedTrackedBarrier where
   textMTime : Lake.MTime
   changed : Bool := false
   priorProgress? : Option SyncFileProgress := none
-  promise : IO.Promise (Except ResponseFailure PendingResult)
+  pending : PendingRequest
 
 private def startTrackedDiagnosticsBarrierIO
     (server : ServerRuntime)
@@ -1378,7 +1378,7 @@ private def startTrackedDiagnosticsBarrierIO
     let tracked := trackedDocumentVersion uri docState
     let params := toJson (WaitForDiagnosticsParams.mk uri docState.version)
     let method ← IO.ofExcept <| diagnosticsBarrierMethod session.backend
-    let (session, promise) ←
+    let (session, pending) ←
       startRequestJsonTrackedDetailed session method params
         (clientRequestId? := req.clientRequestId?)
         (tracked := tracked)
@@ -1397,7 +1397,7 @@ private def startTrackedDiagnosticsBarrierIO
       textMTime := docState.textMTime
       changed := synced.changed
       priorProgress? := docState.fileProgress?
-      promise
+      pending
     }
 
 private def finalizeSavedDoc
@@ -1548,7 +1548,7 @@ private def saveOleanCore
   liftHandlerIO <| propagatePendingCancellation started.session cancelRef?
   let barrier ← awaitWaitForDiagnosticsBarrier
     s!"save_olean sync barrier clientRequestId={optionLabel req.clientRequestId?} uri={started.uri} version={started.version}"
-    started.promise
+    started.pending
   let barrierResult : DiagnosticsBarrierResult ←
     withFailureProgress barrier.progress? <| liftHandlerIO <| decodeResponseAs barrier.result
   if barrierResult.version != started.version then
@@ -1616,18 +1616,18 @@ private def saveOleanCore
   -- Once artifact publication can begin, an older trace must not remain visible: it may have the
   -- same dependency hash while describing a different in-server artifact family.
   withFailureProgress barrierProgress? <| liftHandlerIO <| invalidateLeanSaveTrace spec
-  let (session, savePromise) ← withFailureProgress barrierProgress? <|
+  let (session, saveRequest) ← withFailureProgress barrierProgress? <|
     withCurrentMatchingSession server started.session fun current => do
-      let (current, savePromise) ← startRequestJsonTrackedDetailed current method params
+      let (current, saveRequest) ← startRequestJsonTrackedDetailed current method params
         (clientRequestId? := req.clientRequestId?)
         (cancelRef? := cancelRef?)
       updateSession current
-      pure (current, savePromise)
+      pure (current, saveRequest)
   withFailureProgress barrierProgress? <|
     liftHandlerIO <| propagatePendingCancellation session cancelRef?
   let savePending ←
     match ← withFailureProgress barrierProgress? <|
-        liftHandlerIO <| PendingRequest.awaitOutcome savePromise with
+        liftHandlerIO saveRequest.awaitOutcome with
     | .ok pending => pure pending
     | .error failure =>
         throw <| ({
@@ -1693,7 +1693,7 @@ private def handleSyncFileOp
   liftHandlerIO <| propagatePendingCancellation started.session cancelRef?
   let pending ← awaitWaitForDiagnosticsBarrier
     s!"sync_file clientRequestId={optionLabel req.clientRequestId?} uri={started.uri} version={started.version}"
-    started.promise
+    started.pending
   liftHandlerIO <| traceBroker
     s!"sync_file barrier completed clientRequestId={optionLabel req.clientRequestId?} progress={pending.progress?.isSome} diagnostics={pending.diagnostics.size} diagnosticsSeen={pending.diagnosticsSeen}"
   let barrierResult : DiagnosticsBarrierResult ←
@@ -1943,16 +1943,16 @@ private def handleWorkspaceSymbolsOp
     HandlerM (Response × Bool) := do
   let args ← requestArg req.workspaceSymbolsArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
-  let (session, promise) ← liftHandlerIO <| server.withState do
+  let (session, request) ← liftHandlerIO <| server.withState do
     let session ← ensureSession req.workspaceId req.backend
     let params := toJson ({ query := args.query : WorkspaceSymbolParams })
-    let (session, promise) ← startRequestJsonTrackedDetailed session args.method params
+    let (session, request) ← startRequestJsonTrackedDetailed session args.method params
       (clientRequestId? := req.clientRequestId?)
       (cancelRef? := cancelRef?)
     updateSession session
-    pure (session, promise)
+    pure (session, request)
   liftHandlerIO <| propagatePendingCancellation session cancelRef?
-  let pending ← awaitPending promise
+  let pending ← awaitPending request
   pure (Response.success pending.result, false)
 
 private def codeActionResolveSourceUri

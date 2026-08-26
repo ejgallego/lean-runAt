@@ -96,11 +96,34 @@ def resolveError
   catch _ =>
     pure ()
 
-def awaitOutcome (promise : IO.Promise (Except ResponseFailure PendingResult)) :
-    IO (Except ResponseFailure PendingResult) := do
-  let some result ← IO.wait promise.result?
+/-- Give an already-marked broker cancellation precedence over a concurrent backend failure. -/
+private def failureRespectingCancellation
+    (cancelRef? : Option (IO.Ref Bool))
+    (fallback : ResponseFailure) : IO ResponseFailure := do
+  let cancelled ←
+    match cancelRef? with
+    | some cancelRef => cancelRef.get
+    | none => pure false
+  if cancelled then
+    pure <|
+      (responseFailureFor .requestCancelled
+        "request was cancelled before its backend failure was observed")
+      |>.withOptionalFileProgress fallback.fileProgress?
+  else
+    pure fallback
+
+/--
+Await the pending request, giving its already-marked cancellation identity precedence over a
+concurrent backend failure while preserving observations attached to that failure. A completed
+backend success remains successful.
+-/
+def awaitOutcome (pending : PendingRequest) : IO (Except ResponseFailure PendingResult) := do
+  let some outcome ← IO.wait pending.promise.result?
     | throw <| IO.userError "pending broker request promise dropped"
-  pure result
+  match outcome with
+  | .ok result => pure (.ok result)
+  | .error failure =>
+      pure (.error (← failureRespectingCancellation pending.cancelRef? failure))
 
 private def normalizePublishDiagnostics (params : PublishDiagnosticsParams) :
     PublishDiagnosticsParams := {
@@ -269,22 +292,10 @@ end PendingRequest
 
 namespace PendingRequestStore
 
-/-- Fail every pending request, giving an already-marked cancellation token precedence. -/
-def failAllRespectingCancellation
-    (store : PendingRequestStore)
-    (fallback : ResponseFailure) : IO Unit := do
+def failAll (store : PendingRequestStore) (failure : ResponseFailure) : IO Unit := do
   let pending ← clear store
   for req in pending do
     let progress? ← req.progressRef.get
-    let cancelled ←
-      match req.cancelRef? with
-      | some cancelRef => cancelRef.get
-      | none => pure false
-    let failure :=
-      if cancelled then
-        responseFailureFor .requestCancelled "request was cancelled while its backend session closed"
-      else
-        fallback
     let failure := failure.withOptionalFileProgress progress?
     try
       req.promise.resolve (.error failure)

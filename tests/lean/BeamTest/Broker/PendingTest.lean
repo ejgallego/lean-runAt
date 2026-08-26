@@ -29,14 +29,13 @@ private def mkPending
     (tracked? : Option (DocumentUri × Nat) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
     (diagnosticScope : DiagnosticScope := .errors)
-    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
-    IO (PendingRequest × IO.Promise (Except ResponseFailure PendingResult)) := do
+    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO PendingRequest := do
   let promise ← IO.Promise.new
   let progressRef ← IO.mkRef progress?
   let diagnosticsRef ← IO.mkRef #[]
   let diagnosticsSeenRef ← IO.mkRef false
   let seenDiagnosticKeysRef ← IO.mkRef ({} : Std.TreeSet String compare)
-  pure ({
+  pure {
     cancelRef?
     promise
     tracked?
@@ -47,7 +46,7 @@ private def mkPending
     emitProgress?
     diagnosticScope
     emitDiagnostic?
-  }, promise)
+  }
 
 private def expectRegistered
     (label : String)
@@ -161,8 +160,8 @@ private def checkPendingCancellationIdentity : IO Unit := do
   ActiveRequestRegistry.unregister registry (some first)
   let replacementResult ← ActiveRequestRegistry.register registry (some "reused-id")
   let replacement ← expectRegistered "register replacement cancellation identity" replacementResult
-  let (firstPending, _) ← mkPending (cancelRef? := some first.cancelRef)
-  let (replacementPending, _) ← mkPending (cancelRef? := some replacement.cancelRef)
+  let firstPending ← mkPending (cancelRef? := some first.cancelRef)
+  let replacementPending ← mkPending (cancelRef? := some replacement.cancelRef)
   require "first admission matches its pending request"
     (← PendingRequestStore.matchesCancellation firstPending first.cancelRef)
   require "first admission does not match replacement pending request"
@@ -175,7 +174,7 @@ private def checkPendingCancellationIdentity : IO Unit := do
 
 private def checkPendingStoreResolve : IO Unit := do
   let store ← PendingRequestStore.create
-  let (pending, promise) ← mkPending
+  let pending ← mkPending
     (progress? := some { updates := 3, done := false })
   let id : RequestID := 7
   PendingRequestStore.insert store id pending
@@ -185,7 +184,7 @@ private def checkPendingStoreResolve : IO Unit := do
     | throw <| IO.userError "pending store remove missed inserted request"
   PendingRequest.resolveResponse pending (Json.mkObj [("value", toJson true)])
   let result ←
-    match ← PendingRequest.awaitOutcome promise with
+    match ← pending.awaitOutcome with
     | .ok result => pure result
     | .error failure =>
         throw <| IO.userError
@@ -198,44 +197,85 @@ private def checkPendingStoreResolve : IO Unit := do
   require "pending store is empty after remove"
     ((← PendingRequestStore.snapshot store).isEmpty)
 
-private def checkPendingStoreFailAllRespectingCancellation : IO Unit := do
+private def checkPendingStoreFailAll : IO Unit := do
   let store ← PendingRequestStore.create
   let firstProgress : SyncFileProgress := { updates := 5, done := false }
   let secondProgress : SyncFileProgress := { updates := 8, done := true }
   let cancelRef ← IO.mkRef true
-  let (firstPending, firstPromise) ← mkPending
+  let firstPending ← mkPending
     (progress? := some firstProgress) (cancelRef? := some cancelRef)
-  let (secondPending, secondPromise) ← mkPending (progress? := some secondProgress)
+  let secondPending ← mkPending (progress? := some secondProgress)
   PendingRequestStore.insert store 11 firstPending
   PendingRequestStore.insert store 12 secondPending
-  PendingRequestStore.failAllRespectingCancellation store
+  PendingRequestStore.failAll store
     (responseFailureFor .workerExited "worker exited")
-  for (label, promise, expectedCode, expectedProgress) in #[
-      ("cancelled", firstPromise, "requestCancelled", firstProgress),
-      ("worker-exited", secondPromise, "workerExited", secondProgress)
+  for (label, pending, expectedCode, expectedProgress) in #[
+      ("cancelled", firstPending, "requestCancelled", firstProgress),
+      ("worker-exited", secondPending, "workerExited", secondProgress)
     ] do
-    match ← PendingRequest.awaitOutcome promise with
+    match ← pending.awaitOutcome with
     | .ok _ =>
         throw <| IO.userError
-          s!"failAllRespectingCancellation resolves {label} pending request as an error: expected error"
+          s!"failAll resolves {label} pending request as an error: expected error"
     | .error failure =>
         discard <| requireFailureCode
-          s!"failAllRespectingCancellation resolves {label} pending request as an error"
+          s!"failAll resolves {label} pending request as an error"
           expectedCode failure
-        require s!"failAllRespectingCancellation preserves {label} pending request progress"
+        require s!"failAll preserves {label} pending request progress"
           (failure.fileProgress? == some expectedProgress)
-  require "failAllRespectingCancellation clears pending store"
+  require "failAll clears pending store"
     ((← PendingRequestStore.snapshot store).isEmpty)
+
+private def checkPendingOutcomeCancellationPrecedence : IO Unit := do
+  let progress : SyncFileProgress := { updates := 13, done := true }
+  let backendFailure :=
+    (responseFailureFor .contentModified "backend worker terminated")
+      |>.withOptionalFileProgress (some progress)
+  let cancelRef ← IO.mkRef true
+  let cancelledPending ← mkPending (cancelRef? := some cancelRef)
+  cancelledPending.promise.resolve (.error backendFailure)
+  match ← cancelledPending.awaitOutcome with
+  | .ok _ =>
+      throw <| IO.userError "cancelled pending backend failure resolved as a success"
+  | .error failure =>
+      discard <| requireFailureCode
+        "marked cancellation takes precedence over a backend failure"
+        "requestCancelled"
+        failure
+      require "cancellation precedence preserves backend failure progress"
+        (failure.fileProgress? == some progress)
+
+  cancelRef.set false
+  let backendFailurePending ← mkPending (cancelRef? := some cancelRef)
+  backendFailurePending.promise.resolve (.error backendFailure)
+  match ← backendFailurePending.awaitOutcome with
+  | .ok _ =>
+      throw <| IO.userError "uncancelled pending backend failure resolved as a success"
+  | .error failure =>
+      discard <| requireFailureCode
+        "backend failure remains authoritative without cancellation"
+        "contentModified"
+        failure
+
+  cancelRef.set true
+  let successPending ← mkPending (cancelRef? := some cancelRef)
+  successPending.promise.resolve (.ok { result := Json.mkObj [("completed", toJson true)] })
+  match ← successPending.awaitOutcome with
+  | .error failure =>
+      throw <| IO.userError
+        s!"completed backend success lost to later cancellation: {(toJson failure.toResponse).compress}"
+  | .ok result =>
+      requireJsonBool "completed backend success remains authoritative" "completed" true result.result
 
 private def checkPendingResolveError : IO Unit := do
   let expectedProgress : SyncFileProgress := { updates := 4, done := false }
-  let (pending, promise) ← mkPending (progress? := some expectedProgress)
+  let pending ← mkPending (progress? := some expectedProgress)
   let data := Json.mkObj [
     ("expectedVersion", toJson (4 : Nat)),
     ("acceptedVersion", toJson (5 : Nat))
   ]
   PendingRequest.resolveError pending .contentModified "document changed" (some data)
-  match ← PendingRequest.awaitOutcome promise with
+  match ← pending.awaitOutcome with
   | .ok _ =>
       throw <| IO.userError "pending typed error resolved as a success"
   | .error failure =>
@@ -286,7 +326,7 @@ private def mkPublishDiagnostics (diagnostics : Array Diagnostic) : PublishDiagn
 private def observeFileProgress
     (progress : SyncFileProgress)
     (ranges : Array Range) : IO SyncFileProgress := do
-  let (pending, _) ← mkPending
+  let pending ← mkPending
     (progress? := some progress)
     (tracked? := some ("file:///workspace/Foo.lean", 1))
   PendingRequest.observeProgress pending (mkFileProgress ranges)
@@ -354,7 +394,7 @@ private def checkDiagnosticLineCanExceedProgressRange : IO Unit := do
     })
 
   let farDiagnostic := mkDiagnostic (mkRange 20 2 20 8) "diagnostic beyond progress range"
-  let (pending, _) ← mkPending
+  let pending ← mkPending
     (progress? := some finished)
     (tracked? := some ("file:///workspace/Foo.lean", 1))
   PendingRequest.observeDiagnostics
@@ -373,7 +413,7 @@ private def observeStreamedDiagnostics
     (diagnosticScope : DiagnosticScope)
     (diagnostics : Array Diagnostic) : IO (Array StreamDiagnostic) := do
   let streamedRef ← IO.mkRef #[]
-  let (pending, _) ← mkPending
+  let pending ← mkPending
     (tracked? := some ("file:///workspace/Foo.lean", 1))
     (diagnosticScope := diagnosticScope)
     (emitDiagnostic? := some fun diagnostic =>
@@ -386,7 +426,7 @@ private def observeStreamedDiagnostics
 
 private def checkDiagnosticEmitterFailureIsolation : IO Unit := do
   let diagnostic := mkDiagnostic (mkRange 1 0 1 4) "stream consumer disconnected"
-  let (pending, _) ← mkPending
+  let pending ← mkPending
     (tracked? := some ("file:///workspace/Foo.lean", 1))
     (diagnosticScope := .all)
     (emitDiagnostic? := some fun _ =>
@@ -401,7 +441,7 @@ private def checkDiagnosticEmitterFailureIsolation : IO Unit := do
     ((← pending.diagnosticsRef.get).map (·.message) == #[diagnostic.message])
 
 private def checkProgressEmitterFailureIsolation : IO Unit := do
-  let (pending, _) ← mkPending
+  let pending ← mkPending
     (progress? := some {})
     (tracked? := some ("file:///workspace/Foo.lean", 1))
     (emitProgress? := some fun _ =>
@@ -449,7 +489,8 @@ def main : IO Unit := do
   checkActiveRegistryCloseDrain
   checkPendingCancellationIdentity
   checkPendingStoreResolve
-  checkPendingStoreFailAllRespectingCancellation
+  checkPendingStoreFailAll
+  checkPendingOutcomeCancellationPrecedence
   checkPendingResolveError
   checkSyncFileProgressDisplay
   checkSyncFileProgressLines
