@@ -792,6 +792,10 @@ private def checkWorkspaceLifecycleProtocol : IO Unit := do
 
   let runtime ← Beam.Broker.ServerRuntime.create
     ({ root } : Beam.Broker.BrokerConfig) "fixture"
+  require "broker workspace query should expose the constructor workspace"
+    ((← runtime.workspaceRoot? "fixture") == some root)
+  require "broker workspace query should reject an unknown workspace"
+    ((← runtime.workspaceRoot? "unknown") == none)
   for op in #[Op.ensure, .initWorkspace, .dropWorkspace] do
     let (missingWorkspaceResp, _) ← runtime.dispatchRequest { op }
     require s!"{op.key} should reject omitted workspace identity"
@@ -861,6 +865,10 @@ private def checkWorkspaceLifecycleProtocol : IO Unit := do
     fromJson? (α := Beam.Workspace.DropResult) dropJson
   require "typed workspace drop preserves lifecycle state"
     (decodedDrop.workspaceId == "fixture" && decodedDrop.dropped && decodedDrop.invalidatedHandles)
+  let dropResp ← runtime.dropWorkspace "fixture"
+  require "broker workspace drop should succeed" dropResp.ok
+  require "broker workspace query should observe a dropped workspace"
+    ((← runtime.workspaceRoot? "fixture") == none)
 
 private partial def waitForCancellation
     (cancelRef : IO.Ref Bool)

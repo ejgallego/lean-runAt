@@ -856,11 +856,8 @@ private def checkModernProtocol : IO Unit := do
   requireModernResultEnvelope "modern confidential beam_feedback_report result" feedbackResult
   requireConfidentialFeedbackResult "modern confidential beam_feedback_report" confidentialSecret
     feedbackResult
-  let stateAfterFeedback ← state.applicationState
   require "modern beam_feedback_report should not create a broker runtime"
-    stateAfterFeedback.runtime?.isNone
-  require "modern beam_feedback_report should not create a workspace cache"
-    stateAfterFeedback.workspaces.toList.isEmpty
+    (← state.runtime?).isNone
 
   let preservedMetaResult := Beam.Mcp.modernResult <| Json.mkObj [
     ("_meta", Json.mkObj [("example.test/value", toJson "preserved")])
@@ -1166,11 +1163,8 @@ private def checkServerBasics : IO Unit := do
   requireConfidentialFeedbackResult "beam feedback confidential" confidentialSecret
     feedbackConfidentialResult
 
-  let stateAfterFeedback ← state.applicationState
   require "beam_feedback_report should not create a broker runtime"
-    stateAfterFeedback.runtime?.isNone
-  require "beam_feedback_report should not create a workspace cache"
-    stateAfterFeedback.workspaces.toList.isEmpty
+    (← state.runtime?).isNone
 
   let uncachedDropResp ← handleRpcRequest state opts "drop uncached workspace" 24 "tools/call" <|
     some <| toolCallParams "lean_drop_workspace" <| withWorkspace root (Json.mkObj [])
@@ -1188,11 +1182,8 @@ private def checkServerBasics : IO Unit := do
     uncachedDropStructured
   requireJsonString "drop uncached workspace structured result" "reason" "notFound"
     uncachedDropStructured
-  let stateAfterUncachedDrop ← state.applicationState
   require "dropping an uncached workspace should not create a broker runtime"
-    stateAfterUncachedDrop.runtime?.isNone
-  require "dropping an uncached workspace should not create a workspace cache"
-    stateAfterUncachedDrop.workspaces.toList.isEmpty
+    (← state.runtime?).isNone
 
   let rawToolResp ← handleRpcRequest state opts "raw tool rejection" 3 "tools/call" <|
     some <| toolCallParams Beam.LSP.RunAt.method
@@ -1407,10 +1398,10 @@ private def callLeanSync
     some <| toolCallParams "lean_sync" arguments
 
 private def shutdownMcpRuntime (state : Beam.Mcp.Server.ServerState) : IO Unit := do
-  match (← state.applicationState).runtime? with
+  match ← state.runtime? with
   | none => pure ()
   | some runtime =>
-      discard <| runtime.dispatchRequest { op := .shutdown }
+      discard <| runtime.close
 
 private def checkIdempotentLifecycleTools : IO Unit := do
   let root ← mkTempProjectRoot "lean-beam-mcp-idempotent-lifecycle"
@@ -1426,6 +1417,12 @@ private def checkIdempotentLifecycleTools : IO Unit := do
     let syncResp ← callLeanSync state opts notifications root 2 "SaveSmoke/B.lean"
     let syncResult ← requireObjVal "lifecycle lean_sync response" "result" syncResp
     requireJsonBool "lifecycle lean_sync result" "isError" false syncResult
+    let canonicalRoot ← Beam.resolveExistingPath root
+    let workspaceId := (Beam.Workspace.Descriptor.ofRoot canonicalRoot).cacheKey
+    let some runtime ← state.runtime?
+      | throw <| IO.userError "lifecycle lean_sync did not create a broker runtime"
+    require "MCP lifecycle should read workspace ownership from the broker"
+      ((← runtime.workspaceRoot? workspaceId) == some canonicalRoot)
 
     for (id, label) in #[(3, "first"), (4, "repeated")] do
       let closeResp ← handleRpcRequestWithNotifications state opts notifications
@@ -1449,6 +1446,8 @@ private def checkIdempotentLifecycleTools : IO Unit := do
     requireJsonBool "first lean_drop_workspace structured result" "dropped" true firstDropStructured
     requireJsonBool "first lean_drop_workspace structured result" "invalidated_handles" true
       firstDropStructured
+    require "MCP workspace drop should update broker-owned workspace state"
+      ((← runtime.workspaceRoot? workspaceId) == none)
 
     let repeatedDropResp ← handleRpcRequestWithNotifications state opts notifications
       "repeated lean drop workspace" 6 "tools/call" <|

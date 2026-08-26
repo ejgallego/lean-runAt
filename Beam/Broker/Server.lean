@@ -908,6 +908,13 @@ def ServerRuntime.withState (server : ServerRuntime) (act : M α) : IO α := do
     set state
     pure a
 
+/-- Return the canonical root currently owned by `workspaceId`, if that workspace exists. -/
+def ServerRuntime.workspaceRoot?
+    (server : ServerRuntime)
+    (workspaceId : WorkspaceId) : IO (Option System.FilePath) := do
+  server.withState do
+    pure <| (getWorkspace? (← get) workspaceId).map (·.config.root)
+
 private def ServerRuntime.statsResponse
     (server : ServerRuntime)
     (workspaceId? : Option WorkspaceId := none) : IO Response := do

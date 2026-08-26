@@ -44,33 +44,21 @@ inductive ProtocolState where
   | modern
   deriving Repr
 
-structure ApplicationState where
-  workspaces : Std.TreeMap Beam.Broker.WorkspaceId System.FilePath := {}
-  runtime? : Option Beam.Broker.ServerRuntime := none
-
 structure ServerState where
   protocol : Std.Mutex ProtocolState
-  application : IO.Ref ApplicationState
+  private runtime : IO.Ref (Option Beam.Broker.ServerRuntime)
 
 def ServerState.create : IO ServerState := do
   pure {
     protocol := ← Std.Mutex.new .undecided
-    application := ← IO.mkRef {}
+    runtime := ← IO.mkRef none
   }
 
 def ServerState.protocolState (state : ServerState) : IO ProtocolState :=
   state.protocol.atomically get
 
-def ServerState.applicationState (state : ServerState) : IO ApplicationState :=
-  state.application.get
-
-private def ApplicationState.trackWorkspace
-    (state : ApplicationState)
-    (workspaceId : Beam.Broker.WorkspaceId)
-    (root : System.FilePath) : ApplicationState := {
-  state with
-  workspaces := state.workspaces.insert workspaceId root
-}
+def ServerState.runtime? (state : ServerState) : IO (Option Beam.Broker.ServerRuntime) :=
+  state.runtime.get
 
 structure NotificationSink where
   send : Json → IO Unit := fun _ => pure ()
@@ -468,13 +456,11 @@ private def createRuntimeForRoot
       | .error err => pure <| .error err
 
 private def ensureBrokerWorkspace
-    (state : ServerState)
     (opts : Options)
     (runtime : Beam.Broker.ServerRuntime)
     (workspaceId : Beam.Broker.WorkspaceId)
     (root : System.FilePath) : IO (Except RpcError System.FilePath) := do
-  let application ← state.applicationState
-  match application.workspaces.get? workspaceId with
+  match ← runtime.workspaceRoot? workspaceId with
   | some trackedRoot =>
       if trackedRoot == root then
         pure <| .ok root
@@ -487,10 +473,7 @@ private def ensureBrokerWorkspace
       | .ok config =>
           let brokerResp ← runtime.initWorkspaceWithConfig workspaceId config (some .set)
           match brokerResp with
-          | .successResult .. =>
-              state.application.modify fun application =>
-                application.trackWorkspace workspaceId config.root
-              pure <| .ok config.root
+          | .successResult .. => pure <| .ok config.root
           | .errorResult failure =>
               pure <| .error <| RpcError.invalidRequest failure.error.message
 
@@ -501,20 +484,16 @@ private def ensureRuntimeForWorkspace
     (workspaceId : Beam.Broker.WorkspaceId)
     (root : System.FilePath) : IO (Except RpcError (Beam.Broker.ServerRuntime × System.FilePath)) := do
   setupMutex.atomically do
-    let application ← state.applicationState
-    match application.runtime? with
+    match ← state.runtime? with
     | some runtime =>
-        match ← ensureBrokerWorkspace state opts runtime workspaceId root with
+        match ← ensureBrokerWorkspace opts runtime workspaceId root with
         | .ok canonicalRoot => pure <| .ok (runtime, canonicalRoot)
         | .error err => pure <| .error err
     | none =>
         match ← createRuntimeForRoot opts workspaceId root with
         | .error err => pure <| .error err
         | .ok (runtime, canonicalRoot) =>
-            state.application.modify fun application => {
-              application.trackWorkspace workspaceId canonicalRoot with
-              runtime? := some runtime
-            }
+            state.runtime.set (some runtime)
             pure <| .ok (runtime, canonicalRoot)
 
 private def workspaceErrorToToolError (err : Beam.Workspace.RootError) : ToolError :=
@@ -572,7 +551,7 @@ private def decodeBeamStatsResult (json : Json) : Except String BeamStatsResult 
 private def handleBeamStats
     (state : ServerState) : IO Json := do
   let runtime ←
-    match (← state.applicationState).runtime? with
+    match ← state.runtime? with
     | some runtime => pure runtime
     | none =>
         return callToolResult <| Json.mkObj [
@@ -598,12 +577,6 @@ private def handleBeamStats
 private def handleDropWorkspace
     (state : ServerState)
     (workspace : ResolvedWorkspace) : IO Json := do
-  let application ← state.applicationState
-  let updateTrackedState : IO Unit :=
-    state.application.modify fun application => {
-      application with
-      workspaces := application.workspaces.erase workspace.workspaceId
-    }
   let resultJson (dropped invalidatedHandles : Bool) (reason? : Option String := none) : Json :=
     Json.mkObj <| [
       ("workspace", toJson workspace.descriptor),
@@ -612,7 +585,7 @@ private def handleDropWorkspace
     ] ++ match reason? with
       | some reason => [("reason", toJson reason)]
       | none => []
-  match application.runtime? with
+  match ← state.runtime? with
   | none =>
       pure <| callToolResult <| resultJson false false (some "notFound")
   | some runtime =>
@@ -624,8 +597,6 @@ private def handleDropWorkspace
       | .successResult payload .. =>
           match fromJson? (α := Beam.Workspace.DropResult) payload with
           | .ok dropped =>
-              if dropped.dropped then
-                updateTrackedState
               pure <| callToolResult <|
                 resultJson dropped.dropped dropped.invalidatedHandles dropped.reason?
           | .error err =>
@@ -664,8 +635,7 @@ def Internal.serverVersionText (opts : Options) : IO String := do
 private def handleBeamVersion
     (state : ServerState)
     (opts : Options) : IO Json := do
-  let application ← state.applicationState
-  let identity ← serverIdentity opts none (some application.runtime?.isSome)
+  let identity ← serverIdentity opts none (some (← state.runtime?).isSome)
   pure <| callToolResult identity.asJson
 
 private def collectFeedbackRuntimePayload
@@ -850,12 +820,14 @@ def Internal.handleToolCall
   if params.name == .beamFeedbackReport then
     let reporter ← CallReporter.create notifier req.id params progress?
     try
-      let application ← state.applicationState
-      let selectedRuntime? :=
-        if application.workspaces.get? workspace.workspaceId == some workspace.root then
-          application.runtime?
-        else
-          none
+      let selectedRuntime? ←
+        match ← state.runtime? with
+        | none => pure none
+        | some runtime =>
+            if (← runtime.workspaceRoot? workspace.workspaceId) == some workspace.root then
+              pure (some runtime)
+            else
+              pure none
       let result ← handleBeamFeedback opts workspace.descriptor workspace.workspaceId
         workspace.root selectedRuntime? params.arguments progress?
       Internal.traceMcp s!"tools/call feedback complete id={req.id.label} tool={params.name.key}"

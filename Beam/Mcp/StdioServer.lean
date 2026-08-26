@@ -311,8 +311,7 @@ private def Coordinator.closeTransport (coordinator : Coordinator) : IO Unit := 
   coordinator.awaitRequests requests
   unless alreadyClosing do
     coordinator.setupMutex.atomically do
-      let application ← coordinator.state.applicationState
-      match application.runtime? with
+      match ← coordinator.state.runtime? with
       | none => pure ()
       | some runtime =>
           discard <| runtime.close

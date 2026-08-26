@@ -168,7 +168,9 @@ The local descriptor lives in
 [Beam/Workspace/Protocol.lean](../Beam/Workspace/Protocol.lean). Every workspace-bound request must
 carry `{"workspace":{"root":"/absolute/project"}}`. Resolve it through
 [Beam/Lean/Workspace.lean](../Beam/Lean/Workspace.lean), canonicalize it before deriving the private
-broker cache key, and never store a current/default workspace in MCP protocol state.
+broker cache key, and never store a current/default workspace in MCP protocol state. MCP server
+state owns only the optional shared `ServerRuntime`; workspace membership and canonical roots remain
+broker-owned and must be observed through typed broker queries rather than a transport-side mirror.
 
 The executable path is split into importable modules:
 
