@@ -35,6 +35,11 @@ structure RegistryEntry where
   requestedPort? : Option Nat := none
   deriving FromJson, ToJson
 
+def RegistryEntry.identity (entry : RegistryEntry) : DaemonIdentity := {
+  daemonId := entry.daemonId
+  configHash := entry.configHash
+}
+
 structure DesiredConfig where
   root : System.FilePath
   leanCmd? : Option String := none
@@ -61,21 +66,32 @@ def endpointFromEntry (entry : RegistryEntry) : IO Transport.Endpoint := do
 def endpointSummary (endpoint : Transport.Endpoint) : String :=
   Transport.endpointDescription endpoint
 
-private def statsRoot? (resp : Response) : Option String := do
-  let result ← resp.result?
-  result.getObjValAs? String "root" |>.toOption
+private structure DaemonProbe where
+  root : String
+  identity? : Option DaemonIdentity
 
-def daemonRoot?
+private def daemonProbeOfResponse? (resp : Response) : Option DaemonProbe := do
+  let result ← resp.result?
+  let root ← result.getObjValAs? String "root" |>.toOption
+  let identity? := result.getObjValAs? DaemonIdentity "daemonIdentity" |>.toOption
+  pure { root, identity? }
+
+private def daemonProbe?
     (endpoint : Transport.Endpoint)
-    (workspaceId : WorkspaceId) : IO (Option String) := do
+    (workspaceId : WorkspaceId) : IO (Option DaemonProbe) := do
   try
     let resp ← sendRequest endpoint { op := .stats, workspaceId? := some workspaceId }
     if resp.ok then
-      pure (statsRoot? resp)
+      pure (daemonProbeOfResponse? resp)
     else
       pure none
   catch _ =>
     pure none
+
+def daemonRoot?
+    (endpoint : Transport.Endpoint)
+    (workspaceId : WorkspaceId) : IO (Option String) := do
+  pure <| (← daemonProbe? endpoint workspaceId).map (·.root)
 
 def endpointOccupancyError
     (endpoint : Transport.Endpoint)
@@ -103,6 +119,20 @@ def daemonServesRoot
     (root : System.FilePath) : IO Bool := do
   match ← daemonRoot? endpoint workspaceId with
   | some daemonRoot => Beam.sameFilePath (System.FilePath.mk daemonRoot) root
+  | none => pure false
+
+/-- Whether an endpoint serves the expected root and exact wrapper-owned daemon generation. -/
+def daemonServesGeneration
+    (endpoint : Transport.Endpoint)
+    (workspaceId : WorkspaceId)
+    (root : System.FilePath)
+    (identity : DaemonIdentity) : IO Bool := do
+  match ← daemonProbe? endpoint workspaceId with
+  | some probe =>
+      if probe.identity? != some identity then
+        pure false
+      else
+        Beam.sameFilePath (System.FilePath.mk probe.root) root
   | none => pure false
 
 def endpointAcceptsConnection (endpoint : Transport.Endpoint) : IO Bool := do

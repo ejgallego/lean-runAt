@@ -186,9 +186,10 @@ Exact event ordering and examples live in
   Ordinary wrapper calls, including plain `lean-beam ensure`, only attach to that generation and
   fail with the exact owner-start command when none is live. The optional `--port` override belongs
   only to `ensure --hold`; attaching commands reject it. Owner EOF shuts down request admission,
-  completes admitted requests with `requestCancelled`, and closes backend sessions and the daemon
-  without heartbeat timeouts or filesystem leases. This works
-  across PID namespaces because endpoint/root validation is authoritative when PID identity is not
+  marks admitted requests for cancellation, and closes backend sessions and the daemon after those
+  requests drain; a backend success that completed before cancellation remains successful. This
+  happens without heartbeat timeouts or filesystem leases and works across PID namespaces because
+  endpoint, root, and generation-identity validation are authoritative when PID identity is not
   locally observable. A paused owner retains the session; a killed owner closes the pipe; explicit
   `lean-beam shutdown` unpublishes the registry generation so the holder closes it cleanly.
 - A startup failure that reports `operation not permitted` through `.beam/beam-daemon-startup.log` is

@@ -120,13 +120,13 @@ private def requestMethod (method : Except String String) : HandlerM String :=
   | .ok method => pure method
   | .error msg => throw <| responseFailureFor .invalidParams msg
 
-private def runHandler (act : HandlerM (Response × Bool)) : IO (Response × Bool) := do
+private def runHandler (act : HandlerM Response) : IO Response := do
   try
     match ← act.run with
     | .ok result => pure result
-    | .error failure => pure (failure.toResponse, false)
+    | .error failure => pure failure.toResponse
   catch e =>
-    pure (errorResponseFor .internalError e.toString, false)
+    pure <| errorResponseFor .internalError e.toString
 
 private def mkSessionToken : IO String := do
   let pid ← IO.Process.getPID
@@ -886,6 +886,7 @@ private def modifyCurrentSessionIfMatching
 structure ServerRuntime where
   state : Std.Mutex State
   endpoint : Transport.Endpoint
+  daemonIdentity? : Option DaemonIdentity
   stop : IO.Ref Bool
   activeRequests : ActiveRequestRegistry
   private closeMutex : Std.Mutex Bool
@@ -919,12 +920,17 @@ private def ServerRuntime.statsResponse
     (server : ServerRuntime)
     (workspaceId? : Option WorkspaceId := none) : IO Response := do
   let payload ← server.withState <| statsPayload workspaceId?
+  let payload :=
+    match server.daemonIdentity? with
+    | some identity => payload.setObjVal! "daemonIdentity" (toJson identity)
+    | none => payload
   pure <| Response.success payload
 
 def ServerRuntime.create
     (config : BrokerConfig)
     (workspaceId : WorkspaceId)
-    (endpoint : Transport.Endpoint := .tcp 0) : IO ServerRuntime := do
+    (endpoint : Transport.Endpoint := .tcp 0)
+    (daemonIdentity? : Option DaemonIdentity := none) : IO ServerRuntime := do
   unless validWorkspaceId workspaceId do
     throw <| IO.userError "workspace id must be non-empty"
   let startMonoNanos ← IO.monoNanosNow
@@ -932,6 +938,7 @@ def ServerRuntime.create
   pure {
     state := ← Std.Mutex.new state
     endpoint := endpoint
+    daemonIdentity?
     stop := ← IO.mkRef false
     activeRequests := ← ActiveRequestRegistry.create
     closeMutex := ← Std.Mutex.new false
@@ -990,9 +997,9 @@ private def awaitRuntimeClose
 /--
 Close broker admission, cancel admitted requests, shut down every backend session, and wait for
 all admitted dispatch scopes to unregister. Concurrent and repeated callers wait for the same
-close result; only the caller that started closure receives `true`.
+close result.
 -/
-def ServerRuntime.close (server : ServerRuntime) : IO Bool := do
+def ServerRuntime.close (server : ServerRuntime) : IO Unit := do
   let leadsClose ← server.closeMutex.atomically do
     if ← get then
       pure false
@@ -1014,11 +1021,10 @@ def ServerRuntime.close (server : ServerRuntime) : IO Bool := do
         pure (.error err)
     server.closeDone.resolve outcome
     match outcome with
-    | .ok () => pure true
+    | .ok () => pure ()
     | .error err => throw err
   else
     awaitRuntimeClose server.closeDone
-    pure false
 
 private def workspaceInitResult
     (workspaceId : WorkspaceId)
@@ -1232,6 +1238,12 @@ private def requestStop (server : ServerRuntime) : IO Unit := do
     discard <| Transport.connect server.endpoint
   catch _ =>
     pure ()
+
+private def closeAndRequestStop (server : ServerRuntime) : IO Unit := do
+  try
+    server.close
+  finally
+    requestStop server
 
 private structure WorkspaceRequest extends Request where
   workspaceId : WorkspaceId
@@ -1735,7 +1747,7 @@ private def handleSyncFileOp
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   if req.backend != .lean then
     throw <| responseFailureFor .invalidParams
       "sync_file diagnostics barrier is only supported for Lean"
@@ -1784,9 +1796,7 @@ private def handleSyncFileOp
     recordCompletedSync server started.session started.uri started.version
   liftHandlerIO <| traceBroker
     s!"sync_file response ready clientRequestId={optionLabel req.clientRequestId?} version={started.version} saveReady={saveReadiness.saveReady}"
-  pure (syncFileSuccessResponse
-    syncResult fileProgress?,
-    false)
+  pure <| syncFileSuccessResponse syncResult fileProgress?
 
 private def closeTrackedFileIfOpen
     (server : ServerRuntime)
@@ -1806,7 +1816,7 @@ private def handleRefreshFileOp
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let path ← requestArg req.pathArg
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   closeTrackedFileIfOpen server req path
@@ -1816,7 +1826,7 @@ private def handleUpdateFileOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let path ← requestArg req.pathArg
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req path
@@ -1825,11 +1835,11 @@ private def handleUpdateFileOp
     let synced ← syncFileSnapshotDetailed session snapshot
     updateSession synced.session
     pure synced
-  pure (Response.success (toJson ({
+  pure <| Response.success (toJson ({
     version := updated.version
     changed := updated.changed
     : UpdateFileResult
-  })), false)
+  }))
 
 private def handleCloseOp
     (server : ServerRuntime)
@@ -1837,21 +1847,21 @@ private def handleCloseOp
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let path ← requestArg req.pathArg
   if req.saveArtifacts?.getD false then
     let saved ← saveOlean server req path cancelRef? emitProgress? emitDiagnostic?
     finalizeSavedDoc server saved.session saved.uri saved.version true
-    pure (saveCompletedResponse saved true, false)
+    pure <| saveCompletedResponse saved true
   else
     liftHandlerIO <| server.withState do
       match ← currentSession? req.workspaceId req.backend with
       | some session =>
           let session ← closeFile session path
           updateSession session
-          pure (Response.success (Json.mkObj [("closed", toJson true)]), false)
+          pure <| Response.success (Json.mkObj [("closed", toJson true)])
       | none =>
-          pure (Response.success (Json.mkObj [("closed", toJson true)]), false)
+          pure <| Response.success (Json.mkObj [("closed", toJson true)])
 
 private def runAtSetupProgressEmitter?
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit)) :
@@ -1866,7 +1876,7 @@ private def handleRunAtOp
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.runAtArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
@@ -1888,11 +1898,10 @@ private def handleRunAtOp
       (emitDiagnostic? := runAtSetupProgressEmitter? emitDiagnostic?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (
+  pure <|
     Response.withOptionalFileProgress
       (Response.success (wrapResultHandle started.session pending.result))
-      pending.progress?,
-    false)
+      pending.progress?
 
 private def positionLspParams
     (args : PositionArgs)
@@ -1912,7 +1921,7 @@ private def handlePositionLspOp
     (extraFields : List (String × Json) := [])
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
   let started ← liftFailureIO <| server.withState do
@@ -1925,14 +1934,14 @@ private def handlePositionLspOp
       (emitProgress? := emitProgress?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
+  pure <| Response.withOptionalFileProgress (Response.success pending.result) pending.progress?
 
 private def handleHoverOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.hoverArgs
   handlePositionLspOp server req args.toPositionArgs args.method
     (cancelRef? := cancelRef?) (emitProgress? := emitProgress?)
@@ -1942,7 +1951,7 @@ private def handleSignatureHelpOp
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.signatureHelpArgs
   handlePositionLspOp server req args.toPositionArgs args.method
     (cancelRef? := cancelRef?) (emitProgress? := emitProgress?)
@@ -1952,7 +1961,7 @@ private def handleDefinitionOp
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.definitionArgs
   handlePositionLspOp server req args.toPositionArgs args.method
     (cancelRef? := cancelRef?) (emitProgress? := emitProgress?)
@@ -1962,7 +1971,7 @@ private def handleReferencesOp
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.referencesArgs
   handlePositionLspOp server req args.toPositionArgs args.method
     [("context", Json.mkObj [("includeDeclaration", toJson args.includeDeclaration)])]
@@ -1973,7 +1982,7 @@ private def handleDocumentSymbolsOp
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.documentSymbolsArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
@@ -1989,13 +1998,13 @@ private def handleDocumentSymbolsOp
       (emitProgress? := emitProgress?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
+  pure <| Response.withOptionalFileProgress (Response.success pending.result) pending.progress?
 
 private def handleWorkspaceSymbolsOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.workspaceSymbolsArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let (session, request) ← liftHandlerIO <| server.withState do
@@ -2008,7 +2017,7 @@ private def handleWorkspaceSymbolsOp
     pure (session, request)
   liftHandlerIO <| propagatePendingCancellation session cancelRef?
   let pending ← awaitPending request
-  pure (Response.success pending.result, false)
+  pure <| Response.success pending.result
 
 private def codeActionResolveSourceUri
     (action : CodeAction) : Except ResponseFailure DocumentUri := do
@@ -2027,7 +2036,7 @@ private def handleCodeActionResolveOp
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.codeActionResolveArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
@@ -2050,7 +2059,7 @@ private def handleCodeActionResolveOp
     version := started.version
     codeAction := resolved
   }
-  pure (Response.withOptionalFileProgress (Response.success (toJson payload)) pending.progress?, false)
+  pure <| Response.withOptionalFileProgress (Response.success (toJson payload)) pending.progress?
 
 private def handleSaveOleanOp
     (server : ServerRuntime)
@@ -2058,18 +2067,18 @@ private def handleSaveOleanOp
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let path ← requestArg req.pathArg
   let saved ← saveOlean server req path cancelRef? emitProgress? emitDiagnostic?
   finalizeSavedDoc server saved.session saved.uri saved.version false
-  pure (saveCompletedResponse saved false, false)
+  pure <| saveCompletedResponse saved false
 
 private def handleGoalsOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.goalsArgs
   if req.backend == .lean && req.text?.isSome then
     throw <| responseFailureFor .invalidParams
@@ -2106,14 +2115,14 @@ private def handleGoalsOp
       (emitProgress? := emitProgress?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
+  pure <| Response.withOptionalFileProgress (Response.success pending.result) pending.progress?
 
 private def handleTodoOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.todoArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let range : Lsp.Range := {
@@ -2140,14 +2149,14 @@ private def handleTodoOp
       (emitProgress? := emitProgress?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
+  pure <| Response.withOptionalFileProgress (Response.success pending.result) pending.progress?
 
 private def handleRunWithOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.runWithArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
@@ -2180,18 +2189,17 @@ private def handleRunWithOp
           (cancelRef? := cancelRef?)
         pure startedResult
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (
+  pure <|
     Response.withOptionalFileProgress
       (Response.success (wrapResultHandle started.session pending.result))
-      pending.progress?,
-    false)
+      pending.progress?
 
 private def handleReleaseOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.releaseArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
@@ -2218,7 +2226,7 @@ private def handleReleaseOp
           (cancelRef? := cancelRef?)
         pure startedResult
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
+  pure <| Response.withOptionalFileProgress (Response.success pending.result) pending.progress?
 
 private def initWorkspaceConfigFromRequest
     (server : ServerRuntime)
@@ -2255,67 +2263,64 @@ private def handleRequestIO
     (req : Request)
     (activeRequest? : Option ActiveRequest := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
-    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO (Response × Bool) := do
+    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO Response := do
   let cancelRef? := activeRequest?.map (·.cancelRef)
   match req.op with
   | .shutdown =>
-      let firstClose ← server.close
-      pure (
-        Response.success (Json.mkObj [("shutdown", toJson true)]),
-        firstClose
-      )
+      server.close
+      pure <| Response.success (Json.mkObj [("shutdown", toJson true)])
   | .stats =>
       match req.workspaceId? with
-      | none => pure (← server.statsResponse, false)
+      | none => server.statsResponse
       | some _ =>
           match ← validateRequestWorkspace server req with
-          | .error failure => pure (failure.toResponse, false)
+          | .error failure => pure failure.toResponse
           | .ok workspaceReq =>
-              pure (← server.statsResponse (some workspaceReq.workspaceId), false)
+              server.statsResponse (some workspaceReq.workspaceId)
   | .listWorkspaces =>
       let payload ← server.withState do
         pure <| workspaceListPayload (← get)
-      pure (Response.success payload, false)
+      pure <| Response.success payload
   | .resetStats =>
       let now ← IO.monoNanosNow
       let resp ← server.withState do
         resetMetrics now
         pure <| Response.success (Json.mkObj [("reset", toJson true)])
-      pure (resp, false)
+      pure resp
   | .openDocs =>
       match req.workspaceId? with
-      | none => pure (Response.success (← server.withState openDocsPayload), false)
+      | none => pure <| Response.success (← server.withState openDocsPayload)
       | some _ =>
           match ← validateRequestWorkspace server req with
-          | .error failure => pure (failure.toResponse, false)
+          | .error failure => pure failure.toResponse
           | .ok workspaceReq =>
-              pure (Response.success
-                (← server.withState <| openDocsPayload (some workspaceReq.workspaceId)), false)
+              pure <| Response.success
+                (← server.withState <| openDocsPayload (some workspaceReq.workspaceId))
   | .initWorkspace =>
       match req.requireWorkspaceId with
-      | .error err => pure (errorResponseFor .invalidParams err, false)
+      | .error err => pure <| errorResponseFor .invalidParams err
       | .ok workspaceId =>
           match ← initWorkspaceConfigFromRequest server req with
-          | .error failure => pure (failure.toResponse, false)
+          | .error failure => pure failure.toResponse
           | .ok config =>
               let result ← server.initWorkspaceWithConfig workspaceId config req.workspaceMode?
-              pure (responseOfTypedResult result, false)
+              pure <| responseOfTypedResult result
   | .dropWorkspace =>
       match req.requireWorkspaceId with
-      | .error err => pure (errorResponseFor .invalidParams err, false)
+      | .error err => pure <| errorResponseFor .invalidParams err
       | .ok workspaceId =>
           let result ← server.dropWorkspace workspaceId
-          pure (responseOfTypedResult result, false)
+          pure <| responseOfTypedResult result
   | .cancel =>
       let targetClientRequestId ←
         match req.cancelRequestIdArg with
         | .ok targetClientRequestId => pure targetClientRequestId
-        | .error failure => return (failure.toResponse, false)
+        | .error failure => return failure.toResponse
       let cancelled ← cancelActiveRequest server targetClientRequestId
-      pure (Response.success (Json.mkObj [("cancelled", toJson cancelled)]), false)
+      pure <| Response.success (Json.mkObj [("cancelled", toJson cancelled)])
   | op =>
       match ← validateRequestWorkspace server req with
-      | .error failure => pure (failure.toResponse, false)
+      | .error failure => pure failure.toResponse
       | .ok workspaceReq =>
           match op with
           | .ensure =>
@@ -2332,7 +2337,7 @@ private def handleRequestIO
                     pure <| Response.success payload
                 catch e =>
                   pure <| errorResponseFor .internalError e.toString
-              pure (resp, false)
+              pure resp
           | .updateFile => runHandler <| handleUpdateFileOp server workspaceReq cancelRef?
           | .syncFile =>
               runHandler <| handleSyncFileOp server workspaceReq cancelRef? emitProgress? emitDiagnostic?
@@ -2368,7 +2373,7 @@ private def handleRequestIO
 private def ServerRuntime.withRequestAdmission
     (server : ServerRuntime)
     (req : Request)
-    (act : RequestHandle → IO (Response × Bool)) : IO (Response × Bool) := do
+    (act : RequestHandle → IO Response) : IO Response := do
   let startedAt ← IO.monoNanosNow
   traceBroker
     s!"dispatch start op={req.op.key} clientRequestId={optionLabel req.clientRequestId?}"
@@ -2378,7 +2383,7 @@ private def ServerRuntime.withRequestAdmission
       traceBroker
         s!"dispatch rejected op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} error={err}"
       recordDispatchMetrics server req resp startedAt
-      return (resp, false)
+      return resp
   | .ok () => pure ()
   try
     let active? ←
@@ -2388,16 +2393,16 @@ private def ServerRuntime.withRequestAdmission
         | .error failure =>
             let resp := BrokerFailure.toResponse failure
             recordDispatchMetrics server req resp startedAt
-            return (resp, false)
+            return resp
       else
         pure none
     try
       let handle : RequestHandle := { runtime := server, active? }
-      let (resp, shouldStop) ← act handle
+      let resp ← act handle
       traceBroker
         s!"dispatch complete op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} ok={resp.ok}"
       recordDispatchMetrics server req resp startedAt
-      pure (resp, shouldStop)
+      pure resp
     finally
       ActiveRequestRegistry.unregister server.activeRequests active?
   catch e =>
@@ -2405,7 +2410,7 @@ private def ServerRuntime.withRequestAdmission
     traceBroker
       s!"dispatch exception op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} error={e.toString}"
     recordDispatchMetrics server req resp startedAt
-    pure (resp, false)
+    pure resp
 
 /--
 Admit `req`, expose its exact cancellation handle to `beforeDispatch`, and
@@ -2421,23 +2426,20 @@ def ServerRuntime.dispatchRequestWithHandle
     (req : Request)
     (beforeDispatch : RequestHandle → IO Bool)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
-    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO (Response × Bool) := do
+    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO Response := do
   server.withRequestAdmission req fun handle => do
     unless ← beforeDispatch handle do
-      return (
-        BrokerFailure.toResponse {
-          code := .requestCancelled
-          message := "request was cancelled before broker dispatch"
-        },
-        false
-      )
+      return BrokerFailure.toResponse {
+        code := .requestCancelled
+        message := "request was cancelled before broker dispatch"
+      }
     handleRequestIO server req handle.active? emitProgress? emitDiagnostic?
 
 def ServerRuntime.dispatchRequest
     (server : ServerRuntime)
     (req : Request)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
-    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO (Response × Bool) := do
+    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO Response := do
   server.dispatchRequestWithHandle req (fun _ => pure true) emitProgress? emitDiagnostic?
 
 private def rootWatchPollMs : UInt32 :=
@@ -2459,9 +2461,7 @@ private partial def watchRoot (server : ServerRuntime) (root : System.FilePath) 
         pure false
     if !rootAvailable then
       IO.eprintln s!"Beam daemon root is no longer available; shutting down: {root}"
-      let shouldStop ← server.close
-      if shouldStop then
-        requestStop server
+      closeAndRequestStop server
     else
       IO.sleep rootWatchPollMs
       watchRoot server root
@@ -2472,9 +2472,7 @@ private def watchSessionOwnerStdin (server : ServerRuntime) : IO Unit := do
   catch _ =>
     pure ()
   unless ← server.stop.get do
-    let shouldStop ← server.close
-    if shouldStop then
-      requestStop server
+    closeAndRequestStop server
 
 private def watchClientDisconnect
     (client : Transport.Connection)
@@ -2514,18 +2512,25 @@ private def handleClient (server : ServerRuntime) (client : Transport.Connection
     | Except.error failure =>
         sendResponse (← clientRequestIdRef.get) failure.toResponse
     | Except.ok req =>
+        let stopsTransport :=
+          req.op == .shutdown && match req.validateFields with
+            | .ok () => true
+            | .error _ => false
         let emitProgress : SyncFileProgress → IO Unit := fun progress =>
           Transport.sendMsg client
             (toJson (StreamMessage.fileProgress req.clientRequestId? progress)).compress
         let emitDiagnostic : StreamDiagnostic → IO Unit := fun diagnostic =>
           Transport.sendMsg client
             (toJson (StreamMessage.diagnostic req.clientRequestId? diagnostic)).compress
-        let (resp, shouldStop) ← server.dispatchRequestWithHandle req (fun handle => do
+        let resp ← server.dispatchRequestWithHandle req (fun handle => do
           let _ ← IO.asTask (prio := Task.Priority.dedicated) <| watchClientDisconnect client handle
           pure true) (some emitProgress) (some emitDiagnostic)
-        sendResponse req.clientRequestId? resp
-        if shouldStop then
+        -- Stopping only wakes the listener; the accepted connection remains available for the
+        -- terminal response. Do this first so a disconnected shutdown caller cannot strand a
+        -- closed runtime behind a live listener.
+        if stopsTransport then
           requestStop server
+        sendResponse req.clientRequestId? resp
   catch e =>
     unless ← terminalSentRef.get do
       let clientRequestId? ← clientRequestIdRef.get
@@ -2556,6 +2561,8 @@ private structure CliOptions where
   endpoint : Transport.Endpoint := .tcp 8765
   root? : Option String := none
   workspaceId? : Option WorkspaceId := none
+  daemonId? : Option String := none
+  configHash? : Option String := none
   sessionOwnerStdin : Bool := false
   leanCmd? : Option String := none
   leanPlugin? : Option String := none
@@ -2582,6 +2589,10 @@ private partial def parseCliOptions (opts : CliOptions) : List String → Except
       parseCliOptions { opts with root? := some root } rest
   | "--workspace-id" :: workspaceId :: rest =>
       parseCliOptions { opts with workspaceId? := some workspaceId } rest
+  | "--daemon-id" :: daemonId :: rest =>
+      parseCliOptions { opts with daemonId? := some daemonId } rest
+  | "--config-hash" :: configHash :: rest =>
+      parseCliOptions { opts with configHash? := some configHash } rest
   | "--session-owner-stdin" :: rest =>
       parseCliOptions { opts with sessionOwnerStdin := true } rest
   | "--lean-cmd" :: leanCmd :: rest =>
@@ -2601,6 +2612,17 @@ def main (args : List String) : IO Unit := do
     | throw <| IO.userError "missing Beam daemon --workspace-id ID"
   unless validWorkspaceId workspaceId do
     throw <| IO.userError "workspace id must be non-empty"
+  let daemonIdentity? ←
+    match opts.daemonId?, opts.configHash? with
+    | none, none => pure none
+    | some daemonId, some configHash =>
+        if daemonId.isEmpty || configHash.isEmpty then
+          throw <| IO.userError "daemon identity values must be non-empty"
+        pure <| some { daemonId, configHash }
+    | some _, none =>
+        throw <| IO.userError "--daemon-id requires --config-hash"
+    | none, some _ =>
+        throw <| IO.userError "--config-hash requires --daemon-id"
   let root ← Beam.resolveExistingPath <| System.FilePath.mk root
   let leanPlugin? ← opts.leanPlugin?.mapM (fun path => Beam.resolveExistingPath <| System.FilePath.mk path)
   let config : BrokerConfig := {
@@ -2610,7 +2632,7 @@ def main (args : List String) : IO Unit := do
     rocqCmd? := opts.rocqCmd?
   }
   let listener ← Transport.bindAndListen opts.endpoint 16
-  let runtime ← ServerRuntime.create config workspaceId opts.endpoint
+  let runtime ← ServerRuntime.create config workspaceId opts.endpoint daemonIdentity?
   let rootWatcher ← IO.asTask (prio := Task.Priority.dedicated) <| watchRoot runtime root
   let ownerWatcher? ←
     if opts.sessionOwnerStdin then
@@ -2625,6 +2647,6 @@ def main (args : List String) : IO Unit := do
     if let some ownerWatcher := ownerWatcher? then
       IO.cancel ownerWatcher
     discard <| IO.wait rootWatcher
-    discard <| runtime.close
+    runtime.close
 
 end Beam.Broker

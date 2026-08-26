@@ -105,8 +105,9 @@ Additional Beam lanes:
 Current Beam coverage includes:
 
 - fast Beam daemon smoke, request-stream, save-stream, startup-handshake, tracked-diagnostic dedup,
-  exact broker request-handle lifetime, protocol tests, and validated-toolchain/release-line CI
-  policy consistency through
+  exact broker request-handle lifetime, authenticated daemon-generation probes, shutdown after the
+  requesting TCP client resets its connection, protocol tests, and validated-toolchain/release-line
+  CI policy consistency through
   [tests/test-beam-fast.sh](../tests/test-beam-fast.sh)
 - wrapper coverage through [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh), which aggregates focused probe, runtime, sync/save, handle, and diagnostic slices
 - focused daemon lifecycle coverage in [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh),

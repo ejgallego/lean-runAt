@@ -248,7 +248,8 @@ env ${mcp_stdio_env[@]+"${mcp_stdio_env[@]}"} \
     --restart-cycles 1 \
     --timeout "$mcp_stdio_timeout" \
     > /dev/null
-python3 tests/test-mcp-http-bridge.py > /dev/null
+mcp_http_timeout="${BEAM_MCP_HTTP_TIMEOUT:-60}"
+python3 tests/test-mcp-http-bridge.py --timeout "$mcp_http_timeout" > /dev/null
 mcp_self_check_timeout="${BEAM_MCP_SELF_CHECK_TIMEOUT_MS:-120000}"
 (cd tests/save_olean_project && \
   LEAN_BEAM_MCP_SELF_CHECK_TIMEOUT_MS="$mcp_self_check_timeout" \

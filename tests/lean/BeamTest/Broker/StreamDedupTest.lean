@@ -184,7 +184,7 @@ def checkRunAtStreamsSetupDiagnostics : IO Unit := do
   let server ← fakeServerWithLeanSession root session
   let streamedRef ← IO.mkRef #[]
   try
-    let (resp, _) ← server.dispatchRequest {
+    let resp ← server.dispatchRequest {
       op := .runAt
       workspaceId? := some fixtureWorkspaceId
       root? := some root.toString

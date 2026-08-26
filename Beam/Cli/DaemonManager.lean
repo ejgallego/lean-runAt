@@ -118,19 +118,18 @@ private def stopDaemonEntry (entry : RegistryEntry) : IO Unit := do
   let mayKillPid ←
     match registryEndpoint? entry with
     | some endpoint =>
-        match ← daemonRoot? endpoint projectDaemonWorkspaceId with
-        | some daemonRoot =>
-            if ← Beam.sameFilePath (System.FilePath.mk daemonRoot) (System.FilePath.mk entry.root) then
-              try
-                let _ ← sendRequest endpoint { op := .shutdown }
-                pure ()
-              catch _ =>
-                pure ()
-              pure true
-            else
-              pure false
-        | none =>
-            pure true
+        if ← daemonServesGeneration endpoint projectDaemonWorkspaceId
+            (System.FilePath.mk entry.root) entry.identity then
+          try
+            let _ ← sendRequest endpoint { op := .shutdown }
+            pure ()
+          catch _ =>
+            pure ()
+          pure true
+        else if (← daemonRoot? endpoint projectDaemonWorkspaceId).isNone then
+          pure true
+        else
+          pure false
     | none =>
         pure true
   if mayKillPid then
@@ -348,10 +347,13 @@ private def terminateDaemonChild
 private def startDaemon
     (desired : DesiredConfig)
     (endpoint : Transport.Endpoint)
-    (logPath : System.FilePath) : IO (IO.Process.Child daemonStdio) := do
+    (logPath : System.FilePath)
+    (identity : DaemonIdentity) : IO (IO.Process.Child daemonStdio) := do
   let mut args : List String := [
     "--root", desired.root.toString,
     "--workspace-id", projectDaemonWorkspaceId,
+    "--daemon-id", identity.daemonId,
+    "--config-hash", identity.configHash,
     "--session-owner-stdin"
   ]
   match endpoint with
@@ -381,24 +383,25 @@ private partial def waitForDaemon
     (endpoint : Transport.Endpoint)
     (logPath : System.FilePath)
     (root : System.FilePath)
+    (identity : DaemonIdentity)
     (tries : Nat := 300) : IO (Except DaemonStartupFailure Unit) := do
-  match ← daemonRoot? endpoint projectDaemonWorkspaceId with
-  | some daemonRoot =>
-      if ← Beam.sameFilePath (System.FilePath.mk daemonRoot) root then
-        pure (.ok ())
-      else
+  if ← daemonServesGeneration endpoint projectDaemonWorkspaceId root identity then
+    pure (.ok ())
+  else
+    match ← daemonRoot? endpoint projectDaemonWorkspaceId with
+    | some daemonRoot =>
         pure <| .error {
           message := endpointOccupancyError endpoint (System.FilePath.mk daemonRoot) root
           endpointInUse := true
         }
-  | none =>
+    | none =>
       if (← child.tryWait).isSome then
         .error <$> daemonStartupFailure endpoint logPath "Beam daemon process exited before responding"
       else if tries == 0 then
         .error <$> daemonStartupFailure endpoint logPath "Beam daemon did not become ready before timeout"
       else
         IO.sleep 100
-        waitForDaemon child endpoint logPath root (tries - 1)
+        waitForDaemon child endpoint logPath root identity (tries - 1)
 
 private def newDaemonGenerationId (configHash : String) : IO String := do
   let startedMonoNanos ← IO.monoNanosNow
@@ -443,8 +446,9 @@ private partial def startDaemonEntry
   let endpoint ← selectUnoccupiedEndpoint desired opts
   let logPath ← daemonStartupLogPath desired.root
   let daemonId ← newDaemonGenerationId desired.configHash
-  let child ← startDaemon desired endpoint logPath
-  match ← waitForDaemon child endpoint logPath desired.root with
+  let identity : DaemonIdentity := { daemonId, configHash := desired.configHash }
+  let child ← startDaemon desired endpoint logPath identity
+  match ← waitForDaemon child endpoint logPath desired.root identity with
   | .ok () => pure ()
   | .error failure =>
     terminateDaemonChild child
@@ -543,7 +547,7 @@ def registryLiveFor
         | some endpoint =>
             -- The owner pipe makes endpoint liveness authoritative across PID domains. A
             -- same-domain dead owner is rejected immediately; another domain is never probed.
-            if ← daemonServesRoot endpoint projectDaemonWorkspaceId root then
+            if ← daemonServesGeneration endpoint projectDaemonWorkspaceId root entry.identity then
               pure (some entry)
             else
               pure none

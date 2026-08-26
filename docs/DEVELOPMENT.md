@@ -304,7 +304,8 @@ The broker is not a raw LSP proxy. Its narrow public job is still to expose smal
 internally it coordinates several responsibilities around the LSP process:
 
 - the CLI owns process identity: project-root detection, bundle selection, registry files,
-  endpoint/root validation, explicit session ownership, startup/shutdown, and control-directory locks
+  endpoint/root/generation validation, explicit session ownership, startup/shutdown, and
+  control-directory locks
 - the broker owns request identity: daemon root validation, backend session lifetime, request
   dispatch, cancellation, active-request bookkeeping, transport errors, and the LSP document mirror
 - the LSP server and plugin own Lean/Rocq semantic facts: elaboration, diagnostics, progress,
@@ -388,14 +389,16 @@ This wrapper path is easy to break accidentally, so keep the mental model simple
 
 A daemon generation is one concrete daemon start identified by the `daemonId` in
 `beam-daemon.json`. Exactly one foreground `lean-beam ensure --hold` process owns that generation.
-It starts the daemon with piped stdin and retains the pipe's write end. The daemon watches the read
-end; EOF atomically closes broker admission, marks admitted requests for cancellation, shuts down
-backend sessions, and stops the listener. There is no wrapper heartbeat, lease file, revocation
-tombstone, or retirement fence.
+It passes the daemon that identity and the effective configuration hash, starts it with piped stdin,
+and retains the pipe's write end. Endpoint attachment requires the root and this exact generation
+identity to match. The daemon watches the read end; EOF atomically closes broker admission, marks
+admitted requests for cancellation, shuts down backend sessions, and stops the listener. There is
+no wrapper heartbeat, lease file, revocation tombstone, or retirement fence.
 
 Ordinary wrapper commands never start a daemon. Under the per-project control lock they require a
-registry whose root and effective configuration match, whose owner is not known dead in the current
-PID domain, and whose endpoint answers for the CLI's private workspace and canonical project root.
+  registry whose root and effective configuration match, whose owner is not known dead in the current
+  PID domain, and whose endpoint answers for the CLI's private workspace, canonical project root, and
+  exact daemon generation identity.
 Endpoint/root validation is authoritative across PID namespaces because numeric PID observations
 from another domain are not safe process identity. A same-domain dead owner or a dead endpoint makes
 the registry stale; cleanup remains generation-scoped and PID fallback is permitted only through the
@@ -422,7 +425,7 @@ its own explicit process owner.
 Keep these invariants covered:
 
 - only `ensure --hold` may create and publish a wrapper daemon generation
-- a second owner is rejected while the current endpoint/root generation is live
+- a second owner is rejected while the current endpoint/root/generation identity is live
 - ordinary wrapper commands preserve the owner's generation and fail with the exact recovery command
   when no owner is live
 - holder teardown unpublishes its exact generation before child drain and cannot remove a replacement

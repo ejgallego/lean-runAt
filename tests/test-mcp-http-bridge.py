@@ -259,7 +259,11 @@ def main():
     with tempfile.TemporaryDirectory(prefix="lean-beam-mcp-http-") as tmp:
         tmp_path = Path(tmp)
         project_root = tmp_path / "project"
-        shutil.copytree(repo_root / "tests" / "save_olean_project", project_root)
+        shutil.copytree(
+            repo_root / "tests" / "save_olean_project",
+            project_root,
+            ignore=shutil.ignore_patterns(".beam"),
+        )
         ready_file = tmp_path / "ready.json"
         child_stderr_file = tmp_path / "lean-beam-mcp.stderr"
         workspace = {"root": str(project_root.resolve())}

@@ -14,6 +14,12 @@ namespace Beam.Broker
 
 abbrev WorkspaceId := Beam.Workspace.WorkspaceId
 
+/-- Identity of one wrapper-owned daemon generation. -/
+structure DaemonIdentity where
+  daemonId : String
+  configHash : String
+  deriving BEq, Repr, FromJson, ToJson
+
 instance : Repr Lsp.DiagnosticSeverity where
   reprPrec severity _ :=
     match severity with

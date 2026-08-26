@@ -797,11 +797,11 @@ private def checkWorkspaceLifecycleProtocol : IO Unit := do
   require "broker workspace query should reject an unknown workspace"
     ((← runtime.workspaceRoot? "unknown") == none)
   for op in #[Op.ensure, .initWorkspace, .dropWorkspace] do
-    let (missingWorkspaceResp, _) ← runtime.dispatchRequest { op }
+    let missingWorkspaceResp ← runtime.dispatchRequest { op }
     require s!"{op.key} should reject omitted workspace identity"
       (missingWorkspaceResp.error?.any fun err =>
         err.code == "invalidParams" && err.message.contains "workspaceId is required")
-  let (processStatsResp, _) ← runtime.dispatchRequest { op := .stats }
+  let processStatsResp ← runtime.dispatchRequest { op := .stats }
   let some processStats := processStatsResp.result?
     | throw <| IO.userError s!"process-wide stats failed: {(toJson processStatsResp).compress}"
   requireFieldAbsent "process-wide stats" "root" processStats
@@ -1039,7 +1039,7 @@ private def checkSessionCloseAdmission : IO Unit := do
   let root := System.FilePath.mk "/tmp/beam-session-close-admission"
   let runtime ← Beam.Broker.ServerRuntime.create
     ({ root } : Beam.Broker.BrokerConfig) "fixture" (.tcp 0)
-  let (beforeClose, _) ← runtime.dispatchRequest { op := .stats }
+  let beforeClose ← runtime.dispatchRequest { op := .stats }
   require "stats should be admitted before session close" beforeClose.ok
   let active ←
     match ← ActiveRequestRegistry.register runtime.activeRequests (some "close-drain") with
@@ -1054,24 +1054,18 @@ private def checkSessionCloseAdmission : IO Unit := do
   require "concurrent runtime close should share the same drain"
     (!(← IO.hasFinished concurrentCloseTask))
   ActiveRequestRegistry.unregister runtime.activeRequests (some active)
-  let firstClose ←
-    match ← IO.wait closeTask with
-    | .ok firstClose => pure firstClose
-    | .error err => throw err
-  require "first runtime close should lead shutdown" firstClose
-  let concurrentClose ←
-    match ← IO.wait concurrentCloseTask with
-    | .ok concurrentClose => pure concurrentClose
-    | .error err => throw err
-  require "concurrent runtime close should not lead shutdown" (!concurrentClose)
-  require "repeated session close should be idempotent"
-    (!(← runtime.close))
-  let (afterClose, _) ← runtime.dispatchRequest { op := .stats }
+  match ← IO.wait closeTask with
+  | .ok () => pure ()
+  | .error err => throw err
+  match ← IO.wait concurrentCloseTask with
+  | .ok () => pure ()
+  | .error err => throw err
+  runtime.close
+  let afterClose ← runtime.dispatchRequest { op := .stats }
   require "ordinary requests should be rejected after session close"
     (afterClose.error?.any fun err => err.code == "requestCancelled")
-  let (shutdown, shouldStop) ← runtime.dispatchRequest { op := .shutdown }
+  let shutdown ← runtime.dispatchRequest { op := .shutdown }
   require "shutdown remains idempotent after admission closes" shutdown.ok
-  require "an idempotent shutdown should not claim process teardown" (!shouldStop)
   require "closed admission should leave no active request"
     ((← ActiveRequestRegistry.count runtime.activeRequests) == 0)
 

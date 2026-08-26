@@ -46,37 +46,30 @@ inductive ProtocolState where
 
 structure ServerState where
   protocol : Std.Mutex ProtocolState
-  private runtime : IO.Ref (Option Beam.Broker.ServerRuntime)
-  private runtimeControl : Std.Mutex Unit
+  private runtime : Std.Mutex (Option Beam.Broker.ServerRuntime)
 
 def ServerState.create : IO ServerState := do
   pure {
     protocol := ← Std.Mutex.new .undecided
-    runtime := ← IO.mkRef none
-    runtimeControl := ← Std.Mutex.new ()
+    runtime := ← Std.Mutex.new none
   }
 
 def ServerState.protocolState (state : ServerState) : IO ProtocolState :=
   state.protocol.atomically get
 
 private def ServerState.runtime? (state : ServerState) : IO (Option Beam.Broker.ServerRuntime) :=
-  state.runtime.get
-
-private def ServerState.withRuntimeControl
-    (state : ServerState)
-    (action : IO α) : IO α :=
-  state.runtimeControl.atomically action
+  state.runtime.atomically get
 
 /-- Close and forget the in-process broker runtime owned by this MCP server state. -/
 def ServerState.closeRuntime (state : ServerState) : IO Unit :=
-  state.withRuntimeControl do
-    match ← state.runtime.get with
+  state.runtime.atomically do
+    match ← get with
     | none => pure ()
     | some runtime =>
         -- Transfer ownership out of the state before waiting for broker teardown. A concurrent
-        -- creator remains excluded by `runtimeControl`, and repeated close calls are idempotent.
-        state.runtime.set none
-        discard <| runtime.close
+        -- creator remains excluded by the same mutex, and repeated close calls are idempotent.
+        set (none : Option Beam.Broker.ServerRuntime)
+        runtime.close
 
 structure NotificationSink where
   send : Json → IO Unit := fun _ => pure ()
@@ -499,8 +492,8 @@ private def ensureRuntimeForWorkspace
     (opts : Options)
     (workspaceId : Beam.Broker.WorkspaceId)
     (root : System.FilePath) : IO (Except RpcError (Beam.Broker.ServerRuntime × System.FilePath)) := do
-  state.withRuntimeControl do
-    match ← state.runtime? with
+  state.runtime.atomically do
+    match ← get with
     | some runtime =>
         match ← ensureBrokerWorkspace opts runtime workspaceId root with
         | .ok canonicalRoot => pure <| .ok (runtime, canonicalRoot)
@@ -509,7 +502,7 @@ private def ensureRuntimeForWorkspace
         match ← createRuntimeForRoot opts workspaceId root with
         | .error err => pure <| .error err
         | .ok (runtime, canonicalRoot) =>
-            state.runtime.set (some runtime)
+            set (some runtime)
             pure <| .ok (runtime, canonicalRoot)
 
 private def workspaceErrorToToolError (err : Beam.Workspace.RootError) : ToolError :=
@@ -574,7 +567,7 @@ private def handleBeamStats
           ("uptimeMs", toJson (0 : Nat)),
           ("workspaces", Json.mkObj [])
         ]
-  let (brokerResp, _) ← runtime.dispatchRequest { op := .stats }
+  let brokerResp ← runtime.dispatchRequest { op := .stats }
   match normalizeBrokerResponse .beamStats brokerResp with
   | .error err =>
       pure <| callToolErrorResult err
@@ -591,7 +584,7 @@ private def handleBeamStats
           pure <| callToolResult result
 
 private def handleDropWorkspace
-    (state : ServerState)
+    (runtime? : Option Beam.Broker.ServerRuntime)
     (workspace : ResolvedWorkspace) : IO Json := do
   let resultJson (dropped invalidatedHandles : Bool) (reason? : Option String := none) : Json :=
     Json.mkObj <| [
@@ -601,7 +594,7 @@ private def handleDropWorkspace
     ] ++ match reason? with
       | some reason => [("reason", toJson reason)]
       | none => []
-  match ← state.runtime? with
+  match runtime? with
   | none =>
       pure <| callToolResult <| resultJson false false (some "notFound")
   | some runtime =>
@@ -654,13 +647,13 @@ private def collectFeedbackRuntimePayload
   | none =>
       pure (Json.null, Json.null, warnings.push "no active MCP Lean runtime was available for stats/open-files")
   | some runtime =>
-      let (statsResp, _) ← runtime.dispatchRequest {
+      let statsResp ← runtime.dispatchRequest {
         op := .stats
         workspaceId? := some workspaceId
         root? := some root.toString
       }
       let (stats, warnings) := Beam.Feedback.responsePayloadOrWarning "stats" statsResp warnings
-      let (openResp, _) ← runtime.dispatchRequest {
+      let openResp ← runtime.dispatchRequest {
         op := .openDocs
         workspaceId? := some workspaceId
         root? := some root.toString
@@ -803,8 +796,8 @@ def Internal.handleToolCall
       | .error err => return .ok <| callToolErrorResult err
     if initialProgress == 0 then
       emitProgress? progress? s!"{params.name.key}: preparing workspace eviction"
-    let result ← state.withRuntimeControl do
-      handleDropWorkspace state workspace
+    let result ← state.runtime.atomically do
+      handleDropWorkspace (← get) workspace
     Internal.traceMcp
       s!"tools/call workspace drop complete id={req.id.label} tool={params.name.key}"
     return .ok result
@@ -864,7 +857,7 @@ def Internal.handleToolCall
     let emitBrokerProgress? : Option (Beam.Broker.SyncFileProgress → IO Unit) :=
       reporter.progress?.map fun _ => reporter.emitFileProgress
     Internal.traceMcp s!"tools/call dispatch broker id={req.id.label} tool={params.name.key}"
-    let (brokerResp, _) ← runtime.dispatchRequestWithHandle brokerReq beforeDispatch
+    let brokerResp ← runtime.dispatchRequestWithHandle brokerReq beforeDispatch
       (emitProgress? := emitBrokerProgress?)
       (emitDiagnostic? := some emitDiagnostic)
     Internal.traceMcp
