@@ -34,6 +34,8 @@ hold_pid=""
 root_removed="false"
 active_request_pid=""
 paused_daemon_pid=""
+busy_pid=""
+busy_port_file=""
 
 start_slow_request() {
   local root="$1"
@@ -110,6 +112,15 @@ stop_hold_process() {
 }
 
 cleanup() {
+  if [ -n "$busy_pid" ]; then
+    kill "$busy_pid" > /dev/null 2>&1 || true
+    wait "$busy_pid" 2>/dev/null || true
+    busy_pid=""
+  fi
+  if [ -n "$busy_port_file" ]; then
+    rm -f -- "$busy_port_file"
+    busy_port_file=""
+  fi
   if [ -n "$paused_daemon_pid" ]; then
     kill -CONT "$paused_daemon_pid" > /dev/null 2>&1 || true
     paused_daemon_pid=""
@@ -236,8 +247,6 @@ assert_json_field_equals "owned ensure response" "$ensure_json" ok true
 stats_json="$("$beam_script" --root "$tmp1" stats)"
 assert_json_field_equals "owned stats response" "$stats_json" ok true
 
-start_slow_request "$tmp1" "shutdown-active" "shutdown-active"
-
 second_owner_out="$tmp1/second-owner.out"
 second_owner_err="$tmp1/second-owner.err"
 if "$beam_script" --root "$tmp1" ensure --hold > "$second_owner_out" 2> "$second_owner_err"; then
@@ -269,6 +278,75 @@ if [ -e "$tmp2/.beam/beam-daemon.json" ]; then
   cat "$tmp2/.beam/beam-daemon.json" >&2
   exit 1
 fi
+
+stale_registry="$tmp2/.beam/beam-daemon.json"
+REGISTRY_TEMPLATE="$registry" STALE_REGISTRY="$stale_registry" STALE_ROOT="$tmp2" python3 - <<'PY'
+import json
+import os
+
+with open(os.environ["REGISTRY_TEMPLATE"], encoding="utf-8") as stream:
+    entry = json.load(stream)
+entry["root"] = os.path.realpath(os.environ["STALE_ROOT"])
+replacement = os.environ["STALE_REGISTRY"] + ".replacement"
+with open(replacement, "w", encoding="utf-8") as stream:
+    json.dump(entry, stream, separators=(",", ":"))
+    stream.write("\n")
+os.replace(replacement, os.environ["STALE_REGISTRY"])
+PY
+"$beam_script" --root "$tmp2" shutdown > /dev/null
+if [ -e "$stale_registry" ]; then
+  echo "expected shutdown to remove a stale cross-root registry" >&2
+  cat "$stale_registry" >&2
+  exit 1
+fi
+if ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; then
+  echo "stale cross-root registry cleanup must not stop the daemon or owner serving the other root" >&2
+  exit 1
+fi
+
+busy_port_file="$(mktemp "$tmp2/non-beam-port-XXXXXX")"
+python3 - "$busy_port_file" <<'PY' &
+import socketserver
+import sys
+
+class Handler(socketserver.BaseRequestHandler):
+    def handle(self):
+        self.request.recv(4096)
+
+with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
+    with open(sys.argv[1], "w", encoding="utf-8") as stream:
+        print(server.server_address[1], file=stream, flush=True)
+    server.serve_forever()
+PY
+busy_pid="$!"
+if ! wait_for_nonempty_file "$busy_port_file" "non-Beam occupied port"; then
+  exit 1
+fi
+busy_port="$(cat "$busy_port_file")"
+busy_out="$tmp2/non-beam-port.out"
+busy_err="$tmp2/non-beam-port.err"
+if "$beam_script" --root "$tmp2" --port "$busy_port" ensure --hold > "$busy_out" 2> "$busy_err"; then
+  echo "expected owner startup to reject a port occupied by a non-Beam service" >&2
+  cat "$busy_out" >&2
+  exit 1
+fi
+if ! grep -Fq "already in use" "$busy_err"; then
+  echo "expected non-Beam port collision to report the occupied endpoint" >&2
+  cat "$busy_err" >&2
+  exit 1
+fi
+if [ -e "$tmp2/.beam/beam-daemon.json" ]; then
+  echo "expected non-Beam port collision not to publish a registry" >&2
+  cat "$tmp2/.beam/beam-daemon.json" >&2
+  exit 1
+fi
+kill "$busy_pid" > /dev/null 2>&1 || true
+wait "$busy_pid" 2>/dev/null || true
+busy_pid=""
+rm -f -- "$busy_port_file"
+busy_port_file=""
+
+start_slow_request "$tmp1" "shutdown-active" "shutdown-active"
 
 shutdown_json="$("$beam_script" --root "$tmp1" shutdown)"
 assert_json_field_equals "explicit session shutdown" "$shutdown_json" ok true

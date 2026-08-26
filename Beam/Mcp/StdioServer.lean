@@ -295,15 +295,15 @@ private def Coordinator.cancelRequest
   | some request => request.cancel
 
 private def Coordinator.beginClosing
-    (coordinator : Coordinator) : IO (Bool × Array InFlightRequest) := do
-  let (alreadyClosing, requests) ← coordinator.routing.atomically do
+    (coordinator : Coordinator) : IO (Array InFlightRequest) := do
+  let requests ← coordinator.routing.atomically do
     let routing ← get
     let requests := routing.admitted.toList.map Prod.snd |>.toArray
     set { routing with closing := true }
-    pure (routing.closing, requests)
+    pure requests
   for request in requests do
     request.cancel
-  pure (alreadyClosing, requests)
+  pure requests
 
 private def awaitRequestDone (request : InFlightRequest) : IO Unit := do
   awaitPromise s!"in-flight request {request.id.label}" request.done
@@ -322,11 +322,9 @@ private def Coordinator.otherAdmittedRequests
       if other.brokerId == request.brokerId then none else some other) |>.toArray
 
 private def Coordinator.closeTransport (coordinator : Coordinator) : IO Unit := do
-  let (alreadyClosing, requests) ←
-    coordinator.beginClosing
+  let requests ← coordinator.beginClosing
   coordinator.awaitRequests requests
-  unless alreadyClosing do
-    coordinator.state.closeRuntime
+  coordinator.state.closeRuntime
 
 private def Coordinator.admitToolRequest
     (coordinator : Coordinator)
