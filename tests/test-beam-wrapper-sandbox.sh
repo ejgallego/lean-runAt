@@ -95,10 +95,10 @@ wait_for_registry() {
   return 1
 }
 
-assert_no_connection_closed_incidents() {
+assert_no_daemon_failure_incidents() {
   local label="$1"
-  if find "$control_root" -path '*/daemon-failures/*connectionClosed*.json' -print -quit | grep -q .; then
-    echo "expected $label to produce no connectionClosed incident" >&2
+  if find "$control_root" -path '*/daemon-failures/*.json' -print -quit | grep -q .; then
+    echo "expected $label to produce no daemon failure incident" >&2
     find "$control_root" -path '*/daemon-failures/*.json' -print -exec sed -n '1,160p' {} \; >&2
     exit 1
   fi
@@ -338,4 +338,4 @@ fi
 owner_pid=""
 
 assert_no_lease_artifacts
-assert_no_connection_closed_incidents "the explicit sandbox ownership regressions"
+assert_no_daemon_failure_incidents "the explicit sandbox ownership regressions"

@@ -220,11 +220,10 @@ private structure DaemonFailureIncident where
 private def daemonFailureIncidentSchemaVersion : Nat :=
   1
 
-private def daemonFailureKind? (detail : String) : Option String :=
-  if detail.contains "Beam daemon connection closed" then
-    some "connectionClosed"
-  else
-    none
+private def daemonFailureIncidentKind? : BrokerClientFailureKind → Option String
+  | .transport => some "brokerTransportFailure"
+  | .invalidResponse => some "invalidBrokerResponse"
+  | .streamCallback => none
 
 private def daemonFailureIncidentTimestampLabel (timestamp : String) : String :=
   (timestamp.replace "-" "").replace ":" ""
@@ -280,8 +279,11 @@ private def writeDaemonFailureIncident?
   catch _ =>
     pure none
 
-def daemonFailureMessage (root : System.FilePath) (detail : String) : IO String := do
-  match daemonFailureKind? detail with
+def daemonFailureMessage
+    (root : System.FilePath)
+    (failure : BrokerClientFailure) : IO String := do
+  let detail := failure.detail
+  match daemonFailureIncidentKind? failure.kind with
   | none =>
     pure detail
   | some kind =>

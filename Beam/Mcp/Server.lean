@@ -47,11 +47,13 @@ inductive ProtocolState where
 structure ServerState where
   protocol : Std.Mutex ProtocolState
   private runtime : IO.Ref (Option Beam.Broker.ServerRuntime)
+  private runtimeControl : Std.Mutex Unit
 
 def ServerState.create : IO ServerState := do
   pure {
     protocol := ← Std.Mutex.new .undecided
     runtime := ← IO.mkRef none
+    runtimeControl := ← Std.Mutex.new ()
   }
 
 def ServerState.protocolState (state : ServerState) : IO ProtocolState :=
@@ -59,6 +61,22 @@ def ServerState.protocolState (state : ServerState) : IO ProtocolState :=
 
 def ServerState.runtime? (state : ServerState) : IO (Option Beam.Broker.ServerRuntime) :=
   state.runtime.get
+
+private def ServerState.withRuntimeControl
+    (state : ServerState)
+    (action : IO α) : IO α :=
+  state.runtimeControl.atomically action
+
+/-- Close and forget the in-process broker runtime owned by this MCP server state. -/
+def ServerState.closeRuntime (state : ServerState) : IO Unit :=
+  state.withRuntimeControl do
+    match ← state.runtime.get with
+    | none => pure ()
+    | some runtime =>
+        -- Transfer ownership out of the state before waiting for broker teardown. A concurrent
+        -- creator remains excluded by `runtimeControl`, and repeated close calls are idempotent.
+        state.runtime.set none
+        discard <| runtime.close
 
 structure NotificationSink where
   send : Json → IO Unit := fun _ => pure ()
@@ -479,10 +497,9 @@ private def ensureBrokerWorkspace
 private def ensureRuntimeForWorkspace
     (state : ServerState)
     (opts : Options)
-    (setupMutex : Std.Mutex Unit)
     (workspaceId : Beam.Broker.WorkspaceId)
     (root : System.FilePath) : IO (Except RpcError (Beam.Broker.ServerRuntime × System.FilePath)) := do
-  setupMutex.atomically do
+  state.withRuntimeControl do
     match ← state.runtime? with
     | some runtime =>
         match ← ensureBrokerWorkspace opts runtime workspaceId root with
@@ -760,7 +777,6 @@ private def brokerRequestForTool
 def Internal.handleToolCall
     (state : ServerState)
     (opts : Options)
-    (setupMutex : Std.Mutex Unit)
     (brokerClientRequestId : String)
     (beforeDispatch : Beam.Broker.RequestHandle → IO Bool)
     (req : Request)
@@ -787,7 +803,7 @@ def Internal.handleToolCall
       | .error err => return .ok <| callToolErrorResult err
     if initialProgress == 0 then
       emitProgress? progress? s!"{params.name.key}: preparing workspace eviction"
-    let result ← setupMutex.atomically do
+    let result ← state.withRuntimeControl do
       handleDropWorkspace state workspace
     Internal.traceMcp
       s!"tools/call workspace drop complete id={req.id.label} tool={params.name.key}"
@@ -834,7 +850,7 @@ def Internal.handleToolCall
   reporter.emitPreparing
   try
     let (runtime, root) ←
-      match ← ensureRuntimeForWorkspace state opts setupMutex workspace.workspaceId workspace.root with
+      match ← ensureRuntimeForWorkspace state opts workspace.workspaceId workspace.root with
       | .ok runtimeAndRoot =>
           Internal.traceMcp s!"tools/call runtime ready id={req.id.label} tool={params.name.key}"
           pure runtimeAndRoot
@@ -867,7 +883,6 @@ def Internal.handleToolCall
 private def handleReadyOperationRequest
     (state : ServerState)
     (opts : Options)
-    (setupMutex : Std.Mutex Unit)
     (brokerClientRequestId : String)
     (req : Request)
     (admitted : AdmittedRequestContext)
@@ -891,7 +906,7 @@ private def handleReadyOperationRequest
       pure <| successResponseForEra era req.id result
   | "tools/call" =>
       let parsedParams := parseCallToolParams req.params?
-      match ← Internal.handleToolCall state opts setupMutex brokerClientRequestId
+      match ← Internal.handleToolCall state opts brokerClientRequestId
           (fun _ => pure true) req admitted parsedParams notifications with
       | .ok result => pure <| successResponseForEra era req.id result
       | .error err => pure <| errorResponse req.id err
@@ -1024,7 +1039,6 @@ def Internal.handleRequestForProtocol
     (req : Request)
     (evidence : RequestProtocolEvidence)
     (notifications : NotificationSink := {}) : IO Json := do
-  let setupMutex ← Std.Mutex.new ()
   let brokerClientRequestId := s!"mcp:sync:{req.id.label}"
   let era ←
     match ← Internal.admitCompatibleRequest state evidence with
@@ -1068,7 +1082,7 @@ def Internal.handleRequestForProtocol
       | .error err => pure <| errorResponse req.id err
       | .ok admitted =>
           handleReadyOperationRequest
-            state opts setupMutex brokerClientRequestId req admitted notifications
+            state opts brokerClientRequestId req admitted notifications
   | method =>
       match era with
       | .modern _ =>

@@ -112,9 +112,10 @@ Current Beam coverage includes:
 - focused daemon lifecycle coverage in [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh),
   including the no-implicit-start contract, duplicate-owner rejection, endpoint collision safety,
   explicit shutdown, cancellation of requests active during shutdown or owner loss, exact-generation
-  cleanup that preserves a replacement registry, holder reporting after an unexpected daemon crash,
-  abrupt owner death through inherited-pipe EOF, stale registry cleanup, and self-termination after
-  the project worktree disappears
+  cleanup that preserves a replacement registry, registry removal before a paused daemon can finish
+  draining, rejection of attachment to that unpublished draining generation, holder reporting after
+  an unexpected daemon crash, abrupt owner death through inherited-pipe EOF, stale registry cleanup,
+  and self-termination after the project worktree disappears
 - Linux-only PID-isolated sandbox wrapper coverage in [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh),
   including cross-namespace endpoint attachment, duplicate-owner rejection, a paused owner without
   time-based expiry, explicit shutdown, killed-owner EOF cleanup, stale-registry recovery, distinct

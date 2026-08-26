@@ -1397,12 +1397,6 @@ private def callLeanSync
   handleRpcRequestWithNotifications state opts notifications s!"lean_sync {path}" id "tools/call" <|
     some <| toolCallParams "lean_sync" arguments
 
-private def shutdownMcpRuntime (state : Beam.Mcp.Server.ServerState) : IO Unit := do
-  match ← state.runtime? with
-  | none => pure ()
-  | some runtime =>
-      discard <| runtime.close
-
 private def checkIdempotentLifecycleTools : IO Unit := do
   let root ← mkTempProjectRoot "lean-beam-mcp-idempotent-lifecycle"
   let state ← Beam.Mcp.Server.ServerState.create
@@ -1463,8 +1457,12 @@ private def checkIdempotentLifecycleTools : IO Unit := do
       repeatedDropStructured
     requireJsonString "repeated lean_drop_workspace structured result" "reason" "notFound"
       repeatedDropStructured
+
+    state.closeRuntime
+    require "MCP runtime close should clear ServerState ownership" (← state.runtime?).isNone
+    state.closeRuntime
   finally
-    shutdownMcpRuntime state
+    state.closeRuntime
     try
       if ← root.pathExists then
         IO.FS.removeDirAll root
@@ -1605,7 +1603,7 @@ private def checkDiagnosticLogForwarding : IO Unit := do
     requireJsonBool "error log data" "completion_blocking" false errorData
     requireFieldAbsent "error log data" "save_blocking" errorData
   finally
-    shutdownMcpRuntime state
+    state.closeRuntime
     try
       if ← root.pathExists then
         IO.FS.removeDirAll root

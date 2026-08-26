@@ -19,6 +19,19 @@ structure StreamCallbacks where
 
 abbrev Endpoint := Transport.Endpoint
 
+/-- Classify failures produced while a broker client exchanges one streamed request. -/
+inductive BrokerClientFailureKind where
+  | transport
+  | invalidResponse
+  | streamCallback
+  deriving BEq, Repr
+
+/-- Keep broker client failures typed until a CLI or transport presentation boundary. -/
+structure BrokerClientFailure where
+  kind : BrokerClientFailureKind
+  detail : String
+  deriving BEq, Repr
+
 def parsePortText (name value : String) : Except String UInt16 := do
   let some n := value.toNat?
     | throw s!"invalid {name} '{value}'"
@@ -41,6 +54,14 @@ private def decodeStreamMessage (msg : String) : IO StreamMessage := do
       match fromJson? (α := StreamMessage) json with
       | .ok stream => pure stream
       | .error err => throw <| IO.userError s!"invalid Beam daemon response payload: {err}"
+
+private def captureClientFailure
+    (kind : BrokerClientFailureKind)
+    (action : IO α) : IO (Except BrokerClientFailure α) := do
+  try
+    pure <| .ok (← action)
+  catch e =>
+    pure <| .error { kind, detail := e.toString }
 
 private def diagnosticSeverityLabel : Option Lsp.DiagnosticSeverity → String
   | some .error => "error"
@@ -67,34 +88,61 @@ def formatStreamDiagnostic (diagnostic : StreamDiagnostic) : String :=
       ""
   s!"beam: diagnostic {severity}{blocking} {diagnostic.path}:{line}:{character}: {message}"
 
-partial def sendRequestWithStream
+/-- Send one request while preserving transport, response, and callback failures as typed data. -/
+partial def sendRequestWithStreamResult
     (endpoint : Endpoint)
     (req : Request)
-    (onStream : StreamMessage → IO Unit) : IO Response := do
-  let client ← Transport.connect endpoint
+    (onStream : StreamMessage → IO Unit) : IO (Except BrokerClientFailure Response) := do
+  let client ←
+    match ← captureClientFailure .transport (Transport.connect endpoint) with
+    | .ok client => pure client
+    | .error failure => return .error failure
   try
-    Transport.sendMsg client (toJson req).compress
-    let rec loop : IO Response := do
-      let msg ← Transport.recvMsg client
-      let stream ← decodeStreamMessage msg
+    match ← captureClientFailure .transport <|
+        Transport.sendMsg client (toJson req).compress with
+    | .ok () => pure ()
+    | .error failure => return .error failure
+    let rec loop : IO (Except BrokerClientFailure Response) := do
+      let msg ←
+        match ← captureClientFailure .transport (Transport.recvMsg client) with
+        | .ok msg => pure msg
+        | .error failure => return .error failure
+      let stream ←
+        match ← captureClientFailure .invalidResponse (decodeStreamMessage msg) with
+        | .ok stream => pure stream
+        | .error failure => return .error failure
       unless stream.clientRequestId? == req.clientRequestId? do
-        throw <| IO.userError
-          s!"Beam daemon stream request id {stream.clientRequestId?} does not match request id {req.clientRequestId?}"
-      onStream stream
+        return .error {
+          kind := .invalidResponse
+          detail :=
+            s!"Beam daemon stream request id {stream.clientRequestId?} does not match request id {req.clientRequestId?}"
+        }
+      match ← captureClientFailure .streamCallback (onStream stream) with
+      | .ok () => pure ()
+      | .error failure => return .error failure
       match stream with
       | .response _ response =>
-          pure response
+          pure <| .ok response
       | .fileProgress .. | .diagnostic .. =>
           loop
     loop
   finally
     Transport.closeConnection client
 
-partial def sendRequestWithCallbacks
+partial def sendRequestWithStream
     (endpoint : Endpoint)
     (req : Request)
-    (callbacks : StreamCallbacks := {}) : IO Response := do
-  sendRequestWithStream endpoint req fun stream => do
+    (onStream : StreamMessage → IO Unit) : IO Response := do
+  match ← sendRequestWithStreamResult endpoint req onStream with
+  | .ok response => pure response
+  | .error failure => throw <| IO.userError failure.detail
+
+/-- Send one request with typed client failures and structured progress callbacks. -/
+partial def sendRequestWithCallbacksResult
+    (endpoint : Endpoint)
+    (req : Request)
+    (callbacks : StreamCallbacks := {}) : IO (Except BrokerClientFailure Response) := do
+  sendRequestWithStreamResult endpoint req fun stream => do
     match stream with
     | .response .. =>
         pure ()
@@ -102,6 +150,14 @@ partial def sendRequestWithCallbacks
         callbacks.onFileProgress clientRequestId? progress
     | .diagnostic clientRequestId? diagnostic =>
         callbacks.onDiagnostic clientRequestId? diagnostic
+
+partial def sendRequestWithCallbacks
+    (endpoint : Endpoint)
+    (req : Request)
+    (callbacks : StreamCallbacks := {}) : IO Response := do
+  match ← sendRequestWithCallbacksResult endpoint req callbacks with
+  | .ok response => pure response
+  | .error failure => throw <| IO.userError failure.detail
 def sendRequest (endpoint : Endpoint) (req : Request) : IO Response :=
   sendRequestWithCallbacks endpoint req
 

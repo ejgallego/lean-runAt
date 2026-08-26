@@ -66,6 +66,11 @@ private def expectIoErrorContains (label needle : String) (act : IO α) : IO Uni
 private def requireSubstring (label needle haystack : String) : IO Unit := do
   require s!"{label}: expected '{needle}' in '{haystack}'" (Beam.Cli.hasSubstring haystack needle)
 
+private def brokerTransportFailure (detail : String) : Beam.Broker.BrokerClientFailure := {
+  kind := .transport
+  detail
+}
+
 private def requireJsonNat (label field : String) (expected : Nat) (json : Json) : IO Unit := do
   let actual ← IO.ofExcept <| json.getObjValAs? Nat field
   require s!"{label}: expected {field}={expected}, got {actual}" (actual == expected)
@@ -533,7 +538,8 @@ private def checkDaemonFailureContext : IO Unit := do
     IO.FS.writeFile registryPath ((toJson entry).pretty ++ "\n")
     let startupLog ← Beam.Daemon.daemonStartupLogPath root
     IO.FS.writeFile startupLog "line 1\nline 2\n"
-    let msg ← Beam.Cli.daemonFailureMessage root "Beam daemon connection closed"
+    let detail := "synthetic broker transport failure"
+    let msg ← Beam.Cli.daemonFailureMessage root (brokerTransportFailure detail)
     requireSubstring "daemon failure context should include registry path" "Beam daemon registry" msg
     requireSubstring "daemon failure context should include daemon id" "daemonId: daemon-test" msg
     requireSubstring "daemon failure context should include dead pid status" "pid: 999999999 (not alive)" msg
@@ -546,10 +552,10 @@ private def checkDaemonFailureContext : IO Unit := do
 
     let incidentJson ← readSingleDaemonFailureIncidentJson root
     requireJsonNat "daemon failure incident should use schema version" "schemaVersion" 1 incidentJson
-    requireJsonString "daemon failure incident should classify connection close"
-      "kind" "connectionClosed" incidentJson
+    requireJsonString "daemon failure incident should classify the typed transport failure"
+      "kind" "brokerTransportFailure" incidentJson
     requireJsonString "daemon failure incident should keep original detail"
-      "detail" "Beam daemon connection closed" incidentJson
+      "detail" detail incidentJson
     requireJsonString "daemon failure incident should include root"
       "root" root.toString incidentJson
     requireJsonString "daemon failure incident should include registry path"
@@ -585,7 +591,8 @@ private def checkDaemonFailureUnreadableStartupLog : IO Unit := do
     IO.FS.createDirAll root
     let startupLog ← Beam.Daemon.daemonStartupLogPath root
     IO.FS.createDirAll startupLog
-    let msg ← Beam.Cli.daemonFailureMessage root "Beam daemon connection closed"
+    let msg ← Beam.Cli.daemonFailureMessage root <|
+      brokerTransportFailure "Beam daemon connection closed"
     requireSubstring "unreadable startup log should preserve original daemon failure"
       "Beam daemon connection closed" msg
     requireSubstring "unreadable startup log should still write incident path"
@@ -594,12 +601,49 @@ private def checkDaemonFailureUnreadableStartupLog : IO Unit := do
       (!Beam.Cli.hasSubstring msg "Beam daemon log tail")
 
     let incidentJson ← readSingleDaemonFailureIncidentJson root
-    requireJsonString "unreadable startup log incident should classify connection close"
-      "kind" "connectionClosed" incidentJson
+    requireJsonString "unreadable startup log incident should classify transport failure"
+      "kind" "brokerTransportFailure" incidentJson
     requireJsonNull "unreadable startup log incident should omit startup log path"
       "startupLogPath" incidentJson
     requireJsonNull "unreadable startup log incident should omit startup log tail"
       "startupLogTail" incidentJson
+  finally
+    try
+      let control ← Beam.Daemon.controlDir root
+      if ← control.pathExists then
+        IO.FS.removeDirAll control
+    catch _ =>
+      pure ()
+    try
+      if ← root.pathExists then
+        IO.FS.removeDirAll root
+    catch _ =>
+      pure ()
+
+private def checkTypedDaemonFailureClassification : IO Unit := do
+  let root := System.FilePath.mk s!"/tmp/beam-daemon-typed-failure-{← IO.monoNanosNow}"
+  try
+    IO.FS.createDirAll root
+    let callbackDetail := "synthetic stream callback failure"
+    let callbackMsg ← Beam.Cli.daemonFailureMessage root {
+      kind := .streamCallback
+      detail := callbackDetail
+    }
+    require "stream callback failure should preserve its detail" (callbackMsg == callbackDetail)
+    require "stream callback failure should not create a daemon incident"
+      (← sortedIncidentEntries root).isEmpty
+
+    let invalidDetail := "synthetic invalid response"
+    let invalidMsg ← Beam.Cli.daemonFailureMessage root {
+      kind := .invalidResponse
+      detail := invalidDetail
+    }
+    requireSubstring "invalid response should include incident path" "Beam daemon incident:" invalidMsg
+    let incidentJson ← readSingleDaemonFailureIncidentJson root
+    requireJsonString "invalid response incident should retain its typed classification"
+      "kind" "invalidBrokerResponse" incidentJson
+    requireJsonString "invalid response incident should retain its detail"
+      "detail" invalidDetail incidentJson
   finally
     try
       let control ← Beam.Daemon.controlDir root
@@ -649,8 +693,8 @@ private def checkBrokerConnectionClosedIncident : IO Unit := do
         "Beam daemon incident:" msg
 
       let incidentJson ← readSingleDaemonFailureIncidentJson root
-      requireJsonString "broker close incident should classify connection close"
-        "kind" "connectionClosed" incidentJson
+      requireJsonString "broker close incident should classify the typed transport failure"
+        "kind" "brokerTransportFailure" incidentJson
       requireJsonStringContains "broker close incident should keep transport detail"
         "detail" "Beam daemon connection closed" incidentJson
       requireJsonString "broker close incident should include endpoint summary"
@@ -676,11 +720,12 @@ private def checkDaemonFailureIncidentRetention : IO Unit := do
     IO.FS.createDirAll incidentDir
     for i in [0:55] do
       IO.FS.writeFile (incidentDir / s!"000000000000000000{i}.json") "{}\n"
-    let msg ← Beam.Cli.daemonFailureMessage root "Beam daemon connection closed"
+    let msg ← Beam.Cli.daemonFailureMessage root <|
+      brokerTransportFailure "Beam daemon connection closed"
     requireSubstring "retention failure should include incident path" "Beam daemon incident:" msg
     let entries ← sortedIncidentEntries root
     require s!"daemon incident retention should keep 50 files, got {entries.size}" (entries.size == 50)
-    let newIncidents := entries.filter (fun entry => entry.fileName.contains "connectionClosed")
+    let newIncidents := entries.filter (fun entry => entry.fileName.contains "brokerTransportFailure")
     require "daemon incident retention should keep newly written incident"
       (newIncidents.size == 1)
     let some newIncident := newIncidents[0]?
@@ -708,7 +753,8 @@ private def checkDoctorDaemonFailureIncidentLines : IO Unit := do
     require "doctor should report no daemon incidents when directory is absent"
       (absentLines == ["daemon incidents: none"])
 
-    discard <| Beam.Cli.daemonFailureMessage root "Beam daemon connection closed"
+    discard <| Beam.Cli.daemonFailureMessage root <|
+      brokerTransportFailure "Beam daemon connection closed"
     let lines ← Beam.Cli.daemonFailureIncidentDoctorLines root
     require s!"doctor should report one recent daemon incident, got {lines}"
       (lines.head? == some "daemon incidents: 1 recent")
@@ -1227,6 +1273,7 @@ def main : IO Unit := do
   checkDaemonDebugWarnings
   checkDaemonFailureContext
   checkDaemonFailureUnreadableStartupLog
+  checkTypedDaemonFailureClassification
   checkPlainBrokerTaskCancellation
   checkBrokerConnectionClosedIncident
   checkDaemonFailureIncidentRetention

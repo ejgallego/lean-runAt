@@ -103,22 +103,20 @@ private inductive RequestRegistrationError where
 /-
 Nested coordinator locks flow in one direction:
 
-* setup → progress → request → output during workspace cache eviction
 * progress → request → output for request notifications
 * request → output for active request messages
 
-Routing is released before setup, request, or output is acquired. Output acquires no coordinator lock.
+Routing is released before runtime control, request, or output is acquired. Runtime control is owned
+by `ServerState` and does not acquire coordinator locks. Output acquires no coordinator lock.
 -/
 private structure Coordinator where
   state : ServerState
-  setupMutex : Std.Mutex Unit
   routing : Std.Mutex RoutingState
   output : OutputSink
 
 private def Coordinator.create : IO Coordinator := do
   pure {
     state := ← ServerState.create
-    setupMutex := ← Std.Mutex.new ()
     routing := ← Std.Mutex.new {}
     output := ← OutputSink.create
   }
@@ -310,11 +308,7 @@ private def Coordinator.closeTransport (coordinator : Coordinator) : IO Unit := 
     coordinator.beginClosing
   coordinator.awaitRequests requests
   unless alreadyClosing do
-    coordinator.setupMutex.atomically do
-      match ← coordinator.state.runtime? with
-      | none => pure ()
-      | some runtime =>
-          discard <| runtime.close
+    coordinator.state.closeRuntime
 
 private def Coordinator.admitToolRequest
     (coordinator : Coordinator)
@@ -339,7 +333,6 @@ private def Coordinator.executeToolRequest
     match ← Internal.handleToolCall
         coordinator.state
         opts
-        coordinator.setupMutex
         request.brokerId
         request.bindBrokerRequest
         req

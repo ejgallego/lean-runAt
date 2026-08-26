@@ -177,6 +177,9 @@ carry `{"workspace":{"root":"/absolute/project"}}`. Resolve it through
 broker cache key, and never store a current/default workspace in MCP protocol state. MCP server
 state owns only the optional shared `ServerRuntime`; workspace membership and canonical roots remain
 broker-owned and must be observed through typed broker queries rather than a transport-side mirror.
+`ServerState` also owns the runtime-control mutex used by every transport and direct request entry
+point. Runtime creation, workspace eviction, and close are serialized there; close first transfers
+the runtime out of `ServerState`, then drains it while preventing a competing creation.
 In-process MCP lifecycle calls use the broker's typed `initWorkspaceWithConfig` and `dropWorkspace`
 results directly; do not route them through broker JSON dispatch and decode them back into the same
 types.
@@ -392,10 +395,14 @@ typed PID-domain boundary.
 
 The owner also watches its exact registry generation and daemon child. `lean-beam shutdown` removes
 that generation after the typed shutdown response, which makes the holder close its pipe and lets
-the daemon's stdin watcher finish. An unexpected nonzero daemon exit is reported by the holder.
-Interrupting or killing the holder closes the pipe by process lifetime. A paused holder keeps the
-pipe open, so the session remains valid without time-based expiry. If the project root disappears,
-the daemon's root watcher and the holder both converge on the same shutdown path.
+the daemon's stdin watcher finish. On every holder exit path, the holder removes its exact registry
+generation before waiting for the daemon child to drain, then retries the same generation-scoped
+removal after bounded child cleanup. A draining daemon is therefore never advertised as attachable,
+and neither removal can delete a replacement generation. An unexpected nonzero daemon exit is
+reported by the holder. Interrupting or killing the holder closes the pipe by process lifetime. A
+paused holder keeps the pipe open, so the session remains valid without time-based expiry. If the
+project root disappears, the daemon's root watcher and the holder both converge on the same shutdown
+path.
 
 This model prevents PID-isolated commands from making contradictory ownership decisions: later
 commands may attach to a validated endpoint, but none can silently become a replacement owner.
@@ -410,6 +417,7 @@ Keep these invariants covered:
 - a second owner is rejected while the current endpoint/root generation is live
 - ordinary wrapper commands preserve the owner's generation and fail with the exact recovery command
   when no owner is live
+- holder teardown unpublishes its exact generation before child drain and cannot remove a replacement
 - owner EOF, explicit shutdown, and project-root disappearance all close admission before backend
   teardown and complete with bounded child cleanup
 - PID-domain checks gate every PID probe or signal; cross-domain decisions use the validated endpoint
