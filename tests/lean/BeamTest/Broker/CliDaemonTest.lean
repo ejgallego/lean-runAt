@@ -99,6 +99,17 @@ private def closeAcceptedConnection (listener : Beam.Broker.Transport.Listener) 
   let conn ← Beam.Broker.Transport.accept listener
   Beam.Broker.Transport.closeConnection conn
 
+private def holdAcceptedConnection
+    (listener : Beam.Broker.Transport.Listener)
+    (release : IO.Promise Unit) : IO Unit := do
+  let conn ← Beam.Broker.Transport.accept listener
+  try
+    let some _ ← IO.wait release.result?
+      | throw <| IO.userError "silent endpoint release promise dropped"
+    pure ()
+  finally
+    Beam.Broker.Transport.closeConnection conn
+
 private partial def withClosingBrokerEndpoint
     (act : Beam.Broker.Transport.Endpoint → IO α)
     (tries : Nat := 20) : IO α := do
@@ -142,6 +153,29 @@ private partial def withBrokerListener
       throw err
     else
       withBrokerListener act (tries - 1)
+
+private def checkSilentEndpointProbeTimeout : IO Unit := do
+  withBrokerListener fun listener endpoint => do
+    let release ← IO.Promise.new
+    let serverTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      holdAcceptedConnection listener release
+    try
+      let identity : Beam.Broker.DaemonIdentity := {
+        daemonId := "silent-endpoint"
+        configHash := "silent-endpoint"
+      }
+      match ← Beam.Daemon.daemonGenerationStatus endpoint
+          Beam.Cli.projectDaemonWorkspaceId (System.FilePath.mk "/tmp") identity with
+      | .unrecognized detail =>
+          require "silent endpoint should report its bounded response timeout"
+            (detail.contains "response timed out")
+      | status =>
+          throw <| IO.userError s!"silent endpoint was classified as {repr status}"
+    finally
+      release.resolve ()
+      match ← IO.wait serverTask with
+      | .ok () => pure ()
+      | .error err => throw err
 
 private def serveCancelablePlainRequest
     (listener : Beam.Broker.Transport.Listener)
@@ -1268,6 +1302,7 @@ def main : IO Unit := do
   checkDaemonFailureContext
   checkDaemonFailureUnreadableStartupLog
   checkTypedDaemonFailureClassification
+  checkSilentEndpointProbeTimeout
   checkPlainBrokerTaskCancellation
   checkBrokerConnectionClosedIncident
   checkDaemonFailureIncidentRetention

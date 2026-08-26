@@ -129,7 +129,7 @@ private def stopDaemonEntry (entry : RegistryEntry) : IO Unit := do
           finishRegistryDaemonShutdown entry
       | .unavailable =>
           finishRegistryDaemonShutdown entry
-      | .wrongRoot _ | .wrongGeneration _ =>
+      | .unrecognized _ | .wrongRoot _ | .wrongGeneration _ =>
           pure ()
 
 def stopRegisteredDaemon (root : System.FilePath) : IO Unit := do
@@ -165,21 +165,29 @@ private partial def selectUnoccupiedEndpoint
     (opts : CliOptions)
     (tries : Nat := 10) : IO Transport.Endpoint := do
   let endpoint ← selectEndpoint opts
-  match ← daemonRoot? endpoint projectDaemonWorkspaceId with
-  | none =>
-      pure ()
-  | some daemonRoot =>
-      if usesAutomaticTcpEndpoint opts && tries > 0 then
-        return ← selectUnoccupiedEndpoint desired opts (tries - 1)
-      else
-        throw <| IO.userError (endpointOccupancyError endpoint (System.FilePath.mk daemonRoot) desired.root)
-  if ← endpointAcceptsConnection endpoint then
+  let retryOrReject (message : String) : IO Transport.Endpoint := do
     if usesAutomaticTcpEndpoint opts && tries > 0 then
-      return ← selectUnoccupiedEndpoint desired opts (tries - 1)
+      selectUnoccupiedEndpoint desired opts (tries - 1)
     else
-      throw <| IO.userError (endpointInUseError endpoint)
-  else
-    pure endpoint
+      throw <| IO.userError message
+  match ← daemonRootResult endpoint projectDaemonWorkspaceId with
+  | .ok daemonRoot =>
+      retryOrReject <| endpointOccupancyError endpoint
+        (System.FilePath.mk daemonRoot) desired.root
+  | .error failure =>
+      let occupied ←
+        match failure with
+        | .transport _ => endpointAcceptsConnection endpoint
+        | .invalidResponse _ | .streamCallback _ | .responseTimeout _ => pure true
+      if !occupied then
+        pure endpoint
+      else
+        let message :=
+          match failure with
+          | .transport _ => endpointInUseError endpoint
+          | .invalidResponse _ | .streamCallback _ | .responseTimeout _ =>
+              endpointProtocolError endpoint failure.detail
+        retryOrReject message
 
 private def daemonFailureIncidentRetainCount : Nat :=
   50
@@ -220,6 +228,7 @@ private def daemonFailureIncidentKind? : BrokerClientFailure → Option String
   | .transport _ => some "brokerTransportFailure"
   | .invalidResponse _ => some "invalidBrokerResponse"
   | .streamCallback _ => none
+  | .responseTimeout _ => some "brokerResponseTimeout"
 
 private def daemonFailureIncidentTimestampLabel (timestamp : String) : String :=
   (timestamp.replace "-" "").replace ":" ""
@@ -382,6 +391,14 @@ private partial def waitForDaemon
     (root : System.FilePath)
     (identity : DaemonIdentity)
     (tries : Nat := 300) : IO (Except DaemonStartupFailure Unit) := do
+  let retryOrFail (detail : String) : IO (Except DaemonStartupFailure Unit) := do
+    if (← child.tryWait).isSome then
+      .error <$> daemonStartupFailure endpoint logPath "Beam daemon process exited before responding"
+    else if tries == 0 then
+      .error <$> daemonStartupFailure endpoint logPath detail
+    else
+      IO.sleep 100
+      waitForDaemon child endpoint logPath root identity (tries - 1)
   match ← daemonGenerationStatus endpoint projectDaemonWorkspaceId root identity with
   | .exact => pure (.ok ())
   | .wrongRoot daemonRoot =>
@@ -394,14 +411,10 @@ private partial def waitForDaemon
         message := endpointGenerationMismatchError endpoint (System.FilePath.mk daemonRoot)
         endpointInUse := true
       }
+  | .unrecognized detail =>
+      retryOrFail (endpointProtocolError endpoint detail)
   | .unavailable =>
-      if (← child.tryWait).isSome then
-        .error <$> daemonStartupFailure endpoint logPath "Beam daemon process exited before responding"
-      else if tries == 0 then
-        .error <$> daemonStartupFailure endpoint logPath "Beam daemon did not become ready before timeout"
-      else
-        IO.sleep 100
-        waitForDaemon child endpoint logPath root identity (tries - 1)
+      retryOrFail "Beam daemon did not become ready before timeout"
 
 private def newDaemonGenerationId (configHash : String) : IO String := do
   let startedMonoNanos ← IO.monoNanosNow
@@ -549,7 +562,7 @@ def registryLiveFor
             -- same-domain dead owner is rejected immediately; another domain is never probed.
             match ← daemonGenerationStatus endpoint projectDaemonWorkspaceId root entry.identity with
             | .exact => pure (some entry)
-            | .unavailable | .wrongRoot _ | .wrongGeneration _ => pure none
+            | .unavailable | .unrecognized _ | .wrongRoot _ | .wrongGeneration _ => pure none
 
 private abbrev detachedDaemonStdio : IO.Process.StdioConfig where
   stdin := .null
@@ -576,9 +589,6 @@ def ProjectDaemonOwner.exitCode? (owner : ProjectDaemonOwner) : IO (Option UInt3
       if let some exitCode := exitCode? then
         owner.exitCodeRef.set (some exitCode)
       pure exitCode?
-
-def ProjectDaemonOwner.exited (owner : ProjectDaemonOwner) : IO Bool :=
-  return (← owner.exitCode?).isSome
 
 /-- Whether this owner generation is still the one published for its project. -/
 def ProjectDaemonOwner.registered (owner : ProjectDaemonOwner) : IO Bool := do

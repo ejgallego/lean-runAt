@@ -308,9 +308,7 @@ private def Coordinator.beginClosing
 private def awaitRequestDone (request : InFlightRequest) : IO Unit := do
   awaitPromise s!"in-flight request {request.id.label}" request.done
 
-private def Coordinator.awaitRequests
-    (_coordinator : Coordinator)
-    (requests : Array InFlightRequest) : IO Unit := do
+private def awaitRequests (requests : Array InFlightRequest) : IO Unit := do
   for request in requests do
     awaitRequestDone request
 
@@ -323,7 +321,7 @@ private def Coordinator.otherAdmittedRequests
 
 private def Coordinator.closeTransport (coordinator : Coordinator) : IO Unit := do
   let requests ← coordinator.beginClosing
-  coordinator.awaitRequests requests
+  awaitRequests requests
   coordinator.state.closeRuntime
 
 private def Coordinator.admitToolRequest
@@ -443,7 +441,7 @@ private def Coordinator.handleControlToolRequest
           try
             -- A control operation is a full stream-order fence: work admitted before it drains,
             -- while work admitted afterward waits on `done`.
-            coordinator.awaitRequests priorRequests
+            awaitRequests priorRequests
             coordinator.toolRequestResponse opts req admitted parsedParams request previous?
               initialProgress
           catch e =>

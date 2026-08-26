@@ -146,7 +146,7 @@ private def runThenHoldUntilInterrupted
     pure ()
   try
     act
-    while !(← IO.hasFinished task) && !(← owner.exited) &&
+    while !(← IO.hasFinished task) && (← owner.exitCode?).isNone &&
         (← owner.registered) && !(← IO.checkCanceled) do
       IO.sleep 50
     if ← IO.hasFinished task then

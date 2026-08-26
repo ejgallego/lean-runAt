@@ -70,28 +70,41 @@ private structure DaemonProbe where
   root : String
   identity? : Option DaemonIdentity
 
-private def daemonProbeOfResponse? (resp : Response) : Option DaemonProbe := do
-  let result ← resp.result?
-  let root ← result.getObjValAs? String "root" |>.toOption
-  let identity? := result.getObjValAs? DaemonIdentity "daemonIdentity" |>.toOption
+private def daemonProbeResponseTimeoutMs : Nat :=
+  2000
+
+private def daemonProbeOfResponse (resp : Response) : Except BrokerClientFailure DaemonProbe := do
+  unless resp.ok do
+    throw <| .invalidResponse s!"Beam daemon stats probe failed: {(toJson resp).compress}"
+  let some result := resp.result?
+    | throw <| .invalidResponse "Beam daemon stats probe omitted its result"
+  let root ←
+    match result.getObjValAs? String "root" with
+    | .ok root => pure root
+    | .error err => throw <| .invalidResponse s!"invalid Beam daemon stats root: {err}"
+  let identity? ←
+    match result.getObjVal? "daemonIdentity" with
+    | .error _ => pure none
+    | .ok identityJson =>
+        match fromJson? identityJson with
+        | .ok identity => pure (some identity)
+        | .error err =>
+            throw <| .invalidResponse s!"invalid Beam daemon identity: {err}"
   pure { root, identity? }
 
-private def daemonProbe?
+private def daemonProbe
     (endpoint : Transport.Endpoint)
-    (workspaceId : WorkspaceId) : IO (Option DaemonProbe) := do
-  try
-    let resp ← sendRequest endpoint { op := .stats, workspaceId? := some workspaceId }
-    if resp.ok then
-      pure (daemonProbeOfResponse? resp)
-    else
-      pure none
-  catch _ =>
-    pure none
+    (workspaceId : WorkspaceId) : IO (Except BrokerClientFailure DaemonProbe) := do
+  match ← sendRequestWithStreamTimeoutResult endpoint
+      { op := .stats, workspaceId? := some workspaceId }
+      daemonProbeResponseTimeoutMs (fun _ => pure ()) with
+  | .ok resp => pure <| daemonProbeOfResponse resp
+  | .error failure => pure <| .error failure
 
-def daemonRoot?
+def daemonRootResult
     (endpoint : Transport.Endpoint)
-    (workspaceId : WorkspaceId) : IO (Option String) := do
-  pure <| (← daemonProbe? endpoint workspaceId).map (·.root)
+    (workspaceId : WorkspaceId) : IO (Except BrokerClientFailure String) := do
+  pure <| (← daemonProbe endpoint workspaceId).map (·.root)
 
 def endpointOccupancyError
     (endpoint : Transport.Endpoint)
@@ -107,6 +120,9 @@ def endpointGenerationMismatchError
   s!"selected endpoint {endpointSummary endpoint} already serves Beam root {daemonRoot} " ++
     "with another daemon generation"
 
+def endpointProtocolError (endpoint : Transport.Endpoint) (detail : String) : String :=
+  s!"selected endpoint {endpointSummary endpoint} did not return a valid Beam daemon response: {detail}"
+
 def startupLogSuggestsEndpointInUse (logText : String) : Bool :=
   logText.contains "address already in use" ||
   logText.contains "Address already in use"
@@ -117,8 +133,17 @@ def shouldRetryAutomaticStartup
     (endpointOccupied startupAddressInUse : Bool) : Bool :=
   usesAutomaticEndpoint && tries > 0 && (endpointOccupied || startupAddressInUse)
 
+def endpointAcceptsConnection (endpoint : Transport.Endpoint) : IO Bool := do
+  try
+    let conn ← Transport.connect endpoint
+    Transport.closeConnection conn
+    pure true
+  catch _ =>
+    pure false
+
 inductive DaemonGenerationStatus where
   | unavailable
+  | unrecognized (detail : String)
   | wrongRoot (daemonRoot : String)
   | wrongGeneration (daemonRoot : String)
   | exact
@@ -130,22 +155,22 @@ def daemonGenerationStatus
     (workspaceId : WorkspaceId)
     (root : System.FilePath)
     (identity : DaemonIdentity) : IO DaemonGenerationStatus := do
-  match ← daemonProbe? endpoint workspaceId with
-  | none => pure .unavailable
-  | some probe =>
+  match ← daemonProbe endpoint workspaceId with
+  | .error failure =>
+      match failure with
+      | .transport _ =>
+          if ← endpointAcceptsConnection endpoint then
+            pure <| .unrecognized failure.detail
+          else
+            pure .unavailable
+      | .invalidResponse _ | .streamCallback _ | .responseTimeout _ =>
+          pure <| .unrecognized failure.detail
+  | .ok probe =>
       unless ← Beam.sameFilePath (System.FilePath.mk probe.root) root do
         return .wrongRoot probe.root
       if probe.identity? == some identity then
         pure .exact
       else
         pure <| .wrongGeneration probe.root
-
-def endpointAcceptsConnection (endpoint : Transport.Endpoint) : IO Bool := do
-  try
-    let conn ← Transport.connect endpoint
-    Transport.closeConnection conn
-    pure true
-  catch _ =>
-    pure false
 
 end Beam.Daemon

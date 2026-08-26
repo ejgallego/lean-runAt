@@ -112,7 +112,8 @@ Current Beam coverage includes:
 - wrapper coverage through [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh), which aggregates focused probe, runtime, sync/save, handle, and diagnostic slices
 - focused daemon lifecycle coverage in [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh),
   including the no-implicit-start contract, duplicate-owner rejection, Beam and non-Beam endpoint
-  collision safety, cross-root stale-registry cleanup that preserves the daemon serving the other
+  collision safety, a bounded identity probe against a silent non-Beam listener, cross-root
+  stale-registry cleanup that preserves the daemon serving the other
   root, explicit shutdown, cancellation of requests active during shutdown or owner loss,
   exact-generation cleanup that preserves a replacement registry, registry removal before a paused
   daemon can finish draining, rejection of attachment to that unpublished draining generation,

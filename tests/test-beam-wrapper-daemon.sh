@@ -346,6 +346,56 @@ busy_pid=""
 rm -f -- "$busy_port_file"
 busy_port_file=""
 
+busy_port_file="$(mktemp "$tmp2/silent-non-beam-port-XXXXXX")"
+python3 - "$busy_port_file" <<'PY' &
+import socketserver
+import sys
+import time
+
+class Handler(socketserver.BaseRequestHandler):
+    def handle(self):
+        time.sleep(10)
+
+with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
+    with open(sys.argv[1], "w", encoding="utf-8") as stream:
+        print(server.server_address[1], file=stream, flush=True)
+    server.serve_forever()
+PY
+busy_pid="$!"
+if ! wait_for_nonempty_file "$busy_port_file" "silent non-Beam occupied port"; then
+  exit 1
+fi
+busy_port="$(cat "$busy_port_file")"
+busy_out="$tmp2/silent-non-beam-port.out"
+busy_err="$tmp2/silent-non-beam-port.err"
+silent_probe_started="$SECONDS"
+if "$beam_script" --root "$tmp2" --port "$busy_port" ensure --hold > "$busy_out" 2> "$busy_err"; then
+  echo "expected owner startup to reject a silent non-Beam service" >&2
+  cat "$busy_out" >&2
+  exit 1
+fi
+silent_probe_elapsed="$((SECONDS - silent_probe_started))"
+if [ "$silent_probe_elapsed" -ge 8 ]; then
+  echo "expected silent non-Beam probe to honor its response deadline, took ${silent_probe_elapsed}s" >&2
+  cat "$busy_err" >&2
+  exit 1
+fi
+if ! grep -Fq "response timed out" "$busy_err"; then
+  echo "expected silent non-Beam collision to report the bounded probe timeout" >&2
+  cat "$busy_err" >&2
+  exit 1
+fi
+if [ -e "$tmp2/.beam/beam-daemon.json" ]; then
+  echo "expected silent non-Beam collision not to publish a registry" >&2
+  cat "$tmp2/.beam/beam-daemon.json" >&2
+  exit 1
+fi
+kill "$busy_pid" > /dev/null 2>&1 || true
+wait "$busy_pid" 2>/dev/null || true
+busy_pid=""
+rm -f -- "$busy_port_file"
+busy_port_file=""
+
 start_slow_request "$tmp1" "shutdown-active" "shutdown-active"
 
 shutdown_json="$("$beam_script" --root "$tmp1" shutdown)"
