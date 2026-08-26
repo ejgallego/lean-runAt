@@ -2089,7 +2089,44 @@ def run_concurrent_dispatch(repo_root, fixture_root, timeout, server_trace=False
             eof_request_id = "eof-inflight"
             client.send_request("tools/call", slow_params, request_id=eof_request_id)
             wait_for_file(started_path, timeout, "EOF runAt gate sentinel")
+            eof_drop_token = "eof-workspace-drop-progress"
+            eof_drop_id = client.send_request(
+                "tools/call",
+                {
+                    "name": "lean_drop_workspace",
+                    "arguments": {"workspace": workspace_descriptor(project_root)},
+                    "_meta": {"progressToken": eof_drop_token},
+                },
+                request_id="eof-workspace-drop",
+            )
+            wait_for_progress_notification(
+                client,
+                eof_drop_token,
+                min(timeout, 5.0),
+                "EOF workspace drop admission",
+            )
             client.close_input()
+            eof_drop_result = expect_result(client.read_response(eof_drop_id))
+            require(
+                eof_drop_result.get("isError") is not True,
+                f"workspace drop admitted before EOF failed: {eof_drop_result}",
+            )
+            eof_dropped = eof_drop_result.get("structuredContent")
+            require(
+                isinstance(eof_dropped, dict) and eof_dropped.get("dropped") is True,
+                f"workspace drop admitted before EOF did not evict the runtime: {eof_drop_result}",
+            )
+            require_progress_sequence(
+                client.progress_notifications(eof_drop_token),
+                eof_drop_token,
+                "EOF workspace drop progress",
+            )
+            returncode = client.wait_for_exit_after_eof(timeout)
+            require(returncode == 0, f"legacy server exited with code {returncode} after active EOF")
+            require(
+                not client.response_ready(eof_request_id),
+                "request cancelled by EOF produced a terminal response",
+            )
             client.forget_request(eof_request_id)
         finally:
             if not release_path.exists():

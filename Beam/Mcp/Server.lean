@@ -59,7 +59,7 @@ def ServerState.create : IO ServerState := do
 def ServerState.protocolState (state : ServerState) : IO ProtocolState :=
   state.protocol.atomically get
 
-def ServerState.runtime? (state : ServerState) : IO (Option Beam.Broker.ServerRuntime) :=
+private def ServerState.runtime? (state : ServerState) : IO (Option Beam.Broker.ServerRuntime) :=
   state.runtime.get
 
 private def ServerState.withRuntimeControl

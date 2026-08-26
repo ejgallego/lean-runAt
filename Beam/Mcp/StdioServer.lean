@@ -272,6 +272,19 @@ private def InFlightRequest.markClientCancelled
     | .clientCancelled | .completed =>
         pure (false, none)
 
+private def InFlightRequest.cancel (request : InFlightRequest) : IO Unit := do
+  let (cancelled, brokerRequest?) ← request.markClientCancelled
+  if cancelled then
+    match brokerRequest? with
+    | none => pure ()
+    | some brokerRequest =>
+        let _ ← IO.asTask (prio := Task.Priority.dedicated) do
+          try
+            discard <| brokerRequest.cancel
+          catch e =>
+            Internal.traceMcp s!"broker cancellation failed id={request.id.label}: {e.toString}"
+        pure ()
+
 private def Coordinator.cancelRequest
     (coordinator : Coordinator)
     (id : RequestId) : IO Unit := do
@@ -279,18 +292,7 @@ private def Coordinator.cancelRequest
     pure <| (← get).inFlight.get? id
   match request? with
   | none => pure ()
-  | some request =>
-      let (cancelled, brokerRequest?) ← request.markClientCancelled
-      if cancelled then
-        match brokerRequest? with
-        | none => pure ()
-        | some brokerRequest =>
-            let _ ← IO.asTask (prio := Task.Priority.dedicated) do
-              try
-                discard <| brokerRequest.cancel
-              catch e =>
-                Internal.traceMcp s!"broker cancellation failed id={id.label}: {e.toString}"
-            pure ()
+  | some request => request.cancel
 
 private def Coordinator.beginClosing
     (coordinator : Coordinator) : IO (Bool × Array InFlightRequest) := do
@@ -300,7 +302,7 @@ private def Coordinator.beginClosing
     set { routing with closing := true }
     pure (routing.closing, requests)
   for request in requests do
-    coordinator.cancelRequest request.id
+    request.cancel
   pure (alreadyClosing, requests)
 
 private def awaitRequestDone (request : InFlightRequest) : IO Unit := do
@@ -312,7 +314,7 @@ private def Coordinator.awaitRequests
   for request in requests do
     awaitRequestDone request
 
-private def Coordinator.otherInFlightRequests
+private def Coordinator.otherAdmittedRequests
     (coordinator : Coordinator)
     (request : InFlightRequest) : IO (Array InFlightRequest) := do
   coordinator.routing.atomically do
@@ -437,7 +439,7 @@ private def Coordinator.handleControlToolRequest
         | some reporter => reporter.finish
         | none => pure ()
       let (previous?, done) ← coordinator.pushControlBarrier
-      let priorRequests ← coordinator.otherInFlightRequests request
+      let priorRequests ← coordinator.otherAdmittedRequests request
       let _ ← IO.asTask (prio := Task.Priority.dedicated) do
         let response ←
           try

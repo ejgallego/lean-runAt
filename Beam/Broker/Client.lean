@@ -29,7 +29,7 @@ def BrokerClientFailure.detail : BrokerClientFailure → String
   | .transport error | .streamCallback error => error.toString
   | .invalidResponse detail => detail
 
-def BrokerClientFailure.toIOError : BrokerClientFailure → IO.Error
+private def BrokerClientFailure.toIOError : BrokerClientFailure → IO.Error
   | .transport error | .streamCallback error => error
   | .invalidResponse detail => IO.userError detail
 
