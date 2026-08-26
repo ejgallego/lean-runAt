@@ -156,11 +156,11 @@ admission handle. The CLI scopes those requests before sending them.
 `Beam.Broker.Op.workspaceScope` is the shared operation classification; CLI and test adapters should
 use it instead of maintaining their own operation lists.
 
-Treat `ServerRuntime.state` transactions as pure ownership transitions. Never perform process I/O
-while holding that mutex: reset, drop, and runtime close must detach backend sessions and commit the
-new workspace state atomically, then wait for or terminate the detached processes after releasing
-the mutex. This keeps teardown of one workspace from blocking state access for every other
-workspace.
+Workspace teardown must not wait for backend shutdown while holding `ServerRuntime.state`: reset,
+drop, and runtime close detach backend sessions and commit the new workspace state atomically, then
+wait for or terminate the detached processes after releasing the mutex. This keeps teardown of one
+workspace from blocking state access for every other workspace. Other state transactions, including
+session startup and restart, may still perform process I/O while holding that mutex.
 
 ## MCP Projection Changes
 

@@ -579,35 +579,6 @@ private def checkDaemonFailureContext : IO Unit := do
     catch _ =>
       pure ()
 
-private def checkNoLiveDaemonFailureIncident : IO Unit := do
-  let root := System.FilePath.mk s!"/tmp/beam-no-live-daemon-incident-{← IO.monoNanosNow}"
-  try
-    IO.FS.createDirAll root
-    let detail := s!"no live Beam daemon registered for {root}"
-    let msg ← Beam.Cli.daemonFailureMessage root detail
-    requireSubstring "no-live daemon failure should include incident path" "Beam daemon incident:" msg
-
-    let incidentJson ← readSingleDaemonFailureIncidentJson root
-    requireJsonNat "no-live daemon incident should use schema version" "schemaVersion" 1 incidentJson
-    requireJsonString "no-live daemon incident should classify stale lookup"
-      "kind" "noLiveDaemon" incidentJson
-    requireJsonString "no-live daemon incident should keep original detail"
-      "detail" detail incidentJson
-    requireJsonString "no-live daemon incident should include root"
-      "root" root.toString incidentJson
-  finally
-    try
-      let control ← Beam.Daemon.controlDir root
-      if ← control.pathExists then
-        IO.FS.removeDirAll control
-    catch _ =>
-      pure ()
-    try
-      if ← root.pathExists then
-        IO.FS.removeDirAll root
-    catch _ =>
-      pure ()
-
 private def checkDaemonFailureUnreadableStartupLog : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-daemon-unreadable-startup-log-{← IO.monoNanosNow}"
   try
@@ -1255,7 +1226,6 @@ def main : IO Unit := do
   checkStartupRetryPolicy
   checkDaemonDebugWarnings
   checkDaemonFailureContext
-  checkNoLiveDaemonFailureIncident
   checkDaemonFailureUnreadableStartupLog
   checkPlainBrokerTaskCancellation
   checkBrokerConnectionClosedIncident

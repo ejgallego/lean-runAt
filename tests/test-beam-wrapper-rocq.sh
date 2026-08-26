@@ -94,4 +94,22 @@ rsync -a \
   fi
   wait_for_exit "$rocq_owner_pid" "Rocq session owner" 120 0.1
   wait "$rocq_owner_pid"
+  rocq_missing_out="$tmp_repo/rocq-missing-owner.out"
+  rocq_missing_err="$tmp_repo/rocq-missing-owner.err"
+  if [ -n "$rocq_cmd" ]; then
+    if BEAM_ROCQ_CMD="$rocq_cmd" "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" ensure rocq \
+        >"$rocq_missing_out" 2>"$rocq_missing_err"; then
+      echo "expected an ordinary Rocq command to require a session owner" >&2
+      exit 1
+    fi
+  elif "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" ensure rocq \
+      >"$rocq_missing_out" 2>"$rocq_missing_err"; then
+    echo "expected an ordinary Rocq command to require a session owner" >&2
+    exit 1
+  fi
+  if ! grep -Fq "lean-beam ensure rocq --hold" "$rocq_missing_err"; then
+    echo "expected Rocq missing-owner recovery to name the Rocq ownership command" >&2
+    cat "$rocq_missing_err" >&2
+    exit 1
+  fi
 )

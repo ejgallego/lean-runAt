@@ -33,6 +33,7 @@ fi
 hold_pid=""
 root_removed="false"
 active_request_pid=""
+paused_daemon_pid=""
 
 start_slow_request() {
   local root="$1"
@@ -109,6 +110,10 @@ stop_hold_process() {
 }
 
 cleanup() {
+  if [ -n "$paused_daemon_pid" ]; then
+    kill -CONT "$paused_daemon_pid" > /dev/null 2>&1 || true
+    paused_daemon_pid=""
+  fi
   if [ -n "$active_request_pid" ]; then
     kill "$active_request_pid" > /dev/null 2>&1 || true
     wait "$active_request_pid" 2>/dev/null || true
@@ -321,6 +326,50 @@ fi
 if [ -e "$registry" ]; then
   echo "expected a crashed daemon's owner to remove its exact registry generation" >&2
   cat "$registry" >&2
+  exit 1
+fi
+
+start_owner "$tmp1" "owner-unpublish-before-drain"
+draining_daemon_pid="$(read_json_field "$registry" pid)"
+kill -STOP "$draining_daemon_pid"
+paused_daemon_pid="$draining_daemon_pid"
+kill -INT "$hold_pid"
+for _ in $(seq 1 40); do
+  if [ ! -e "$registry" ]; then
+    break
+  fi
+  sleep 0.05
+done
+if [ -e "$registry" ]; then
+  echo "expected an interrupted owner to unpublish its generation before daemon drain" >&2
+  cat "$registry" >&2
+  exit 1
+fi
+if ! kill -0 "$hold_pid" 2>/dev/null || ! kill -0 "$draining_daemon_pid" 2>/dev/null; then
+  echo "expected the paused daemon and its owner to remain alive during the drain check" >&2
+  exit 1
+fi
+draining_lookup_out="$tmp1/draining-lookup.out"
+draining_lookup_err="$tmp1/draining-lookup.err"
+if "$beam_script" --root "$tmp1" ensure > "$draining_lookup_out" 2> "$draining_lookup_err"; then
+  echo "expected an ordinary command not to attach to an unpublished draining generation" >&2
+  cat "$draining_lookup_out" >&2
+  exit 1
+fi
+if ! grep -Fq "lean-beam ensure --hold" "$draining_lookup_err"; then
+  echo "expected draining-generation recovery to require a new explicit owner" >&2
+  cat "$draining_lookup_err" >&2
+  exit 1
+fi
+kill -CONT "$draining_daemon_pid"
+paused_daemon_pid=""
+if ! wait_for_exit "$hold_pid" "owner after unpublish-before-drain check" 200 0.05; then
+  cat "$tmp1/owner-unpublish-before-drain.err" >&2
+  exit 1
+fi
+wait "$hold_pid"
+hold_pid=""
+if ! wait_for_exit "$draining_daemon_pid" "daemon after unpublish-before-drain check" 200 0.05; then
   exit 1
 fi
 

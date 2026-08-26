@@ -1020,7 +1020,7 @@ def ServerRuntime.close (server : ServerRuntime) : IO Bool := do
     awaitRuntimeClose server.closeDone
     pure false
 
-def workspaceInitResult
+private def workspaceInitResult
     (workspaceId : WorkspaceId)
     (root : System.FilePath)
     (mode : Beam.Workspace.InitMode)

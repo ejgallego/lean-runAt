@@ -40,7 +40,7 @@ private def projectControlLockTimeoutMs : IO Nat := do
           "invalid BEAM_CONTROL_LOCK_TIMEOUT_MS value '0': expected a positive timeout"
       pure timeoutMs
 
-def projectControlLockDir (root : System.FilePath) : IO System.FilePath := do
+private def projectControlLockDir (root : System.FilePath) : IO System.FilePath := do
   pure ((← controlDir root) / "lock")
 
 /--
@@ -223,8 +223,6 @@ private def daemonFailureIncidentSchemaVersion : Nat :=
 private def daemonFailureKind? (detail : String) : Option String :=
   if detail.contains "Beam daemon connection closed" then
     some "connectionClosed"
-  else if detail.contains "no live Beam daemon registered for " then
-    some "noLiveDaemon"
   else
     none
 
@@ -587,9 +585,13 @@ private def activeOwnerMessage (root : System.FilePath) (entry : RegistryEntry) 
   s!"Beam session for {root} is already owned by wrapper pid {entry.ownerPid}; " ++
     "interrupt that 'lean-beam ensure --hold' process before starting another owner"
 
-private def missingOwnerMessage (root : System.FilePath) : String :=
+private def missingOwnerCommand : Option Backend → String
+  | some .rocq => "lean-beam ensure rocq --hold"
+  | some .lean | none => "lean-beam ensure --hold"
+
+private def missingOwnerMessage (root : System.FilePath) (backend? : Option Backend) : String :=
   s!"no live Beam session owner is registered for {root}; " ++
-    "start 'lean-beam ensure --hold' for this project and keep it running while using wrapper commands"
+    s!"start '{missingOwnerCommand backend?}' for this project and keep it running while using wrapper commands"
 
 private def startOwnedProjectDaemon
     (desired : DesiredConfig)
@@ -665,6 +667,9 @@ private def finishOwnedProjectDaemon
     (root : System.FilePath)
     (owned : OwnedProjectDaemon)
     (exitCodeRef : IO.Ref (Option UInt32)) : IO Unit := do
+  -- Stop publishing this generation before waiting for its child to drain. A second removal is an
+  -- idempotent retry for cleanup failures and cannot remove a replacement generation.
+  removeOwnedRegistry root owned.entry.daemonId
   finishOwnedDaemonChild owned exitCodeRef
   removeOwnedRegistry root owned.entry.daemonId
 
@@ -690,20 +695,21 @@ def withProjectDaemonOwner
 
 private def lookupProjectDaemon
     (root : System.FilePath)
-    (expectedHash? : Option String := none) : IO ProjectDaemonClient := do
+    (expectedHash? : Option String := none)
+    (backend? : Option Backend := none) : IO ProjectDaemonClient := do
   withProjectControlLock root do
     match ← registryLiveFor root expectedHash? with
     | some entry => projectDaemonClient entry
     | none =>
         stopRegisteredDaemon root
-        throw <| IO.userError (missingOwnerMessage root)
+        throw <| IO.userError (missingOwnerMessage root backend?)
 
 def withProjectDaemon
     (home root : System.FilePath)
     (backend : Backend)
     (act : ProjectDaemonClient → IO α) : IO α := do
   let desired ← desiredConfig home root backend
-  act (← lookupProjectDaemon root (some desired.configHash))
+  act (← lookupProjectDaemon root (some desired.configHash) (some backend))
 
 def withExistingProjectDaemon
     (root : System.FilePath)

@@ -146,9 +146,9 @@ inside the old Lean process is not sufficient to reload workspace configuration.
 - [Beam/Mcp/Protocol.lean](../Beam/Mcp/Protocol.lean) owns the current MCP JSON-RPC helpers.
 - [Beam/Mcp/Runtime.lean](../Beam/Mcp/Runtime.lean) owns root-to-runtime configuration.
 - [Beam/Mcp/SelfCheck.lean](../Beam/Mcp/SelfCheck.lean) owns the installed-wrapper self-check.
-- [Beam/Mcp/Server.lean](../Beam/Mcp/Server.lean) owns descriptor resolution, lazy cache dispatch,
-  the typed protocol-family state machine, the physically separate application registry, and the
-  synchronous protocol-test seam.
+- [Beam/Mcp/Server.lean](../Beam/Mcp/Server.lean) owns descriptor resolution, lazy broker-runtime
+  access, the typed protocol-family state machine, and the synchronous protocol-test seam. The
+  broker runtime is authoritative for workspace state.
 - [Beam/Mcp/StdioServer.lean](../Beam/Mcp/StdioServer.lean) owns the permanent stdin reader,
   concurrent coordination, cancellation, cache-control barriers, and serialized output.
 
