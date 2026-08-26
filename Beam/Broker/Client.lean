@@ -19,18 +19,19 @@ structure StreamCallbacks where
 
 abbrev Endpoint := Transport.Endpoint
 
-/-- Classify failures produced while a broker client exchanges one streamed request. -/
-inductive BrokerClientFailureKind where
-  | transport
-  | invalidResponse
-  | streamCallback
-  deriving BEq, Repr
-
 /-- Keep broker client failures typed until a CLI or transport presentation boundary. -/
-structure BrokerClientFailure where
-  kind : BrokerClientFailureKind
-  detail : String
-  deriving BEq, Repr
+inductive BrokerClientFailure where
+  | transport (error : IO.Error)
+  | invalidResponse (detail : String)
+  | streamCallback (error : IO.Error)
+
+def BrokerClientFailure.detail : BrokerClientFailure → String
+  | .transport error | .streamCallback error => error.toString
+  | .invalidResponse detail => detail
+
+def BrokerClientFailure.toIOError : BrokerClientFailure → IO.Error
+  | .transport error | .streamCallback error => error
+  | .invalidResponse detail => IO.userError detail
 
 def parsePortText (name value : String) : Except String UInt16 := do
   let some n := value.toNat?
@@ -47,21 +48,21 @@ def parseEndpointOption (args : List String) : Except String (Endpoint × List S
   | _ =>
       pure (.tcp 8765, args)
 
-private def decodeStreamMessage (msg : String) : IO StreamMessage := do
+private def decodeStreamMessage (msg : String) : Except String StreamMessage := do
   match Json.parse msg with
-  | .error err => throw <| IO.userError s!"invalid Beam daemon response json: {err}"
+  | .error err => throw s!"invalid Beam daemon response json: {err}"
   | .ok json =>
       match fromJson? (α := StreamMessage) json with
       | .ok stream => pure stream
-      | .error err => throw <| IO.userError s!"invalid Beam daemon response payload: {err}"
+      | .error err => throw s!"invalid Beam daemon response payload: {err}"
 
 private def captureClientFailure
-    (kind : BrokerClientFailureKind)
+    (failure : IO.Error → BrokerClientFailure)
     (action : IO α) : IO (Except BrokerClientFailure α) := do
   try
     pure <| .ok (← action)
   catch e =>
-    pure <| .error { kind, detail := e.toString }
+    pure <| .error (failure e)
 
 private def diagnosticSeverityLabel : Option Lsp.DiagnosticSeverity → String
   | some .error => "error"
@@ -108,15 +109,12 @@ partial def sendRequestWithStreamResult
         | .ok msg => pure msg
         | .error failure => return .error failure
       let stream ←
-        match ← captureClientFailure .invalidResponse (decodeStreamMessage msg) with
+        match decodeStreamMessage msg with
         | .ok stream => pure stream
-        | .error failure => return .error failure
+        | .error detail => return .error (.invalidResponse detail)
       unless stream.clientRequestId? == req.clientRequestId? do
-        return .error {
-          kind := .invalidResponse
-          detail :=
-            s!"Beam daemon stream request id {stream.clientRequestId?} does not match request id {req.clientRequestId?}"
-        }
+        return .error <| .invalidResponse <|
+          s!"Beam daemon stream request id {stream.clientRequestId?} does not match request id {req.clientRequestId?}"
       match ← captureClientFailure .streamCallback (onStream stream) with
       | .ok () => pure ()
       | .error failure => return .error failure
@@ -135,7 +133,7 @@ partial def sendRequestWithStream
     (onStream : StreamMessage → IO Unit) : IO Response := do
   match ← sendRequestWithStreamResult endpoint req onStream with
   | .ok response => pure response
-  | .error failure => throw <| IO.userError failure.detail
+  | .error failure => throw failure.toIOError
 
 /-- Send one request with typed client failures and structured progress callbacks. -/
 partial def sendRequestWithCallbacksResult
@@ -157,7 +155,7 @@ partial def sendRequestWithCallbacks
     (callbacks : StreamCallbacks := {}) : IO Response := do
   match ← sendRequestWithCallbacksResult endpoint req callbacks with
   | .ok response => pure response
-  | .error failure => throw <| IO.userError failure.detail
+  | .error failure => throw failure.toIOError
 def sendRequest (endpoint : Endpoint) (req : Request) : IO Response :=
   sendRequestWithCallbacks endpoint req
 

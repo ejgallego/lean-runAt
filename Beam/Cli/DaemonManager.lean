@@ -220,10 +220,10 @@ private structure DaemonFailureIncident where
 private def daemonFailureIncidentSchemaVersion : Nat :=
   1
 
-private def daemonFailureIncidentKind? : BrokerClientFailureKind → Option String
-  | .transport => some "brokerTransportFailure"
-  | .invalidResponse => some "invalidBrokerResponse"
-  | .streamCallback => none
+private def daemonFailureIncidentKind? : BrokerClientFailure → Option String
+  | .transport _ => some "brokerTransportFailure"
+  | .invalidResponse _ => some "invalidBrokerResponse"
+  | .streamCallback _ => none
 
 private def daemonFailureIncidentTimestampLabel (timestamp : String) : String :=
   (timestamp.replace "-" "").replace ":" ""
@@ -283,7 +283,7 @@ def daemonFailureMessage
     (root : System.FilePath)
     (failure : BrokerClientFailure) : IO String := do
   let detail := failure.detail
-  match daemonFailureIncidentKind? failure.kind with
+  match daemonFailureIncidentKind? failure with
   | none =>
     pure detail
   | some kind =>

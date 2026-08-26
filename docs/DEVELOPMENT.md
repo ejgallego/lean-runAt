@@ -184,6 +184,14 @@ In-process MCP lifecycle calls use the broker's typed `initWorkspaceWithConfig` 
 results directly; do not route them through broker JSON dispatch and decode them back into the same
 types.
 
+CLI and MCP share semantic dispatch, not transport coordination. A daemon accepts one broker request
+per socket connection, so the connection itself supplies response routing and disconnect lifetime.
+MCP multiplexes requests over one stdio stream, so `Beam.Mcp.StdioServer` must own exact JSON-RPC ID
+routing, serialized output, client cancellation, and workspace-control barriers. Both paths converge
+on `ServerRuntime.dispatchRequestWithHandle`, whose admission handle is the shared cancellation and
+drain boundary. Keep the two ingress coordinators separate unless a future transport has the same
+wire-level ownership rules; do not duplicate semantic operation dispatch above that boundary.
+
 The executable path is split into importable modules:
 
 - [Beam/Mcp/Protocol.lean](../Beam/Mcp/Protocol.lean): current MCP JSON-RPC helpers

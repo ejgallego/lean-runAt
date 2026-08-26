@@ -1866,6 +1866,20 @@ def run_concurrent_dispatch(repo_root, fixture_root, timeout, server_trace=False
             require(isinstance(slow_structured, dict), f"slow runAt missing structured content: {slow_result}")
             require_success("slow concurrent runAt", slow_structured)
             expect_result(client.request("ping", request_id=slow_id))
+            async_reuse_id = "async-tool-request-id-reuse"
+            for reuse_iteration in range(64):
+                version_result = expect_result(
+                    client.request(
+                        "tools/call",
+                        {"name": "beam_version", "arguments": {}},
+                        request_id=async_reuse_id,
+                    )
+                )
+                require(
+                    version_result.get("isError") is not True,
+                    f"async request-ID reuse tool call {reuse_iteration} failed: {version_result}",
+                )
+                expect_result(client.request("ping", request_id=async_reuse_id))
             require(
                 len(status_log_notifications(client, slow_id)) == status_count,
                 f"slow no-token runAt emitted duplicate or post-response statuses: {client.notifications}",

@@ -130,6 +130,27 @@ After editing a lakefile, manifest, package override, `lean-toolchain`, Lean opt
 dynamic libraries, drop that workspace or restart the MCP server before the next request. Re-syncing
 inside the old Lean process is not sufficient to reload workspace configuration.
 
+## Transport Lifetime
+
+The `lean-beam-mcp` stdio process owns its optional in-process broker runtime. MCP clients do not
+start or attach to a wrapper daemon and do not need a separate `lean-beam ensure --hold` owner. The
+first workspace-bound request creates the runtime lazily; later descriptors share that runtime while
+the broker remains authoritative for workspace membership. `lean_drop_workspace` evicts one cached
+workspace but does not end the stdio session.
+
+Closing stdin or reaching EOF closes MCP request admission. The server cooperatively cancels active
+cancellable requests, waits for every admitted request and non-cancellable workspace eviction to
+finish, then closes the broker runtime and all remaining backend sessions. A JSON-RPC request ID is
+active only until its request reaches terminal completion. The server retires that exact admission
+before publishing its terminal response, so a client may reuse the ID after observing the response;
+the completion barrier is resolved only after the response write finishes.
+
+CLI ingress has a different transport lifetime: a standalone daemon accepts one request per socket
+connection, and disconnecting that connection cancels its exact broker admission. MCP carries many
+overlapping requests on one stdio stream and therefore owns application-level ID routing,
+cancellation, output serialization, and workspace-control fences. Both paths use the same broker
+request dispatcher and runtime teardown boundary.
+
 ## Code Ownership
 
 - [Beam/Broker/Protocol.lean](../Beam/Broker/Protocol.lean) owns broker request, response, handle,

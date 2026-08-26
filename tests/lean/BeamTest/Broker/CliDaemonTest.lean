@@ -66,10 +66,8 @@ private def expectIoErrorContains (label needle : String) (act : IO α) : IO Uni
 private def requireSubstring (label needle haystack : String) : IO Unit := do
   require s!"{label}: expected '{needle}' in '{haystack}'" (Beam.Cli.hasSubstring haystack needle)
 
-private def brokerTransportFailure (detail : String) : Beam.Broker.BrokerClientFailure := {
-  kind := .transport
-  detail
-}
+private def brokerTransportFailure (detail : String) : Beam.Broker.BrokerClientFailure :=
+  .transport (IO.userError detail)
 
 private def requireJsonNat (label field : String) (expected : Nat) (json : Json) : IO Unit := do
   let actual ← IO.ofExcept <| json.getObjValAs? Nat field
@@ -625,19 +623,15 @@ private def checkTypedDaemonFailureClassification : IO Unit := do
   try
     IO.FS.createDirAll root
     let callbackDetail := "synthetic stream callback failure"
-    let callbackMsg ← Beam.Cli.daemonFailureMessage root {
-      kind := .streamCallback
-      detail := callbackDetail
-    }
+    let callbackMsg ← Beam.Cli.daemonFailureMessage root <|
+      .streamCallback (IO.userError callbackDetail)
     require "stream callback failure should preserve its detail" (callbackMsg == callbackDetail)
     require "stream callback failure should not create a daemon incident"
       (← sortedIncidentEntries root).isEmpty
 
     let invalidDetail := "synthetic invalid response"
-    let invalidMsg ← Beam.Cli.daemonFailureMessage root {
-      kind := .invalidResponse
-      detail := invalidDetail
-    }
+    let invalidMsg ← Beam.Cli.daemonFailureMessage root <|
+      .invalidResponse invalidDetail
     requireSubstring "invalid response should include incident path" "Beam daemon incident:" invalidMsg
     let incidentJson ← readSingleDaemonFailureIncidentJson root
     requireJsonString "invalid response incident should retain its typed classification"
