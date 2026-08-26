@@ -122,6 +122,38 @@ private def checkActiveRegistry : IO Unit := do
         failure
   ActiveRequestRegistry.unregister registry (some replacement)
 
+private def checkActiveRegistryCloseDrain : IO Unit := do
+  let registry ← ActiveRequestRegistry.create
+  let named ← expectRegistered "register named request before close" <|
+    ← ActiveRequestRegistry.register registry (some "closing-request")
+  let anonymous ← expectRegistered "register anonymous request before close" <|
+    ← ActiveRequestRegistry.register registry none
+  require "first admission close should lead closure"
+    (← ActiveRequestRegistry.closeAdmission registry)
+  for active in #[named, anonymous] do
+    match ← ensureRequestNotCancelled (some active.cancelRef) with
+    | .ok _ => throw <| IO.userError "admission close did not cancel an active request"
+    | .error failure =>
+        discard <| requireFailureCode
+          "admission close cancellation"
+          "requestCancelled"
+          failure
+  match ← ActiveRequestRegistry.register registry (some "after-close") with
+  | .ok _ => throw <| IO.userError "closed admission accepted a new request"
+  | .error failure =>
+      require "closed admission rejection is typed" (failure.code == .requestCancelled)
+  let drainTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+    ActiveRequestRegistry.awaitDrained registry
+  ActiveRequestRegistry.unregister registry (some named)
+  IO.sleep 10
+  require "drain should wait for every admitted request" (!(← IO.hasFinished drainTask))
+  ActiveRequestRegistry.unregister registry (some anonymous)
+  match ← IO.wait drainTask with
+  | .ok () => pure ()
+  | .error err => throw err
+  require "repeated admission close should be idempotent"
+    (!(← ActiveRequestRegistry.closeAdmission registry))
+
 private def checkPendingCancellationIdentity : IO Unit := do
   let registry ← ActiveRequestRegistry.create
   let firstResult ← ActiveRequestRegistry.register registry (some "reused-id")
@@ -414,6 +446,7 @@ private def checkSetupFileProgressStreamsByScope : IO Unit := do
 
 def main : IO Unit := do
   checkActiveRegistry
+  checkActiveRegistryCloseDrain
   checkPendingCancellationIdentity
   checkPendingStoreResolve
   checkPendingStoreFailAllRespectingCancellation

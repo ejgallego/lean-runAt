@@ -315,7 +315,7 @@ private def Coordinator.closeTransport (coordinator : Coordinator) : IO Unit := 
       match application.runtime? with
       | none => pure ()
       | some runtime =>
-          discard <| runtime.dispatchRequest { op := .shutdown }
+          discard <| runtime.close
 
 private def Coordinator.admitToolRequest
     (coordinator : Coordinator)

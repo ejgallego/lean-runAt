@@ -862,16 +862,48 @@ private def checkWorkspaceLifecycleProtocol : IO Unit := do
   require "typed workspace drop preserves lifecycle state"
     (decodedDrop.workspaceId == "fixture" && decodedDrop.dropped && decodedDrop.invalidatedHandles)
 
+private partial def waitForCancellation
+    (cancelRef : IO.Ref Bool)
+    (tries : Nat := 100) : IO Unit := do
+  if ← cancelRef.get then
+    pure ()
+  else if tries == 0 then
+    throw <| IO.userError "timed out waiting for runtime close cancellation"
+  else
+    IO.sleep 10
+    waitForCancellation cancelRef (tries - 1)
+
 private def checkSessionCloseAdmission : IO Unit := do
   let root := System.FilePath.mk "/tmp/beam-session-close-admission"
   let runtime ← Beam.Broker.ServerRuntime.create
     ({ root } : Beam.Broker.BrokerConfig) "fixture" (.tcp 0)
   let (beforeClose, _) ← runtime.dispatchRequest { op := .stats }
   require "stats should be admitted before session close" beforeClose.ok
-  require "first session close should win admission shutdown"
-    (← ActiveRequestRegistry.closeAdmission runtime.activeRequests)
+  let active ←
+    match ← ActiveRequestRegistry.register runtime.activeRequests (some "close-drain") with
+    | .ok active => pure active
+    | .error failure => throw <| IO.userError failure.message
+  let closeTask ← IO.asTask (prio := Task.Priority.dedicated) runtime.close
+  waitForCancellation active.cancelRef
+  let concurrentCloseTask ← IO.asTask (prio := Task.Priority.dedicated) runtime.close
+  IO.sleep 10
+  require "runtime close should wait for admitted dispatch scopes"
+    (!(← IO.hasFinished closeTask))
+  require "concurrent runtime close should share the same drain"
+    (!(← IO.hasFinished concurrentCloseTask))
+  ActiveRequestRegistry.unregister runtime.activeRequests (some active)
+  let firstClose ←
+    match ← IO.wait closeTask with
+    | .ok firstClose => pure firstClose
+    | .error err => throw err
+  require "first runtime close should lead shutdown" firstClose
+  let concurrentClose ←
+    match ← IO.wait concurrentCloseTask with
+    | .ok concurrentClose => pure concurrentClose
+    | .error err => throw err
+  require "concurrent runtime close should not lead shutdown" (!concurrentClose)
   require "repeated session close should be idempotent"
-    (!(← ActiveRequestRegistry.closeAdmission runtime.activeRequests))
+    (!(← runtime.close))
   let (afterClose, _) ← runtime.dispatchRequest { op := .stats }
   require "ordinary requests should be rejected after session close"
     (afterClose.error?.any fun err => err.code == "requestCancelled")

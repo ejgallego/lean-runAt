@@ -300,6 +300,14 @@ Keep ordinary daemon and CLI dispatch on
 directly. Pending LSP requests must retain the same per-admission cancellation identity; after a
 handle has been validated, never fall back to matching a reusable client request ID.
 
+`ServerRuntime.close` is the shared runtime teardown boundary. It closes admission, marks every
+admitted request for cancellation, shuts down backend sessions to unblock pending work, waits for
+all admitted dispatch scopes to unregister, and performs a final backend sweep so a request that
+was between admission and session creation cannot leave a late process behind. Concurrent and
+repeated callers wait for the same result. Transport owners decide what triggers closure and how
+their listener or stdio connection stops; they must not duplicate broker draining or backend
+teardown.
+
 The thick part of the broker is request orchestration. For `sync`, `runAt`, `goals`, `runWith`,
 `release`, and `save`, the broker reads the source file, updates the LSP document mirror, waits for
 the relevant diagnostics/progress barrier when needed, asks the backend for semantic facts, and

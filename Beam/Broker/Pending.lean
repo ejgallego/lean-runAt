@@ -340,14 +340,36 @@ private structure ActiveRequestRegistryState where
   accepting : Bool := true
   requests : Std.TreeMap String ActiveRequest := {}
   anonymousRequests : Std.TreeMap Nat ActiveRequest := {}
+  drainedSignaled : Bool := false
 
 structure ActiveRequestRegistry where
   private mutex : Std.Mutex ActiveRequestRegistryState
+  private drained : IO.Promise Unit
 
 namespace ActiveRequestRegistry
 
 def create : BaseIO ActiveRequestRegistry := do
-  pure { mutex := ← Std.Mutex.new {} }
+  pure {
+    mutex := ← Std.Mutex.new {}
+    drained := ← IO.Promise.new
+  }
+
+private def activeRequestCount
+    (state : ActiveRequestRegistryState) : Nat :=
+  state.requests.size + state.anonymousRequests.size
+
+private def markDrainedIfReady
+    (state : ActiveRequestRegistryState) : ActiveRequestRegistryState × Bool :=
+  if !state.accepting && activeRequestCount state == 0 && !state.drainedSignaled then
+    ({ state with drainedSignaled := true }, true)
+  else
+    (state, false)
+
+private def resolveDrainedIfNeeded
+    (registry : ActiveRequestRegistry)
+    (shouldResolve : Bool) : IO Unit := do
+  if shouldResolve then
+    registry.drained.resolve ()
 
 def register
     (registry : ActiveRequestRegistry)
@@ -388,44 +410,60 @@ def unregister
   match active? with
   | none => pure ()
   | some active =>
-      registry.mutex.atomically do
+      let shouldResolve ← registry.mutex.atomically do
         let state ← get
-        match active.clientRequestId? with
-        | some clientRequestId =>
-            match state.requests.get? clientRequestId with
-            | some current =>
-                if current.token == active.token then
-                  set { state with requests := state.requests.erase clientRequestId }
-            | none => pure ()
-        | none =>
-            match state.anonymousRequests.get? active.token with
-            | some current =>
-                if current.token == active.token then
-                  set { state with anonymousRequests := state.anonymousRequests.erase active.token }
-            | none => pure ()
+        let state :=
+          match active.clientRequestId? with
+          | some clientRequestId =>
+              match state.requests.get? clientRequestId with
+              | some current =>
+                  if current.token == active.token then
+                    { state with requests := state.requests.erase clientRequestId }
+                  else
+                    state
+              | none => state
+          | none =>
+              match state.anonymousRequests.get? active.token with
+              | some current =>
+                  if current.token == active.token then
+                    { state with anonymousRequests := state.anonymousRequests.erase active.token }
+                  else
+                    state
+              | none => state
+        let (state, shouldResolve) := markDrainedIfReady state
+        set state
+        pure shouldResolve
+      resolveDrainedIfNeeded registry shouldResolve
 
 def count (registry : ActiveRequestRegistry) : IO Nat := do
   registry.mutex.atomically do
-    let state ← get
-    pure (state.requests.size + state.anonymousRequests.size)
+    pure (activeRequestCount (← get))
 
 /--
 Atomically close request admission and mark every admitted request for cancellation. Return `true`
 only to the caller that changed the registry from accepting to closed.
 -/
 def closeAdmission (registry : ActiveRequestRegistry) : IO Bool := do
-  let (firstClose, active) ← registry.mutex.atomically do
+  let (firstClose, active, shouldResolve) ← registry.mutex.atomically do
     let state : ActiveRequestRegistryState ← get
     if !state.accepting then
-      pure (false, #[])
+      pure (false, #[], false)
     else
-      set { state with accepting := false }
+      let (state, shouldResolve) := markDrainedIfReady { state with accepting := false }
+      set state
       let named := state.requests.toList.map Prod.snd |>.toArray
       let anonymous := state.anonymousRequests.toList.map Prod.snd |>.toArray
-      pure (true, named ++ anonymous)
+      pure (true, named ++ anonymous, shouldResolve)
   for request in active do
     request.cancelRef.set true
+  resolveDrainedIfNeeded registry shouldResolve
   pure firstClose
+
+/-- Wait until admission is closed and every request admitted before closure has unregistered. -/
+def awaitDrained (registry : ActiveRequestRegistry) : IO Unit := do
+  let some _ ← IO.wait registry.drained.result?
+    | throw <| IO.userError "active request registry drain promise dropped"
+  pure ()
 
 def markCancelled
     (registry : ActiveRequestRegistry)

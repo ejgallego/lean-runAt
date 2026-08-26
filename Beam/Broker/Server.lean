@@ -888,6 +888,8 @@ structure ServerRuntime where
   endpoint : Transport.Endpoint
   stop : IO.Ref Bool
   activeRequests : ActiveRequestRegistry
+  private closeMutex : Std.Mutex Bool
+  private closeDone : IO.Promise (Except IO.Error Unit)
 
 /--
 A cancellation capability bound to one active broker request admission.
@@ -925,6 +927,8 @@ def ServerRuntime.create
     endpoint := endpoint
     stop := ← IO.mkRef false
     activeRequests := ← ActiveRequestRegistry.create
+    closeMutex := ← Std.Mutex.new false
+    closeDone := ← IO.Promise.new
   }
 
 private def brokerConfigSame (left right : BrokerConfig) : Bool :=
@@ -937,6 +941,72 @@ private def shutdownWorkspaceSessions (workspace : WorkspaceState) : IO Unit := 
   for session? in [workspace.lean.session?, workspace.rocq.session?] do
     if let some session := session? then
       shutdownSession session
+
+private def detachBackendSession
+    (backend : BackendState) : BackendState × Option Session :=
+  match backend.session? with
+  | none => (backend, none)
+  | some session =>
+      ({ backend with session? := none, nextEpoch := backend.nextEpoch + 1 }, some session)
+
+private def detachRuntimeSessions (server : ServerRuntime) : IO (Array Session) := do
+  server.withState do
+    let state ← get
+    let mut sessions := #[]
+    for (workspaceId, workspace) in state.workspaces.toList do
+      let (lean, leanSession?) := detachBackendSession workspace.lean
+      let (rocq, rocqSession?) := detachBackendSession workspace.rocq
+      if let some session := leanSession? then
+        sessions := sessions.push session
+      if let some session := rocqSession? then
+        sessions := sessions.push session
+      modify fun state => setWorkspace state workspaceId { workspace with lean, rocq }
+    pure sessions
+
+private def shutdownRuntimeSessions (server : ServerRuntime) : IO Unit := do
+  for session in ← detachRuntimeSessions server do
+    shutdownSession session
+
+private def awaitRuntimeClose
+    (promise : IO.Promise (Except IO.Error Unit)) : IO Unit := do
+  let some outcome ← IO.wait promise.result?
+    | throw <| IO.userError "broker runtime close promise dropped"
+  match outcome with
+  | .ok () => pure ()
+  | .error err => throw err
+
+/--
+Close broker admission, cancel admitted requests, shut down every backend session, and wait for
+all admitted dispatch scopes to unregister. Concurrent and repeated callers wait for the same
+close result; only the caller that started closure receives `true`.
+-/
+def ServerRuntime.close (server : ServerRuntime) : IO Bool := do
+  let leadsClose ← server.closeMutex.atomically do
+    if ← get then
+      pure false
+    else
+      set true
+      pure true
+  if leadsClose then
+    let outcome ←
+      try
+        discard <| ActiveRequestRegistry.closeAdmission server.activeRequests
+        -- The first sweep unblocks requests already waiting on a backend. An admitted request may
+        -- have been between admission and session creation when closure began, so repeat the sweep
+        -- after every dispatch scope has drained to guarantee that no late session survives.
+        shutdownRuntimeSessions server
+        ActiveRequestRegistry.awaitDrained server.activeRequests
+        shutdownRuntimeSessions server
+        pure (.ok () : Except IO.Error Unit)
+      catch err =>
+        pure (.error err)
+    server.closeDone.resolve outcome
+    match outcome with
+    | .ok () => pure true
+    | .error err => throw err
+  else
+    awaitRuntimeClose server.closeDone
+    pure false
 
 def workspaceInitResult
     (workspaceId : WorkspaceId)
@@ -2127,16 +2197,11 @@ private def handleRequestIO
   let cancelRef? := activeRequest?.map (·.cancelRef)
   match req.op with
   | .shutdown =>
-      let firstClose ← ActiveRequestRegistry.closeAdmission server.activeRequests
-      if firstClose then
-        let resp ← server.withState do
-          let state ← get
-          for (_, workspace) in state.workspaces.toList do
-            shutdownWorkspaceSessions workspace
-          pure <| Response.success (Json.mkObj [("shutdown", toJson true)])
-        pure (resp, true)
-      else
-        pure (Response.success (Json.mkObj [("shutdown", toJson true)]), false)
+      let firstClose ← server.close
+      pure (
+        Response.success (Json.mkObj [("shutdown", toJson true)]),
+        firstClose
+      )
   | .stats =>
       match req.workspaceId? with
       | none => pure (← server.statsResponse, false)
@@ -2332,7 +2397,7 @@ private partial def watchRoot (server : ServerRuntime) (root : System.FilePath) 
         pure false
     if !rootAvailable then
       IO.eprintln s!"Beam daemon root is no longer available; shutting down: {root}"
-      let (_, shouldStop) ← server.dispatchRequest { op := .shutdown }
+      let shouldStop ← server.close
       if shouldStop then
         requestStop server
     else
@@ -2345,7 +2410,7 @@ private def watchSessionOwnerStdin (server : ServerRuntime) : IO Unit := do
   catch _ =>
     pure ()
   unless ← server.stop.get do
-    let (_, shouldStop) ← server.dispatchRequest { op := .shutdown }
+    let shouldStop ← server.close
     if shouldStop then
       requestStop server
 
@@ -2498,5 +2563,6 @@ def main (args : List String) : IO Unit := do
     if let some ownerWatcher := ownerWatcher? then
       IO.cancel ownerWatcher
     discard <| IO.wait rootWatcher
+    discard <| runtime.close
 
 end Beam.Broker
