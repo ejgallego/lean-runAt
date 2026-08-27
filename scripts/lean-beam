@@ -47,7 +47,8 @@ usage:
 
 notes:
   - lean-beam keeps the Lean wrapper surface primary; optional Rocq goal probes are documented in docs/ROCQ.md
-  - common Rocq entry points are `lean-beam ensure rocq`, `lean-beam doctor rocq`, `lean-beam rocq-goals-after`, and `lean-beam rocq-goals-prev`
+  - start a Rocq session with `lean-beam ensure rocq --hold`; plain `ensure rocq` only checks and warms that owned session
+  - other common Rocq entry points are `lean-beam doctor rocq`, `lean-beam rocq-goals-after`, and `lean-beam rocq-goals-prev`
   - run `lean-beam update <path>` first, then pass its returned `version` to Lean position/range probes
   - run `lean-beam sync <path>` when you also need the diagnostics/readiness barrier
   - for multiline text-carrying Lean probes, prefer `--stdin` or `--text-file <path>`; use `--` before text that starts with `--`

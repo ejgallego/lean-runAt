@@ -267,7 +267,9 @@ if "$install_root/current/bin/lean-beam" prune --apply > /dev/null 2>"$install_l
   echo "expected prune to respect the active install lock" >&2
   exit 1
 fi
-assert_contains_literal "$install_lock_err" 'timed out after 1000 ms waiting for Beam lock'
+assert_contains_literal "$install_lock_err" 'timed out after '
+assert_contains_literal "$install_lock_err" ' ms waiting for Beam lock'
+assert_contains_literal "$install_lock_err" 'timeout: 1000 ms'
 rm -f "$install_root/.install-lock/pid" "$install_root/.install-lock/pid-domain"
 rmdir "$install_root/.install-lock"
 assert_file "$old_runtime/manifest.json"
@@ -313,7 +315,9 @@ if "$install_root/current/bin/lean-beam" prune --apply --bundles \
   exit 1
 fi
 assert_contains_literal "$bundle_lock_out" "removed runtime: $resolved_partial_runtime"
-assert_contains_literal "$bundle_lock_err" 'timed out after 1000 ms waiting for Beam lock'
+assert_contains_literal "$bundle_lock_err" 'timed out after '
+assert_contains_literal "$bundle_lock_err" ' ms waiting for Beam lock'
+assert_contains_literal "$bundle_lock_err" 'timeout: 1000 ms'
 assert_contains_literal "$bundle_lock_err" \
   'prune stopped before completing the displayed plan; any removals reported above were applied'
 # shellcheck disable=SC2016

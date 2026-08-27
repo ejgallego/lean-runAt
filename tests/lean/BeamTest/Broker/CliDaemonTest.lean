@@ -97,7 +97,12 @@ private def readSingleDaemonFailureIncidentJson (root : System.FilePath) : IO Js
 
 private def closeAcceptedConnection (listener : Beam.Broker.Transport.Listener) : IO Unit := do
   let conn ← Beam.Broker.Transport.accept listener
-  Beam.Broker.Transport.closeConnection conn
+  try
+    -- Read the complete request before closing so the client failure is deterministically on the
+    -- receive boundary. The operating system may still describe that close as EOF or ECONNRESET.
+    discard <| Beam.Broker.Transport.recvMsg conn
+  finally
+    Beam.Broker.Transport.closeConnection conn
 
 private def holdAcceptedConnection
     (listener : Beam.Broker.Transport.Listener)
@@ -743,7 +748,7 @@ private def checkBrokerConnectionClosedIncident : IO Unit := do
       let msg ← expectIoErrorMessage "broker connection close should surface daemon failure" <|
         Beam.Cli.callBrokerQuiet root (projectDaemonClientForTest endpoint) { op := .stats }
       requireSubstring "broker connection close should preserve transport failure"
-        "Beam daemon connection closed" msg
+        "Beam daemon receive failed:" msg
       requireSubstring "broker connection close should include incident path"
         "Beam daemon incident:" msg
 
@@ -751,7 +756,7 @@ private def checkBrokerConnectionClosedIncident : IO Unit := do
       requireJsonString "broker close incident should classify the typed transport failure"
         "kind" "brokerTransportFailure" incidentJson
       requireJsonStringContains "broker close incident should keep transport detail"
-        "detail" "Beam daemon connection closed" incidentJson
+        "detail" "Beam daemon receive failed:" incidentJson
       requireJsonString "broker close incident should include endpoint summary"
         "registryEndpoint" (Beam.Daemon.endpointSummary endpoint) incidentJson
   finally

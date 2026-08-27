@@ -64,7 +64,10 @@ def withInterruptWatcher (act : InterruptWatcher → IO α) : IO α := do
     try
       Std.Internal.UV.Signal.next signal
     catch err =>
-      Std.Internal.UV.Signal.stop signal
+      try
+        Std.Internal.UV.Signal.stop signal
+      catch _ =>
+        pure ()
       throw err
   let event := promise.result?
   let watcher : InterruptWatcher := {

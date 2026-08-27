@@ -1193,8 +1193,7 @@ private def ServerRuntime.runWorkspaceTransition
     let transition := transition (← get)
     set transition.state
     pure transition
-  for session in transition.detachedSessions do
-    shutdownSession session
+  shutdownSessionsBestEffort transition.detachedSessions.toList none
   pure transition.result
 
 /--
@@ -2688,6 +2687,88 @@ private partial def parseCliOptions (opts : CliOptions) : List String → Except
   | arg :: _ =>
       throw s!"unexpected Beam daemon argument '{arg}'"
 
+private abbrev DaemonWatcherTask := Task (Except IO.Error Unit)
+
+private structure DaemonResources where
+  runtime : ServerRuntime
+  transport : DaemonTransport
+  rootWatcher : DaemonWatcherTask
+  ownerWatcher? : Option DaemonWatcherTask
+
+private def closeDaemonParts
+    (runtime : ServerRuntime)
+    (transport? : Option DaemonTransport)
+    (rootWatcher? ownerWatcher? : Option DaemonWatcherTask) : IO Unit := do
+  let firstError? ←
+    match transport? with
+    | none => pure none
+    | some transport => recordFirstCleanupError none <| transport.stop.set true
+  let firstError? ←
+    match transport? with
+    | none => pure firstError?
+    | some transport =>
+        recordFirstCleanupError firstError? <| Transport.closeListener transport.listener
+  let firstError? ←
+    match ownerWatcher? with
+    | none => pure firstError?
+    | some ownerWatcher =>
+        recordFirstCleanupError firstError? do
+          try
+            IO.cancel ownerWatcher
+          finally
+            discard <| IO.wait ownerWatcher
+  let firstError? ←
+    match rootWatcher? with
+    | none => pure firstError?
+    | some rootWatcher =>
+        recordFirstCleanupError firstError? do
+          discard <| IO.wait rootWatcher
+  let firstError? ← recordFirstCleanupError firstError? runtime.close
+  if let some err := firstError? then
+    throw err
+
+private def DaemonResources.close (resources : DaemonResources) : IO Unit :=
+  closeDaemonParts resources.runtime (some resources.transport) (some resources.rootWatcher)
+    resources.ownerWatcher?
+
+private def throwAfterBestEffortCleanup
+    (err : IO.Error)
+    (cleanup : IO Unit) : IO α := do
+  try
+    cleanup
+  catch _ =>
+    pure ()
+  throw err
+
+private def acquireDaemonResources
+    (opts : CliOptions)
+    (config : BrokerConfig)
+    (workspaceId : WorkspaceId)
+    (daemonIdentity? : Option DaemonIdentity)
+    (root : System.FilePath) : IO DaemonResources := do
+  let runtime ← ServerRuntime.create config workspaceId daemonIdentity?
+  let transport ←
+    try
+      DaemonTransport.create opts.endpoint
+    catch err =>
+      throwAfterBestEffortCleanup err runtime.close
+  let rootWatcher ←
+    try
+      IO.asTask (prio := Task.Priority.dedicated) <| watchRoot runtime transport root
+    catch err =>
+      throwAfterBestEffortCleanup err <| closeDaemonParts runtime (some transport) none none
+  let ownerWatcher? ←
+    try
+      if opts.sessionOwnerStdin then
+        some <$> IO.asTask (prio := Task.Priority.dedicated)
+          (watchSessionOwnerStdin runtime transport)
+      else
+        pure none
+    catch err =>
+      throwAfterBestEffortCleanup err <|
+        closeDaemonParts runtime (some transport) (some rootWatcher) none
+  pure { runtime, transport, rootWatcher, ownerWatcher? }
+
 def main (args : List String) : IO Unit := do
   let opts ← IO.ofExcept <| parseCliOptions {} args
   let some root := opts.root?
@@ -2715,35 +2796,10 @@ def main (args : List String) : IO Unit := do
     leanPlugin? := leanPlugin?
     rocqCmd? := opts.rocqCmd?
   }
-  let runtime ← ServerRuntime.create config workspaceId daemonIdentity?
-  let transport ← DaemonTransport.create opts.endpoint
-  let rootWatcher ← IO.asTask (prio := Task.Priority.dedicated) <|
-    watchRoot runtime transport root
-  let ownerWatcher? ←
-    if opts.sessionOwnerStdin then
-      some <$> IO.asTask (prio := Task.Priority.dedicated)
-        (watchSessionOwnerStdin runtime transport)
-    else
-      pure none
+  let resources ← acquireDaemonResources opts config workspaceId daemonIdentity? root
   try
-    acceptLoop runtime transport
+    acceptLoop resources.runtime resources.transport
   finally
-    let firstError? ← recordFirstCleanupError none <| transport.stop.set true
-    let firstError? ← recordFirstCleanupError firstError? <|
-      Transport.closeListener transport.listener
-    let firstError? ←
-      match ownerWatcher? with
-      | none => pure firstError?
-      | some ownerWatcher =>
-          recordFirstCleanupError firstError? do
-            try
-              IO.cancel ownerWatcher
-            finally
-              discard <| IO.wait ownerWatcher
-    let firstError? ← recordFirstCleanupError firstError? do
-      discard <| IO.wait rootWatcher
-    let firstError? ← recordFirstCleanupError firstError? runtime.close
-    if let some err := firstError? then
-      throw err
+    resources.close
 
 end Beam.Broker
