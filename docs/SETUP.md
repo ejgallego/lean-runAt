@@ -163,10 +163,12 @@ not currently in use.
 
 Restart active agent and MCP client sessions before any `prune --apply`; otherwise a process may
 still be running from a runtime selected for removal. A later request rebuilds any needed bundle
-that was pruned. Pruning uses the same install lock as the installer and each selected bundle's
-build lock. Lock owner metadata includes a PID-domain identity, so cleanup never interprets a
-same-numbered PID from an isolated process domain as the local owner. Pruning also refuses symlinked
-installed bundle-cache roots or symlinked and unmarked runtime directories.
+that was pruned. Pruning uses the same atomic-directory install lock as the shell installer and a
+kernel-backed file lock for each selected bundle. Bundle lock files remain as stable coordination
+inodes after release; kernel ownership disappears automatically when the holder exits. The install
+lock is never stale-reaped, so a crashed installer fails closed and requires explicit recovery.
+Pruning also refuses symlinked installed bundle-cache roots or symlinked and unmarked runtime
+directories.
 
 Apply is incremental rather than transactional: Beam validates and removes one displayed path at a
 time and reports each successful removal immediately. If a later path fails validation or its lock
@@ -222,7 +224,10 @@ lean-beam run-at "Foo.lean" "$version" 10 2 "exact trivial"
 inherited ownership pipe defines the session lifetime: interrupt the holder, or run
 `lean-beam shutdown`, to close the daemon and its backend processes. Plain `lean-beam ensure` and
 all other wrapper commands attach to an existing owner and fail with a recovery command when none
-is live. MCP clients do not need a separate holder; the stdio MCP process owns its runtime session.
+is live. If the desired bundle or project configuration changes, attaching commands preserve the
+old owner and ask you to stop it explicitly. During shutdown the registry reports `draining` and a
+replacement owner is refused until the old process tree has exited. MCP clients do not need a
+separate holder; the stdio MCP process owns its runtime session.
 
 The `python3` line extracts `result.version` for shell examples. You can also copy that version
 number from the printed `lean-beam update` JSON.

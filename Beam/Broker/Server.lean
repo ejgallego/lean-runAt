@@ -937,6 +937,7 @@ private def modifyCurrentSessionIfMatching
 structure ServerRuntime where
   state : Std.Mutex State
   daemonIdentity? : Option DaemonIdentity
+  private daemonCapability? : Option String
   activeRequests : ActiveRequestRegistry
   private closeMutex : Std.Mutex Bool
   private closeDone : IO.Promise (Except IO.Error Unit)
@@ -978,7 +979,8 @@ private def ServerRuntime.statsResponse
 def ServerRuntime.create
     (config : BrokerConfig)
     (workspaceId : WorkspaceId)
-    (daemonIdentity? : Option DaemonIdentity := none) : IO ServerRuntime := do
+    (daemonIdentity? : Option DaemonIdentity := none)
+    (daemonCapability? : Option String := none) : IO ServerRuntime := do
   unless validWorkspaceId workspaceId do
     throw <| IO.userError "workspace id must be non-empty"
   let startMonoNanos ← IO.monoNanosNow
@@ -986,6 +988,7 @@ def ServerRuntime.create
   pure {
     state := ← Std.Mutex.new state
     daemonIdentity?
+    daemonCapability?
     activeRequests := ← ActiveRequestRegistry.create
     closeMutex := ← Std.Mutex.new false
     closeDone := ← IO.Promise.new
@@ -1287,15 +1290,38 @@ private def propagatePendingCancellation
     (cancelRef? : Option (IO.Ref Bool)) : IO Unit := do
   PendingRequestStore.propagateCancellation session.pending session.stdin cancelRef?
 
+private structure ClientPermits where
+  available : Std.Mutex Nat
+
+private def ClientPermits.create (count : Nat) : BaseIO ClientPermits := do
+  pure { available := ← Std.Mutex.new count }
+
+private def ClientPermits.tryAcquire (permits : ClientPermits) : BaseIO Bool := do
+  permits.available.atomically do
+    let available ← get
+    if available == 0 then
+      pure false
+    else
+      set (available - 1)
+      pure true
+
+private def ClientPermits.release (permits : ClientPermits) : BaseIO Unit := do
+  permits.available.atomically do
+    modify (· + 1)
+
 private structure DaemonTransport where
   endpoint : Transport.Endpoint
   listener : Transport.Listener
   stop : IO.Ref Bool
+  clientPermits : ClientPermits
+
+private def maxDaemonClients : Nat :=
+  64
 
 private def DaemonTransport.create (endpoint : Transport.Endpoint) : IO DaemonTransport := do
   let stop ← IO.mkRef false
   let listener ← Transport.bindAndListen endpoint 16
-  pure { endpoint, listener, stop }
+  pure { endpoint, listener, stop, clientPermits := ← ClientPermits.create maxDaemonClients }
 
 private def requestStop (transport : DaemonTransport) : IO Unit := do
   transport.stop.set true
@@ -2446,6 +2472,16 @@ private def ServerRuntime.withRequestAdmission
   let startedAt ← IO.monoNanosNow
   traceBroker
     s!"dispatch start op={req.op.key} clientRequestId={optionLabel req.clientRequestId?}"
+  if let some expected := server.daemonCapability? then
+    unless req.daemonCapability? == some expected do
+      let resp := errorResponseFor .invalidParams "invalid Beam daemon capability"
+      recordDispatchMetrics server req resp startedAt
+      return resp
+    if req.op == .initWorkspace || req.op == .dropWorkspace then
+      let resp := errorResponseFor .invalidParams
+        s!"broker op '{req.op.key}' is unavailable in wrapper-owned daemon mode"
+      recordDispatchMetrics server req resp startedAt
+      return resp
   match req.validateFields with
   | .error err =>
       let resp := errorResponseFor .invalidParams err
@@ -2570,7 +2606,10 @@ private def handleClient
       (toJson (StreamMessage.response clientRequestId? resp)).compress
     terminalSentRef.set true
   try
-    let msg ← Transport.recvMsg client
+    let initialRequestTimeoutMs := 5000
+    let deadlineNanos := (← IO.monoNanosNow) + initialRequestTimeoutMs * 1000000
+    let some msg ← Transport.recvMsgUntil client deadlineNanos
+      | throw <| IO.userError s!"Beam daemon initial request timed out after {initialRequestTimeoutMs} ms"
     let request : Except ResponseFailure Request ←
       match Json.parse msg with
       | .error err =>
@@ -2631,13 +2670,21 @@ private partial def acceptLoop
   else
     let client ← Transport.accept transport.listener
     if ← transport.stop.get then
-      pure ()
+      Transport.closeConnection client
     else
-      let _ ← IO.asTask (prio := Task.Priority.dedicated) do
-        try
-          handleClient server transport client
-        catch e =>
-          IO.eprintln s!"broker client task failed: {e.toString}"
+      if ← transport.clientPermits.tryAcquire then
+        let serve := do
+          try
+            handleClient server transport client
+          catch e =>
+            IO.eprintln s!"broker client task failed: {e.toString}"
+        let _ ← IO.asTask (prio := Task.Priority.dedicated) do
+          try
+            serve
+          finally
+            transport.clientPermits.release
+      else
+        Transport.closeConnection client
       acceptLoop server transport
 
 private structure CliOptions where
@@ -2739,8 +2786,9 @@ private def acquireDaemonResources
     (config : BrokerConfig)
     (workspaceId : WorkspaceId)
     (daemonIdentity? : Option DaemonIdentity)
+    (daemonCapability? : Option String)
     (root : System.FilePath) : IO DaemonResources := do
-  let runtime ← ServerRuntime.create config workspaceId daemonIdentity?
+  let runtime ← ServerRuntime.create config workspaceId daemonIdentity? daemonCapability?
   let transport ←
     try
       DaemonTransport.create opts.endpoint
@@ -2769,9 +2817,10 @@ private def withDaemonResources
     (config : BrokerConfig)
     (workspaceId : WorkspaceId)
     (daemonIdentity? : Option DaemonIdentity)
+    (daemonCapability? : Option String)
     (root : System.FilePath)
     (act : DaemonResources → IO α) : IO α := do
-  let resources ← acquireDaemonResources opts config workspaceId daemonIdentity? root
+  let resources ← acquireDaemonResources opts config workspaceId daemonIdentity? daemonCapability? root
   try
     act resources
   finally
@@ -2796,6 +2845,17 @@ def main (args : List String) : IO Unit := do
         throw <| IO.userError "--daemon-id requires --config-hash"
     | none, some _ =>
         throw <| IO.userError "--config-hash requires --daemon-id"
+  let daemonCapability? ←
+    if opts.sessionOwnerStdin then
+      let capability := (← (← IO.getStdin).getLine).trimAscii.toString
+      if capability.isEmpty then
+        throw <| IO.userError "wrapper-owned Beam daemon received an empty capability"
+      pure <| some capability
+    else
+      pure none
+  if opts.sessionOwnerStdin && daemonIdentity?.isNone then
+    throw <| IO.userError
+      "wrapper-owned Beam daemon identity and stdin capability must be supplied together"
   let root ← Beam.resolveExistingPath <| System.FilePath.mk root
   let leanPlugin? ← opts.leanPlugin?.mapM (fun path => Beam.resolveExistingPath <| System.FilePath.mk path)
   let config : BrokerConfig := {
@@ -2804,7 +2864,7 @@ def main (args : List String) : IO Unit := do
     leanPlugin? := leanPlugin?
     rocqCmd? := opts.rocqCmd?
   }
-  withDaemonResources opts config workspaceId daemonIdentity? root fun resources =>
+  withDaemonResources opts config workspaceId daemonIdentity? daemonCapability? root fun resources =>
     acceptLoop resources.runtime resources.transport
 
 end Beam.Broker

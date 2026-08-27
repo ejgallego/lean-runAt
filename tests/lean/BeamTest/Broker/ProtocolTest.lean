@@ -1069,6 +1069,44 @@ private def checkSessionCloseAdmission : IO Unit := do
   require "closed admission should leave no active request"
     ((← ActiveRequestRegistry.count runtime.activeRequests) == 0)
 
+private def checkWrapperDaemonAuthorization : IO Unit := do
+  let root := System.FilePath.mk "/tmp/beam-wrapper-daemon-authorization"
+  let capability := "generation-secret"
+  let runtime ← Beam.Broker.ServerRuntime.create
+    ({ root } : Beam.Broker.BrokerConfig) "fixture"
+    (some { daemonId := "generation-a", configHash := "config-a" })
+    (some capability)
+  try
+    for (label, capability?) in [
+        ("missing", none),
+        ("wrong", some "another-generation-secret")
+      ] do
+      let response ← runtime.dispatchRequest {
+        op := .stats
+        daemonCapability? := capability?
+      }
+      require s!"wrapper daemon should reject {label} capability"
+        (response.error?.any fun err =>
+          err.code == "invalidParams" && err.message.contains "invalid Beam daemon capability")
+
+    let stats ← runtime.dispatchRequest {
+      op := .stats
+      daemonCapability? := some capability
+    }
+    require "wrapper daemon should admit the exact generation capability" stats.ok
+
+    for op in [Op.initWorkspace, .dropWorkspace] do
+      let response ← runtime.dispatchRequest {
+        op
+        workspaceId? := some "fixture"
+        daemonCapability? := some capability
+      }
+      require s!"wrapper daemon should disable dynamic {op.key}"
+        (response.error?.any fun err =>
+          err.code == "invalidParams" && err.message.contains "wrapper-owned daemon mode")
+  finally
+    runtime.close
+
 def main : IO Unit := do
   checkResponseJsonShape
   checkStreamMessageDecode
@@ -1085,6 +1123,7 @@ def main : IO Unit := do
   checkWorkspaceLifecycleProtocol
   checkLifecycleTeardownConcurrency
   checkSessionCloseAdmission
+  checkWrapperDaemonAuthorization
 
 end BeamTest.Broker.ProtocolTest
 

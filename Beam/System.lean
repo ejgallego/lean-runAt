@@ -120,17 +120,6 @@ def RecordedPid.observe (recorded : RecordedPid) : IO RecordedPidObservation := 
   | .different => pure .differentDomain
   | .unknown => pure .unknownDomain
 
-/-- Send the default termination signal only to a persisted PID in the caller's current domain. -/
-def RecordedPid.terminateIfLocal (recorded : RecordedPid) : IO Bool := do
-  match ← recorded.domainRelation with
-  | .local =>
-      try
-        let out ← IO.Process.output { cmd := (← killCommand), args := #[toString recorded.pid] }
-        pure (out.exitCode == 0)
-      catch _ =>
-        pure false
-  | .invalid | .different | .unknown => pure false
-
 def utcTimestamp : IO String := do
   readCmdTrim "date" #["-u", "+%Y-%m-%dT%H:%M:%SZ"]
 

@@ -15,8 +15,30 @@ namespace Beam.Daemon
 
 open Beam.Broker
 
+def registrySchemaVersion : Nat :=
+  1
+
+inductive RegistryLifecycle where
+  | live
+  | draining
+  deriving BEq, Repr
+
+instance : ToJson RegistryLifecycle where
+  toJson
+    | .live => "live"
+    | .draining => "draining"
+
+instance : FromJson RegistryLifecycle where
+  fromJson?
+    | .str "live" => .ok .live
+    | .str "draining" => .ok .draining
+    | json => .error s!"expected registry lifecycle 'live' or 'draining', got {json.compress}"
+
 structure RegistryEntry where
+  schemaVersion : Nat
+  lifecycle : RegistryLifecycle
   daemonId : String
+  capability : String
   pid : Nat
   pidDomain? : Option String := none
   ownerPid : Nat
@@ -94,9 +116,10 @@ private def daemonProbeOfResponse (resp : Response) : Except BrokerClientFailure
 
 private def daemonProbe
     (endpoint : Transport.Endpoint)
-    (workspaceId : WorkspaceId) : IO (Except BrokerClientFailure DaemonProbe) := do
+    (workspaceId : WorkspaceId)
+    (capability? : Option String := none) : IO (Except BrokerClientFailure DaemonProbe) := do
   match ← sendRequestWithStreamTimeoutResult endpoint
-      { op := .stats, workspaceId? := some workspaceId }
+      { op := .stats, workspaceId? := some workspaceId, daemonCapability? := capability? }
       daemonProbeResponseTimeoutMs (fun _ => pure ()) with
   | .ok resp => pure <| daemonProbeOfResponse resp
   | .error failure => pure <| .error failure
@@ -154,8 +177,9 @@ def daemonGenerationStatus
     (endpoint : Transport.Endpoint)
     (workspaceId : WorkspaceId)
     (root : System.FilePath)
-    (identity : DaemonIdentity) : IO DaemonGenerationStatus := do
-  match ← daemonProbe endpoint workspaceId with
+    (identity : DaemonIdentity)
+    (capability : String) : IO DaemonGenerationStatus := do
+  match ← daemonProbe endpoint workspaceId (some capability) with
   | .error failure =>
       match failure with
       | .transport _ _ =>

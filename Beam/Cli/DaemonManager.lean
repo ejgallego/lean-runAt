@@ -40,9 +40,6 @@ private def projectControlLockTimeoutMs : IO Nat := do
           "invalid BEAM_CONTROL_LOCK_TIMEOUT_MS value '0': expected a positive timeout"
       pure timeoutMs
 
-private def projectControlLockDir (root : System.FilePath) : IO System.FilePath := do
-  pure ((← controlDir root) / "lock")
-
 /--
 Run `act` while holding the per-project daemon control lock.
 
@@ -52,13 +49,37 @@ unbounded lock helper.
 -/
 private structure ProjectControl where
   root : System.FilePath
+  dir : System.FilePath
+  registry : System.FilePath
+
+private def projectControl (root : System.FilePath) : IO ProjectControl := do
+  let dir ← controlDir root
+  pure { root, dir, registry := dir / "beam-daemon.json" }
 
 /-- Supply project registry mutation only for the dynamic extent of the project control lock. -/
 private def withProjectControl
     (root : System.FilePath)
     (act : ProjectControl → IO α) : IO α := do
-  withLockTimeout (← projectControlLockDir root) (← projectControlLockTimeoutMs) do
-    act { root }
+  let control ← projectControl root
+  withLockTimeout (control.dir / "lock") (← projectControlLockTimeoutMs) do
+    act control
+
+/--
+Run teardown under the project lock without recreating a control directory that disappeared with
+its project root.
+-/
+private def withExistingProjectControl
+    (root : System.FilePath)
+    (act : ProjectControl → IO Unit) : IO Unit := do
+  let control ← projectControl root
+  unless ← control.dir.isDir do
+    return
+  try
+    withExistingLockTimeout (control.dir / "lock") (← projectControlLockTimeoutMs) do
+      act control
+  catch
+  | .noFileOrDirectory .. => pure ()
+  | err => throw err
 
 private def computeConfigHash
     (root : System.FilePath)
@@ -78,25 +99,39 @@ private def computeConfigHash
   s!"{acc.toNat}"
 
 private def writeRegistry (control : ProjectControl) (entry : RegistryEntry) : IO Unit := do
-  let path ← registryPath control.root
-  if let some parent := path.parent then
+  if let some parent := control.registry.parent then
     IO.FS.createDirAll parent
-  let tmp := path.withExtension "tmp"
+  let tmp := control.registry.withExtension "tmp"
   IO.FS.writeFile tmp ((toJson entry).pretty ++ "\n")
-  IO.FS.rename tmp path
+  IO.setAccessRights tmp {
+    user := { read := true, write := true }
+  }
+  IO.FS.rename tmp control.registry
+
+private def writeExistingRegistry (control : ProjectControl) (entry : RegistryEntry) : IO Unit := do
+  -- Teardown must not create a path while the project tree is being removed. Rewrite through an
+  -- already existing file handle; if the registry was concurrently unlinked, this updates only the
+  -- unlinked inode and cannot recreate the project or control directory.
+  let handle ← IO.FS.Handle.mk control.registry .readWrite
+  handle.rewind
+  handle.putStr ((toJson entry).pretty ++ "\n")
+  handle.flush
+  handle.truncate
 
 private def removeRegistry (control : ProjectControl) : IO Unit := do
-  let path ← registryPath control.root
-  if ← path.pathExists then
-    IO.FS.removeFile path
+  if ← control.registry.pathExists then
+    IO.FS.removeFile control.registry
+
+private def sameRegistryGeneration (left right : RegistryEntry) : Bool :=
+  left.daemonId == right.daemonId && left.capability == right.capability
 
 /-- Remove a registry entry only when it still names the observed daemon generation. -/
-private def removeRegistryGeneration (control : ProjectControl) (daemonId : String) : IO Unit := do
-  match ← readRegistry? control.root with
-  | some current =>
-      if current.daemonId == daemonId then
+private def removeRegistryGeneration (control : ProjectControl) (entry : RegistryEntry) : IO Unit := do
+  match ← readRegistry control.root with
+  | .current current =>
+      if sameRegistryGeneration current entry then
         removeRegistry control
-  | none => pure ()
+  | .absent | .legacy | .unsupported _ | .malformed _ => pure ()
 
 private def daemonShutdownResponseTimeoutMs : Nat :=
   30000
@@ -104,71 +139,97 @@ private def daemonShutdownResponseTimeoutMs : Nat :=
 /-- Ask a daemon to shut down without allowing its response stream to hold CLI control forever. -/
 def requestDaemonShutdown
     (endpoint : Transport.Endpoint)
+    (capability : String)
     (responseTimeoutMs : Nat := daemonShutdownResponseTimeoutMs) :
     IO (Except BrokerClientFailure Response) := do
-  sendRequestWithStreamTimeoutResult endpoint { op := .shutdown }
+  sendRequestWithStreamTimeoutResult endpoint {
+      op := .shutdown
+      daemonCapability? := some capability
+    }
     responseTimeoutMs (fun _ => pure ())
 
-private partial def waitForRecordedPidGone
-    (recorded : Beam.RecordedPid)
-    (tries : Nat := 20) : IO Unit := do
-  if tries == 0 then
-    return
-  match ← recorded.observe with
-  | .local true =>
-      IO.sleep 100
-      waitForRecordedPidGone recorded (tries - 1)
-  | .invalid | .local false | .differentDomain | .unknownDomain =>
-      pure ()
+inductive RegistryUnsafeReason where
+  | invalidIdentity
+  | wrongRegistryRoot (recordedRoot : String)
+  | invalidEndpoint
+  | ownerDead
+  | endpointUnavailable
+  | endpointUnrecognized (detail : String)
+  | wrongEndpointRoot (daemonRoot : String)
+  | wrongGeneration (daemonRoot : String)
+  deriving BEq, Repr
 
-private def gracefulDaemonShutdownWaitTries : Nat :=
-  50
+inductive RegistryObservation where
+  | absent
+  | legacy
+  | unsupported (schemaVersion : Nat)
+  | malformed (detail : String)
+  | liveExact (entry : RegistryEntry)
+  | liveConfigMismatch (entry : RegistryEntry) (expectedHash : String)
+  | draining (entry : RegistryEntry)
+  | staleConfirmed (entry : RegistryEntry)
+  | unusable (entry : RegistryEntry) (reason : RegistryUnsafeReason)
 
-/--
-Finish a graceful daemon shutdown with a PID fallback only when the registry PID belongs to the
-current process domain. A PID from another or unknown domain must never be probed or killed.
--/
-def finishRegistryDaemonShutdown (entry : RegistryEntry) : IO Unit := do
-  let recorded : Beam.RecordedPid := { pid := entry.pid, domain? := entry.pidDomain? }
-  -- A broker may spend up to three seconds completing the bounded LSP shutdown path before its
-  -- accept loop exits. Do not turn that orderly session close into SIGTERM just before it finishes.
-  waitForRecordedPidGone recorded gracefulDaemonShutdownWaitTries
-  match ← recorded.observe with
-  | .local true =>
-      if ← recorded.terminateIfLocal then
-        waitForRecordedPidGone recorded
-  | .invalid | .local false | .differentDomain | .unknownDomain =>
-      pure ()
+private def recordedPidGone (pid : Nat) (domain? : Option String) : IO Bool := do
+  match ← (Beam.RecordedPid.mk pid domain?).observe with
+  | .local false => pure true
+  | .invalid | .local true | .differentDomain | .unknownDomain => pure false
 
-private def stopDaemonEntry (control : ProjectControl) (entry : RegistryEntry) : IO Unit := do
-  let releaseGeneration := removeRegistryGeneration control entry.daemonId
-  let releaseAndFinish := do
-    try
-      releaseGeneration
-    finally
-      finishRegistryDaemonShutdown entry
-  match registryEndpoint? entry with
-  | none =>
-      releaseAndFinish
-  | some endpoint =>
-      match ← daemonGenerationStatus endpoint projectDaemonWorkspaceId
-          control.root entry.identity with
+private def registryProcessesGone (entry : RegistryEntry) : IO Bool := do
+  if !(← recordedPidGone entry.ownerPid entry.ownerPidDomain?) then
+    return false
+  recordedPidGone entry.pid entry.pidDomain?
+
+private def registryOwnerKnownDead (entry : RegistryEntry) : IO Bool :=
+  recordedPidGone entry.ownerPid entry.ownerPidDomain?
+
+def observeProjectRegistry
+    (root : System.FilePath)
+    (expectedHash? : Option String := none) : IO RegistryObservation := do
+  match ← readRegistry root with
+  | .absent => pure .absent
+  | .legacy => pure .legacy
+  | .unsupported schemaVersion => pure <| .unsupported schemaVersion
+  | .malformed detail => pure <| .malformed detail
+  | .current entry =>
+      if entry.daemonId.isEmpty || entry.capability.isEmpty then
+        return .unusable entry .invalidIdentity
+      unless ← Beam.sameFilePath (System.FilePath.mk entry.root) root do
+        return .unusable entry (.wrongRegistryRoot entry.root)
+      if entry.lifecycle == .draining then
+        if ← registryProcessesGone entry then
+          return .staleConfirmed entry
+        return .draining entry
+      let ownerDead ← registryOwnerKnownDead entry
+      let some endpoint := registryEndpoint? entry
+        | if ownerDead && (← registryProcessesGone entry) then
+            return .staleConfirmed entry
+          else
+            return .unusable entry .invalidEndpoint
+      match ← daemonGenerationStatus endpoint projectDaemonWorkspaceId root
+          entry.identity entry.capability with
       | .exact =>
-          try
-            discard <| requestDaemonShutdown endpoint
-          finally
-            releaseAndFinish
+          if ownerDead then
+            pure <| .unusable entry .ownerDead
+          else
+            match expectedHash? with
+            | some expectedHash =>
+                if expectedHash == entry.configHash then
+                  pure <| .liveExact entry
+                else
+                  pure <| .liveConfigMismatch entry expectedHash
+            | none => pure <| .liveExact entry
       | .unavailable =>
-          releaseAndFinish
-      | .unrecognized _ | .wrongRoot _ | .wrongGeneration _ =>
-          releaseGeneration
-
-private def stopRegisteredDaemon (control : ProjectControl) : IO Unit := do
-  match ← readRegistry? control.root with
-  | none =>
-      removeRegistry control
-  | some entry =>
-      stopDaemonEntry control entry
+          if ownerDead && (← registryProcessesGone entry) then
+            pure <| .staleConfirmed entry
+          else
+            pure <| .unusable entry .endpointUnavailable
+      | .unrecognized failure =>
+          pure <| .unusable entry (.endpointUnrecognized failure.detail)
+      | .wrongRoot daemonRoot =>
+          pure <| .unusable entry (.wrongEndpointRoot daemonRoot)
+      | .wrongGeneration daemonRoot =>
+          pure <| .unusable entry (.wrongGeneration daemonRoot)
 
 private def requestedPortNat? (opts : CliOptions) : Option Nat :=
   opts.requestedPort?.map (·.toNat)
@@ -244,7 +305,7 @@ private structure DaemonFailureIncident where
   root : String
   controlDir : String
   registryPath : String
-  registry : Option RegistryEntry := none
+  registry : Option Json := none
   registryPidStatus : Option String := none
   registryEndpoint : Option String := none
   startupLogPath : Option String := none
@@ -280,7 +341,8 @@ private def writeDaemonFailureIncident?
     let dir ← daemonFailureIncidentDir root
     IO.FS.createDirAll dir
     let registryFile ← registryPath root
-    let registry ← readRegistry? root
+    let registryRead ← readRegistry root
+    let registry := registryRead.entry?
     let pidStatus ←
       match registry with
       | none => pure none
@@ -296,7 +358,8 @@ private def writeDaemonFailureIncident?
       root := root.toString
       controlDir := control.toString
       registryPath := registryFile.toString
-      registry
+      registry := registry.map fun entry =>
+        (toJson entry).setObjVal! "capability" (toJson "<redacted>")
       registryPidStatus := pidStatus
       registryEndpoint := endpoint
       startupLogPath := logTail?.map (fun (path, _) => path.toString)
@@ -384,7 +447,8 @@ private def startDaemon
     (desired : DesiredConfig)
     (endpoint : Transport.Endpoint)
     (logPath : System.FilePath)
-    (identity : DaemonIdentity) : IO (IO.Process.Child daemonStdio) := do
+    (identity : DaemonIdentity)
+    (capability : String) : IO (IO.Process.Child daemonStdio) := do
   let mut args : List String := [
     "--root", desired.root.toString,
     "--workspace-id", projectDaemonWorkspaceId,
@@ -411,7 +475,10 @@ private def startDaemon
     cmd := "sh"
     args := #["-c", shell]
     cwd := some desired.root
+    setsid := true
   }
+  child.stdin.putStrLn capability
+  child.stdin.flush
   pure child
 
 private def daemonStartupTimeoutMs : Nat :=
@@ -423,6 +490,7 @@ private partial def waitForDaemonUntil
     (logPath : System.FilePath)
     (root : System.FilePath)
     (identity : DaemonIdentity)
+    (capability : String)
     (deadlineNanos : Nat)
     (timeoutDetail : String) : IO (Except DaemonStartupFailure Unit) := do
   if (← child.tryWait).isSome then
@@ -437,8 +505,8 @@ private partial def waitForDaemonUntil
       .error <$> daemonStartupFailure endpoint logPath detail
     else
       IO.sleep 100
-      waitForDaemonUntil child endpoint logPath root identity deadlineNanos detail
-  match ← daemonGenerationStatus endpoint projectDaemonWorkspaceId root identity with
+      waitForDaemonUntil child endpoint logPath root identity capability deadlineNanos detail
+  match ← daemonGenerationStatus endpoint projectDaemonWorkspaceId root identity capability with
   | .exact => pure (.ok ())
   | .wrongRoot daemonRoot =>
       pure <| .error {
@@ -460,9 +528,10 @@ private def waitForDaemon
     (endpoint : Transport.Endpoint)
     (logPath : System.FilePath)
     (root : System.FilePath)
-    (identity : DaemonIdentity) : IO (Except DaemonStartupFailure Unit) := do
+    (identity : DaemonIdentity)
+    (capability : String) : IO (Except DaemonStartupFailure Unit) := do
   let deadlineNanos := (← IO.monoNanosNow) + daemonStartupTimeoutMs * 1000000
-  waitForDaemonUntil child endpoint logPath root identity deadlineNanos
+  waitForDaemonUntil child endpoint logPath root identity capability deadlineNanos
     "Beam daemon did not become ready before timeout"
 
 private def newDaemonGenerationId (configHash : String) : IO String := do
@@ -470,9 +539,23 @@ private def newDaemonGenerationId (configHash : String) : IO String := do
   let nonce := ByteArray.toUInt64LE! (← IO.getRandomBytes 8)
   pure s!"{configHash.take 12}-{startedMonoNanos}-{nonce}"
 
+private def hexDigit (n : Nat) : Char :=
+  if n < 10 then
+    Char.ofNat ('0'.toNat + n)
+  else
+    Char.ofNat ('a'.toNat + n - 10)
+
+private def byteHex (byte : UInt8) : List Char :=
+  [hexDigit (byte.toNat / 16), hexDigit (byte.toNat % 16)]
+
+private def newDaemonCapability : IO String := do
+  let bytes ← IO.getRandomBytes 32
+  pure <| String.ofList <| bytes.toList.flatMap byteHex
+
 private def registryEntryFor
     (desired : DesiredConfig)
     (daemonId : String)
+    (capability : String)
     (pid : Nat)
     (endpoint : Transport.Endpoint)
     (opts : CliOptions) : IO RegistryEntry := do
@@ -482,7 +565,10 @@ private def registryEntryFor
   let pidDomain? ← Beam.currentPidDomain?
   let ownerPid ← IO.Process.getPID
   pure {
+    schemaVersion := registrySchemaVersion
+    lifecycle := .live
     daemonId
+    capability
     pid
     pidDomain?
     ownerPid := ownerPid.toNat
@@ -509,12 +595,13 @@ private partial def startDaemonEntry
   let logPath ← daemonStartupLogPath desired.root
   let daemonId ← newDaemonGenerationId desired.configHash
   let identity : DaemonIdentity := { daemonId, configHash := desired.configHash }
-  let child ← startDaemon desired endpoint logPath identity
+  let capability ← newDaemonCapability
+  let child ← startDaemon desired endpoint logPath identity capability
   let readiness : Except DaemonStartupFailure RegistryEntry ←
     try
-      match ← waitForDaemon child endpoint logPath desired.root identity with
+      match ← waitForDaemon child endpoint logPath desired.root identity capability with
       | .ok () =>
-          let entry ← registryEntryFor desired daemonId child.pid.toNat endpoint opts
+          let entry ← registryEntryFor desired daemonId capability child.pid.toNat endpoint opts
           pure (.ok entry)
       | .error failure =>
           pure (.error failure)
@@ -585,66 +672,93 @@ def desiredConfig (home root : System.FilePath) (required : Backend) : IO Desire
 
 structure ProjectDaemonClient where
   endpoint : Transport.Endpoint
+  capability : String
+
+def ProjectDaemonClient.authorize
+    (client : ProjectDaemonClient)
+    (request : Request) : Request :=
+  { request with daemonCapability? := some client.capability }
 
 private def projectDaemonClient (entry : RegistryEntry) : IO ProjectDaemonClient := do
   pure {
     endpoint := ← Beam.Daemon.endpointFromEntry entry
+    capability := entry.capability
   }
 
-private def registryOwnerObservable (entry : RegistryEntry) : IO Bool := do
-  if entry.ownerPid == 0 then
-    return false
-  let recorded : Beam.RecordedPid := {
-    pid := entry.ownerPid
-    domain? := entry.ownerPidDomain?
-  }
-  match ← recorded.observe with
-  | .invalid | .local false => pure false
-  | .local true | .differentDomain | .unknownDomain => pure true
+def RegistryUnsafeReason.message : RegistryUnsafeReason → String
+  | .invalidIdentity => "registry identity or capability is empty"
+  | .wrongRegistryRoot recordedRoot => s!"registry records another root: {recordedRoot}"
+  | .invalidEndpoint => "registry endpoint is invalid"
+  | .ownerDead => "the recorded owner is dead while its daemon still responds"
+  | .endpointUnavailable => "the recorded daemon endpoint is unavailable"
+  | .endpointUnrecognized detail => s!"the recorded endpoint is not a recognized Beam generation: {detail}"
+  | .wrongEndpointRoot daemonRoot => s!"the recorded endpoint serves another root: {daemonRoot}"
+  | .wrongGeneration daemonRoot =>
+      s!"the recorded endpoint serves another Beam generation for {daemonRoot}"
 
-def registryLiveFor
+private def activeOwnerMessage (root : System.FilePath) (entry : RegistryEntry) : String :=
+  s!"Beam session for {root} is already owned by wrapper pid {entry.ownerPid}; " ++
+    "interrupt that 'lean-beam ensure --hold' process before starting another owner"
+
+private def configMismatchMessage
     (root : System.FilePath)
-    (expectedHash? : Option String := none) : IO (Option RegistryEntry) := do
-  match ← readRegistry? root with
-  | none => pure none
-  | some entry =>
-      let rootOk ← Beam.sameFilePath (System.FilePath.mk entry.root) root
-      let hashOk := expectedHash?.map (· == entry.configHash) |>.getD true
-      if !rootOk || !hashOk || !(← registryOwnerObservable entry) then
-        pure none
-      else
-        match registryEndpoint? entry with
-        | none => pure none
-        | some endpoint =>
-            -- The owner pipe makes endpoint liveness authoritative across PID domains. A
-            -- same-domain dead owner is rejected immediately; another domain is never probed.
-            match ← daemonGenerationStatus endpoint projectDaemonWorkspaceId root entry.identity with
-            | .exact => pure (some entry)
-            | .unavailable | .unrecognized _ | .wrongRoot _ | .wrongGeneration _ => pure none
+    (entry : RegistryEntry)
+    (expectedHash : String) : String :=
+  s!"the live Beam session for {root} uses configuration {entry.configHash}, " ++
+    s!"but this command requires {expectedHash}; the current owner was preserved. " ++
+    "Interrupt its 'lean-beam ensure --hold' process, then start a new owner with the desired configuration"
 
-/--
-Shut down the live wrapper daemon, if any, while holding its project control scope.
+private def drainingOwnerMessage (root : System.FilePath) (entry : RegistryEntry) : String :=
+  s!"Beam session {entry.daemonId} for {root} is draining; " ++
+    "wait for its foreground owner to exit before starting or attaching to another session"
 
-The generation is unpublished even when the bounded response fails, releasing the foreground owner
-without exposing registry mutation or its lock precondition to callers.
--/
+private def registryRecoveryMessage (root : System.FilePath) (detail : String) : String :=
+  s!"Beam cannot safely use or replace the daemon registry for {root}: {detail}. " ++
+    "Preserve the registry, stop the matching foreground owner or daemon explicitly, and retry"
+
+private def markRegistryDraining (control : ProjectControl) (entry : RegistryEntry) : IO Unit := do
+  match ← readRegistry control.root with
+  | .current current =>
+      if sameRegistryGeneration current entry && current.lifecycle == .live then
+        writeExistingRegistry control { current with lifecycle := .draining }
+  | .absent | .legacy | .unsupported _ | .malformed _ => pure ()
+
+private inductive ShutdownPlan where
+  | none
+  | request (entry : RegistryEntry)
+
+/-- Fence and request shutdown of the exact wrapper-owned generation without PID signalling. -/
 def shutdownRegisteredProjectDaemon
     (root : System.FilePath) : IO (Except BrokerClientFailure (Option Response)) := do
-  withProjectControl root fun control => do
-    match ← registryLiveFor root with
-    | some entry =>
-        match registryEndpoint? entry with
-        | some endpoint =>
-            try
-              pure <| (← requestDaemonShutdown endpoint).map some
-            finally
-              removeRegistryGeneration control entry.daemonId
-        | none =>
-            stopRegisteredDaemon control
-            pure (.ok none)
-    | none =>
-        stopRegisteredDaemon control
-        pure (.ok none)
+  let plan : ShutdownPlan ← withProjectControl root fun control => do
+    match ← observeProjectRegistry root with
+    | .absent => pure ShutdownPlan.none
+    | .staleConfirmed entry =>
+        removeRegistryGeneration control entry
+        pure ShutdownPlan.none
+    | .liveExact entry =>
+        markRegistryDraining control entry
+        pure <| ShutdownPlan.request entry
+    | .draining entry => pure <| ShutdownPlan.request entry
+    | .liveConfigMismatch entry _ =>
+        markRegistryDraining control entry
+        pure <| ShutdownPlan.request entry
+    | .legacy =>
+        throw <| IO.userError <| registryRecoveryMessage root <|
+          RegistryRead.legacy.detail?.getD "legacy registry"
+    | .unsupported schemaVersion =>
+        throw <| IO.userError <| registryRecoveryMessage root <|
+          (RegistryRead.unsupported schemaVersion).detail?.getD "unsupported registry"
+    | .malformed detail =>
+        throw <| IO.userError <| registryRecoveryMessage root detail
+    | .unusable _ reason =>
+        throw <| IO.userError <| registryRecoveryMessage root reason.message
+  match plan with
+  | ShutdownPlan.none => pure <| .ok none
+  | ShutdownPlan.request entry =>
+      let some endpoint := registryEndpoint? entry
+        | return .error <| .invalidResponse "draining Beam registry has no valid endpoint"
+      pure <| (← requestDaemonShutdown endpoint entry.capability).map some
 
 private abbrev detachedDaemonStdio : IO.Process.StdioConfig where
   stdin := .null
@@ -674,13 +788,11 @@ def ProjectDaemonOwner.exitCode? (owner : ProjectDaemonOwner) : IO (Option UInt3
 
 /-- Whether this owner generation is still the one published for its project. -/
 def ProjectDaemonOwner.registered (owner : ProjectDaemonOwner) : IO Bool := do
-  match ← readRegistry? owner.root with
-  | some current => pure (current.daemonId == owner.daemonId)
-  | none => pure false
-
-private def activeOwnerMessage (root : System.FilePath) (entry : RegistryEntry) : String :=
-  s!"Beam session for {root} is already owned by wrapper pid {entry.ownerPid}; " ++
-    "interrupt that 'lean-beam ensure --hold' process before starting another owner"
+  match ← readRegistry owner.root with
+  | .current current =>
+      pure (current.daemonId == owner.daemonId &&
+        current.capability == owner.client.capability && current.lifecycle == .live)
+  | .absent | .legacy | .unsupported _ | .malformed _ => pure false
 
 private def missingOwnerCommand : Option Backend → String
   | some .rocq => "lean-beam ensure rocq --hold"
@@ -694,11 +806,23 @@ private def startOwnedProjectDaemon
     (control : ProjectControl)
     (desired : DesiredConfig)
     (opts : CliOptions) : IO OwnedProjectDaemon := do
-  if let some live ← registryLiveFor desired.root then
-    throw <| IO.userError (activeOwnerMessage desired.root live)
-  -- A non-live registry may refer to a daemon still winding down after owner loss. Ask that exact
-  -- root-matching endpoint to stop, and use PID fallback only through the typed domain boundary.
-  stopRegisteredDaemon control
+  match ← observeProjectRegistry desired.root (some desired.configHash) with
+  | .absent => pure ()
+  | .staleConfirmed entry => removeRegistryGeneration control entry
+  | .liveExact entry => throw <| IO.userError (activeOwnerMessage desired.root entry)
+  | .liveConfigMismatch entry expectedHash =>
+      throw <| IO.userError (configMismatchMessage desired.root entry expectedHash)
+  | .draining entry => throw <| IO.userError (drainingOwnerMessage desired.root entry)
+  | .legacy =>
+      throw <| IO.userError <| registryRecoveryMessage desired.root <|
+        RegistryRead.legacy.detail?.getD "legacy registry"
+  | .unsupported schemaVersion =>
+      throw <| IO.userError <| registryRecoveryMessage desired.root <|
+        (RegistryRead.unsupported schemaVersion).detail?.getD "unsupported registry"
+  | .malformed detail =>
+      throw <| IO.userError <| registryRecoveryMessage desired.root detail
+  | .unusable _ reason =>
+      throw <| IO.userError <| registryRecoveryMessage desired.root reason.message
   let (endpoint, entry, child) ← startDaemonEntry desired opts
   try
     writeRegistry control entry
@@ -706,7 +830,7 @@ private def startOwnedProjectDaemon
     terminateDaemonChild child
     throw err
   pure {
-    client := { endpoint }
+    client := { endpoint, capability := entry.capability }
     entry
     child
   }
@@ -730,10 +854,10 @@ private partial def waitForOwnedDaemonExit
     IO.sleep 100
     waitForOwnedDaemonExit child exitCodeRef (tries - 1)
 
-private def removeOwnedRegistry (root : System.FilePath) (daemonId : String) : IO Unit := do
+private def removeOwnedRegistry (root : System.FilePath) (entry : RegistryEntry) : IO Unit := do
   try
-    withProjectControl root fun control =>
-      removeRegistryGeneration control daemonId
+    withExistingProjectControl root fun control =>
+      removeRegistryGeneration control entry
   catch _ =>
     pure ()
 
@@ -745,27 +869,34 @@ private def attemptCleanup (act : IO Unit) : IO Unit := do
 
 private def finishOwnedDaemonChild
     (owned : OwnedProjectDaemon)
-    (exitCodeRef : IO.Ref (Option UInt32)) : IO Unit := do
+    (exitCodeRef : IO.Ref (Option UInt32)) : IO Bool := do
   try
     let child ← closeDaemonOwnerPipe owned.child
     attemptCleanup <| waitForOwnedDaemonExit child exitCodeRef 100
     if (← exitCodeRef.get).isNone then
+      -- `startDaemon` uses `setsid`; Lean's retained child handle therefore kills the complete
+      -- daemon process group rather than only the broker PID.
       attemptCleanup child.kill
       attemptCleanup <| waitForOwnedDaemonExit child exitCodeRef 20
-    pure ()
   catch _ =>
     attemptCleanup owned.child.kill
     attemptCleanup <| waitForOwnedDaemonExit owned.child exitCodeRef 20
+  pure (← exitCodeRef.get).isSome
+
+private def markOwnedRegistryDraining (root : System.FilePath) (entry : RegistryEntry) : IO Unit := do
+  try
+    withExistingProjectControl root fun control =>
+      markRegistryDraining control entry
+  catch _ =>
+    pure ()
 
 private def finishOwnedProjectDaemon
     (root : System.FilePath)
     (owned : OwnedProjectDaemon)
     (exitCodeRef : IO.Ref (Option UInt32)) : IO Unit := do
-  -- Stop publishing this generation before waiting for its child to drain. A second removal is an
-  -- idempotent retry for cleanup failures and cannot remove a replacement generation.
-  removeOwnedRegistry root owned.entry.daemonId
-  finishOwnedDaemonChild owned exitCodeRef
-  removeOwnedRegistry root owned.entry.daemonId
+  markOwnedRegistryDraining root owned.entry
+  if ← finishOwnedDaemonChild owned exitCodeRef then
+    removeOwnedRegistry root owned.entry
 
 def withProjectDaemonOwner
     (home root : System.FilePath)
@@ -791,12 +922,24 @@ private def lookupProjectDaemon
     (root : System.FilePath)
     (expectedHash? : Option String := none)
     (backend? : Option Backend := none) : IO ProjectDaemonClient := do
-  withProjectControl root fun control => do
-    match ← registryLiveFor root expectedHash? with
-    | some entry => projectDaemonClient entry
-    | none =>
-        stopRegisteredDaemon control
+  withProjectControl root fun _control => do
+    match ← observeProjectRegistry root expectedHash? with
+    | .liveExact entry => projectDaemonClient entry
+    | .absent | .staleConfirmed _ =>
         throw <| IO.userError (missingOwnerMessage root backend?)
+    | .liveConfigMismatch entry expectedHash =>
+        throw <| IO.userError (configMismatchMessage root entry expectedHash)
+    | .draining entry => throw <| IO.userError (drainingOwnerMessage root entry)
+    | .legacy =>
+        throw <| IO.userError <| registryRecoveryMessage root <|
+          RegistryRead.legacy.detail?.getD "legacy registry"
+    | .unsupported schemaVersion =>
+        throw <| IO.userError <| registryRecoveryMessage root <|
+          (RegistryRead.unsupported schemaVersion).detail?.getD "unsupported registry"
+    | .malformed detail =>
+        throw <| IO.userError <| registryRecoveryMessage root detail
+    | .unusable _ reason =>
+        throw <| IO.userError <| registryRecoveryMessage root reason.message
 
 def withProjectDaemon
     (home root : System.FilePath)

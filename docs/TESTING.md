@@ -113,17 +113,22 @@ Current Beam coverage includes:
 - wrapper coverage through [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh), which aggregates focused probe, runtime, sync/save, handle, and diagnostic slices
 - focused daemon lifecycle coverage in [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh),
   including the no-implicit-start contract, duplicate-owner rejection, Beam and non-Beam endpoint
-  collision safety, a bounded identity probe against a silent non-Beam listener, cross-root
-  stale-registry cleanup that preserves the daemon serving the other
-  root, explicit shutdown, cancellation of requests active during shutdown or owner loss,
-  exact-generation cleanup that preserves a replacement registry, registry removal before a paused
-  daemon can finish draining, rejection of attachment to that unpublished draining generation,
+  collision safety without cross-project disclosure, authenticated generation probes, mode-`0600`
+  registry publication, oversized-frame and first-message limits, a bounded identity probe against
+  a silent non-Beam listener, cross-root unsafe-registry preservation that does not affect the daemon
+  serving the other root, configuration-drift preservation of the owner and active request,
+  explicit shutdown, cancellation of requests active during shutdown or owner loss,
+  exact-generation cleanup that preserves a replacement registry, a published draining fence while
+  a daemon is paused, rejection of attachment or replacement while that generation remains
+  published, forced process-group cleanup of the daemon and its backend,
   holder reporting after an unexpected daemon crash, abrupt owner death through inherited-pipe EOF,
-  stale registry cleanup, and self-termination after the project worktree disappears
+  read-only stale registry lookup, and self-termination after the project worktree disappears without
+  recreating it
 - Linux-only PID-isolated sandbox wrapper coverage in [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh),
   including cross-namespace endpoint attachment, duplicate-owner rejection, a paused owner without
-  time-based expiry, explicit shutdown, killed-owner EOF cleanup, stale-registry recovery, distinct
-  generation identity, and the absence of legacy lease/retirement artifacts
+  time-based expiry, explicit shutdown, killed-owner EOF cleanup, fail-closed preservation of an
+  unavailable foreign-domain registry before supervised recovery, distinct generation identity,
+  and the absence of legacy lease/retirement artifacts
 - zero-build save replay, structured-setup support, batch-only-argument rejection, and stale-save
   race coverage in
   [tests/test-beam-save-olean.sh](../tests/test-beam-save-olean.sh)

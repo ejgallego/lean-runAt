@@ -13,17 +13,54 @@ open Lean
 
 namespace Beam.Daemon
 
-def readRegistry? (root : System.FilePath) : IO (Option RegistryEntry) := do
+inductive RegistryRead where
+  | absent
+  | legacy
+  | unsupported (schemaVersion : Nat)
+  | malformed (detail : String)
+  | current (entry : RegistryEntry)
+
+def RegistryRead.entry? : RegistryRead → Option RegistryEntry
+  | .current entry => some entry
+  | .absent | .legacy | .unsupported _ | .malformed _ => none
+
+def RegistryRead.status : RegistryRead → String
+  | .absent => "absent"
+  | .legacy => "legacy"
+  | .unsupported _ => "unsupported"
+  | .malformed _ => "malformed"
+  | .current _ => "current"
+
+def RegistryRead.detail? : RegistryRead → Option String
+  | .legacy => some "legacy registry has no schemaVersion"
+  | .unsupported version => some s!"unsupported registry schemaVersion {version}"
+  | .malformed detail => some detail
+  | .absent | .current _ => none
+
+def readRegistry (root : System.FilePath) : IO RegistryRead := do
   let path ← registryPath root
   unless ← path.pathExists do
-    return none
+    return .absent
   try
     let text ← IO.FS.readFile path
-    let json ← IO.ofExcept <| Json.parse text
-    let entry ← IO.ofExcept <| fromJson? json
-    pure (some entry)
-  catch _ =>
-    pure none
+    let json ←
+      match Json.parse text with
+      | .ok json => pure json
+      | .error err => return .malformed s!"invalid registry JSON: {err}"
+    match json.getObjVal? "schemaVersion" with
+    | .error _ => pure .legacy
+    | .ok schemaJson =>
+        let schemaVersion ←
+          match fromJson? (α := Nat) schemaJson with
+          | .ok schemaVersion => pure schemaVersion
+          | .error err => return .malformed s!"invalid registry schemaVersion: {err}"
+        unless schemaVersion == registrySchemaVersion do
+          return .unsupported schemaVersion
+        match fromJson? json with
+        | .ok entry => pure <| .current entry
+        | .error err => pure <| .malformed s!"invalid registry schema: {err}"
+  catch err =>
+    pure <| .malformed s!"could not read registry: {err}"
 
 def daemonFailureIncidentEntries (root : System.FilePath) : IO (Array IO.FS.DirEntry) := do
   try
@@ -139,13 +176,25 @@ private def optionLine (label : String) : Option String → Option String
 
 def daemonRegistryContext? (root : System.FilePath) : IO (Option String) := do
   try
-    match ← readRegistry? root with
-    | none => pure none
-    | some entry =>
+    match ← readRegistry root with
+    | .absent => pure none
+    | .legacy =>
+        let path ← registryPath root
+        pure <| some s!"Beam daemon registry ({path}):\n  status: legacy\n  detail: legacy registry has no schemaVersion"
+    | .unsupported schemaVersion =>
+        let path ← registryPath root
+        let detail := (RegistryRead.unsupported schemaVersion).detail?.getD "unsupported registry"
+        pure <| some s!"Beam daemon registry ({path}):\n  status: unsupported\n  detail: {detail}"
+    | .malformed detail =>
+        let path ← registryPath root
+        pure <| some s!"Beam daemon registry ({path}):\n  status: malformed\n  detail: {detail}"
+    | .current entry =>
         let path ← registryPath root
         let pidStatus ← registryPidStatus entry
         let lines := ([
           s!"Beam daemon registry ({path}):",
+          s!"  schemaVersion: {entry.schemaVersion}",
+          s!"  lifecycle: {repr entry.lifecycle}",
           s!"  daemonId: {entry.daemonId}",
           s!"  pid: {entry.pid} ({pidStatus})",
           s!"  endpoint: {registryEndpointSummary entry}",
@@ -162,7 +211,8 @@ def daemonRegistryContext? (root : System.FilePath) : IO (Option String) := do
 
 def daemonDebugContextJson (root : System.FilePath) : IO Json := do
   let registryFile ← registryPath root
-  let registry ← readRegistry? root
+  let registryRead ← readRegistry root
+  let registry := registryRead.entry?
   let registryPidStatus ←
     match registry with
     | some entry => some <$> registryPidStatus entry
@@ -172,7 +222,13 @@ def daemonDebugContextJson (root : System.FilePath) : IO Json := do
   pure <| Json.mkObj <|
     [
       ("registryPath", toJson registryFile.toString),
-      ("registry", match registry with | some entry => toJson entry | none => Json.null),
+      ("registryReadStatus", toJson registryRead.status),
+      ("registryReadDetail", match registryRead.detail? with
+        | some detail => toJson detail
+        | none => Json.null),
+      ("registry", match registry with
+        | some entry => (toJson entry).setObjVal! "capability" (toJson "<redacted>")
+        | none => Json.null),
       ("registryPidStatus", match registryPidStatus with | some status => toJson status | none => Json.null),
       ("registryEndpoint", match registry.map registryEndpointSummary with | some endpoint => toJson endpoint | none => Json.null),
       ("recentDaemonIncidents", toJson incidents)

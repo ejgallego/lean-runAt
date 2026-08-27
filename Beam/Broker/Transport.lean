@@ -17,6 +17,12 @@ namespace Beam.Broker.Transport
 open Std.Net
 open Std.Internal.UV
 
+def maxFrameBytes : Nat :=
+  16 * 1024 * 1024
+
+private def maxFrameHeaderBytes : Nat :=
+  20
+
 inductive Endpoint where
   | tcp (port : UInt16)
   deriving Repr, BEq
@@ -111,6 +117,8 @@ def closeListener (listener : Listener) : IO Unit := do
 
 private def sendMsgTcp (client : TCP.Socket) (msg : String) : IO Unit := do
   let bytes := msg.toUTF8
+  if bytes.size > maxFrameBytes then
+    throw <| IO.userError s!"Beam daemon frame exceeds {maxFrameBytes} bytes"
   let header := s!"{bytes.size}\n".toUTF8
   let promise ← TCP.Socket.send client #[header, bytes]
   waitTcpPromise promise "Beam daemon connection closed before TCP send completed"
@@ -135,19 +143,28 @@ private def recvMsgTcpUsing
     | .timedOut => return none
     | .completed none => throw <| IO.userError "Beam daemon connection closed"
     | .completed (some chunk) =>
+        if chunk.isEmpty then
+          throw <| IO.userError "Beam daemon received an empty header chunk"
         if chunk[0]! == '\n'.toUInt8 then
           break
+        if header.size >= maxFrameHeaderBytes then
+          throw <| IO.userError "Beam daemon frame header is too long"
         header := header ++ chunk
   let some lenStr := String.fromUTF8? header
     | throw <| IO.userError "invalid Beam daemon header"
   let some len := lenStr.toNat?
     | throw <| IO.userError "invalid Beam daemon length"
+  if len > maxFrameBytes then
+    throw <| IO.userError s!"Beam daemon frame exceeds {maxFrameBytes} bytes"
   let mut payload := ByteArray.empty
   while payload.size < len do
     match ← receive (len - payload.size).toUInt64 with
     | .timedOut => return none
     | .completed none => throw <| IO.userError "Beam daemon connection closed"
-    | .completed (some chunk) => payload := payload ++ chunk
+    | .completed (some chunk) =>
+        if chunk.isEmpty then
+          throw <| IO.userError "Beam daemon received an empty payload chunk"
+        payload := payload ++ chunk
   let some msg := String.fromUTF8? payload
     | throw <| IO.userError "invalid Beam daemon UTF-8"
   pure (some msg)

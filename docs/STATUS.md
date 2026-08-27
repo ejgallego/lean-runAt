@@ -190,8 +190,20 @@ Exact event ordering and examples live in
   requests drain; a backend success that completed before cancellation remains successful. This
   happens without heartbeat timeouts or filesystem leases and works across PID namespaces because
   endpoint, root, and generation-identity validation are authoritative when PID identity is not
-  locally observable. A paused owner retains the session; a killed owner closes the pipe; explicit
-  `lean-beam shutdown` unpublishes the registry generation so the holder closes it cleanly.
+  locally observable. Each wrapper request carries a random per-generation capability from the
+  mode-`0600` registry. A paused owner retains the session; a killed owner closes the pipe; explicit
+  `lean-beam shutdown` changes the registry to `draining`, and that fence remains until the holder
+  has reaped the daemon process tree. Configuration-mismatched and otherwise unsafe ordinary
+  lookups preserve the current owner and registry.
+- After abrupt owner death, a later process in the same PID domain may recognize a registry as stale
+  only when both recorded processes are proven gone. A client in another PID domain cannot make
+  that proof and fails closed with the registry preserved; its external sandbox/process supervisor
+  must establish complete process-tree exit before removing that exact recovery record.
+- Wrapper-owned brokers currently use authenticated loopback TCP. The supported trust boundary is
+  one local OS account with private registry-file permissions; another user who can only discover
+  the port cannot issue requests without the generation capability. A manually launched standalone
+  `beam-daemon` has no wrapper registry capability and is maintainer tooling, not a shared-host
+  service. Unix-domain/per-user native IPC remains a possible later transport improvement.
 - A startup failure that reports `operation not permitted` through `.beam/beam-daemon-startup.log` is
   usually an environment restriction, not a bundle-resolution mismatch.
 - Typed broker transport, invalid-response, and response-timeout failures include registry/log

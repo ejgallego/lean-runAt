@@ -83,8 +83,8 @@ sandbox_beam() {
 wait_for_registry() {
   local remaining=300
   while [ "$remaining" -gt 0 ]; do
-    # The control lock is intentionally short-lived and may disappear while `find` walks the
-    # per-root directory. Ignore that observational traversal race and keep probing for the file.
+    # Registry publication is concurrent with this traversal. Ignore transient observational
+    # misses while the per-root control directory is being created.
     registry="$(find "$control_root" -name beam-daemon.json -print 2>/dev/null | sed -n '1p' || true)"
     if [ -n "$registry" ] && [ -f "$registry" ]; then
       return 0
@@ -280,7 +280,9 @@ if [ "$daemon_id_1" = "$daemon_id_2" ]; then
 fi
 
 # Killing the holder closes the only write end of the inherited owner pipe. The daemon must stop
-# without a heartbeat timeout, and the next ordinary command must clean the stale registry.
+# without a heartbeat timeout. A later command in another PID namespace cannot prove that the
+# foreign-domain process identities are gone, so it must preserve the registry for supervised
+# recovery rather than silently treating endpoint unavailability as replacement authority.
 touch "$owner_kill"
 if ! wait_for_exit "$owner_pid" "killed sandbox owner" 120 0.1; then
   sed -n '1,200p' "$owner_err" >&2
@@ -304,15 +306,19 @@ if sandbox_beam ensure >"$after_kill_out" 2>"$after_kill_err"; then
   sed -n '1,160p' "$after_kill_out" >&2
   exit 1
 fi
-if ! grep -Fq "start 'lean-beam ensure --hold'" "$after_kill_err"; then
-  echo "expected dead-owner recovery to require a new explicit owner" >&2
+if ! grep -Fq "recorded daemon endpoint is unavailable" "$after_kill_err"; then
+  echo "expected cross-domain owner loss to fail closed on the unavailable endpoint" >&2
   sed -n '1,160p' "$after_kill_err" >&2
   exit 1
 fi
-if find "$control_root" -name beam-daemon.json -print -quit | grep -q .; then
-  echo "expected dead-owner recovery to remove the stale registry" >&2
+if ! find "$control_root" -name beam-daemon.json -print -quit | grep -q .; then
+  echo "expected ordinary cross-domain recovery to preserve the unsafe registry" >&2
   exit 1
 fi
+
+# This test harness supervised the complete bwrap owner namespace and observed its exit, so it can
+# now perform the out-of-band recovery that an unsupervised client must refuse to infer.
+rm -f -- "$registry"
 
 sandbox_owner owner-3
 if ! wait_for_registry || ! wait_for_nonempty_file "$owner_out" "final sandbox owner response"; then

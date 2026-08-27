@@ -402,67 +402,79 @@ This wrapper path is easy to break accidentally, so keep the mental model simple
 
 A daemon generation is one concrete daemon start identified by the `daemonId` in
 `beam-daemon.json`. Exactly one foreground `lean-beam ensure --hold` process owns that generation.
-It passes the daemon that identity and the effective configuration hash, starts it with piped stdin,
-and retains the pipe's write end. Endpoint attachment requires the root and this exact generation
-identity to match. The daemon watches the read end; EOF atomically closes broker admission, marks
-admitted requests for cancellation, shuts down backend sessions, and stops the listener. There is
-no wrapper heartbeat, lease file, revocation tombstone, or retirement fence.
+It starts the daemon in a dedicated process session, passes the daemon identity, effective
+configuration hash, and a random per-generation capability through piped stdin, and retains the
+pipe's write end. The mode-`0600`, schema-versioned registry publishes `live` or `draining` state.
+Every wrapper request, including cancellation, generation probes, and shutdown, must present the
+capability. Endpoint attachment also requires the canonical root and exact generation identity to
+match. The daemon watches the pipe's read end; EOF atomically closes broker admission, marks admitted
+requests for cancellation, shuts down backend sessions, and stops the listener. There is no wrapper
+heartbeat, lease file, revocation tombstone, or time-based retirement fence.
 
 Ordinary wrapper commands never start a daemon. Under the per-project control lock they require a
 registry whose root and effective configuration match, whose owner is not known dead in the current
 PID domain, and whose endpoint answers for the CLI's private workspace, canonical project root, and
 exact daemon generation identity. Identity probes have a bounded response deadline. An endpoint
 that accepts a connection but stays silent or returns malformed data is unrecognized, so validation
-fails closed and PID fallback is not permitted.
+fails closed. A configuration mismatch reports the old and desired hashes without shutting down or
+unpublishing the live owner. Ordinary lookup is observation-only: absent, legacy, malformed,
+unsupported, stale, draining, or otherwise unsafe registry states are never rewritten by an
+attaching command.
 Endpoint/root validation is authoritative across PID namespaces because numeric PID observations
-from another domain are not safe process identity. A same-domain dead owner or a dead endpoint makes
-the registry stale; cleanup remains generation-scoped and PID fallback is permitted only through the
-typed PID-domain boundary.
+from another domain are not safe process identity. Persisted PIDs are conservative liveness
+observations, never signal capabilities. Only the foreground owner may force termination, using its
+retained child handle and dedicated process group.
 
-The owner also watches its exact registry generation and daemon child. `lean-beam shutdown` removes
-that generation after the typed shutdown response or a bounded response failure, which makes the
-holder close its pipe and lets the daemon's stdin watcher finish. On every holder exit path, the
-holder removes its exact registry generation before waiting for the daemon child to drain, then
-retries the same generation-scoped removal after bounded child cleanup. A draining daemon is
-therefore never advertised as attachable, and neither removal can delete a replacement generation.
-An unexpected nonzero daemon exit is reported by the holder. Interrupting or killing the holder
-closes the pipe by process lifetime. A paused holder keeps the pipe open, so the session remains valid
-without time-based expiry. If the project root disappears, the daemon's root watcher and the holder
-both converge on the same shutdown path.
+The owner also watches its exact registry generation and daemon child. `lean-beam shutdown` changes
+that exact registry from `live` to `draining` under the project lock before sending the authenticated
+shutdown request. Every holder exit path likewise publishes `draining`, closes its pipe, waits for
+graceful broker/backend teardown, and, after the deadline, terminates the complete owned process
+group. Only after the child has been reaped does it remove the exact draining generation. Thus a
+paused or wedged old process tree remains fenced and a replacement owner cannot create split-brain
+backend sessions. An unexpected nonzero daemon exit is reported by the holder. Killing the holder
+closes the pipe by process lifetime. A paused holder keeps the pipe open, so the session remains
+valid without time-based expiry. If the project root disappears, cleanup uses the already resolved
+control path without recreating the deleted project.
 
 This model prevents PID-isolated commands from making contradictory ownership decisions: later
 commands may attach to a validated endpoint, but none can silently become a replacement owner.
-Starting a new session is always an explicit `lean-beam ensure --hold` action. Raw `beam-client`
-requests may attach while that owner remains live; they participate in typed broker admission and
-disconnect cancellation but do not own the process. A separately launched standalone daemon has
-its own explicit process owner.
+Starting a new session is always an explicit `lean-beam ensure --hold` action. Wrapper commands read
+the private registry and inject its generation capability. A raw `beam-client` request does not gain
+authority merely by finding the loopback port; it must explicitly carry that private capability.
+The wrapper-owned daemon also rejects dynamic `initWorkspace` and `dropWorkspace`, because its one
+bootstrap project is fixed by the owner. A separately launched development daemon has its own
+explicit process owner and is not the wrapper security boundary.
 
 Keep these invariants covered:
 
 - only `ensure --hold` may create and publish a wrapper daemon generation
 - a second owner is rejected while the current endpoint/root/generation identity is live
-- ordinary wrapper commands preserve the owner's generation and fail with the exact recovery command
-  when no owner is live
-- holder teardown unpublishes its exact generation before child drain and cannot remove a replacement
+- ordinary wrapper commands are read-only with respect to registry and process lifecycle, including
+  on configuration mismatch or stale/unsafe state
+- holder teardown retains a generation-specific draining fence until the complete process tree is
+  reaped and cannot remove a replacement
 - owner EOF, explicit shutdown, and project-root disappearance all close admission before backend
   teardown and complete with bounded child cleanup
-- PID-domain checks gate every PID probe or signal; cross-domain decisions use the validated endpoint
+- PID-domain checks gate persisted-PID observations; persisted numeric PIDs are never signalled
+- every wrapper request is bound to its random generation capability, and transport frame, initial
+  request, connection, and task counts are bounded
 - request IDs and per-admission tokens retain exact disconnect and explicit cancellation semantics
 - the regressions for this path are
   [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh) and
   [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)
 
 Generic process helpers and the typed `RecordedPid.observe` boundary live in
-[Beam/System.lean](../Beam/System.lean). Persisted registry and lock-owner PIDs must pass
-through that boundary; only a matching recorded/current PID-domain pair permits a local liveness or
-termination operation. Generic directory locks live in
-[Beam/Cli/Lock.lean](../Beam/Cli/Lock.lean). Their owner metadata records both PID and PID domain;
-only a proven dead same-domain owner is reaped, while missing, malformed, unknown-domain, and
-different-domain owners fail closed. Project daemon control locks use a bounded wait so a live but
-stuck wrapper process produces owner diagnostics instead of making later clients wait silently;
+[Beam/System.lean](../Beam/System.lean). Persisted registry PIDs pass through that boundary only for
+conservative liveness reporting. Kernel-backed stable file locks live in
+[Beam/Cli/Lock.lean](../Beam/Cli/Lock.lean); lock files remain after release so contenders always
+coordinate on the same inode, while the kernel releases ownership when a process exits. Project
+daemon control locks use a bounded wait so a live but stuck wrapper process produces owner
+diagnostics instead of making later clients wait silently;
 `BEAM_CONTROL_LOCK_TIMEOUT_MS` can shorten or lengthen that wait for local debugging. Bundle build
 locks intentionally keep the lower-level unbounded helper because another process may legitimately
-be compiling a helper bundle. Reusable CLI argument parsing lives in
+be compiling a helper bundle. The shell installer's `.install-lock` remains an atomic directory
+compatibility boundary: it is never stale-reaped, and a crashed installer requires explicit
+operator recovery. Reusable CLI argument parsing lives in
 [Beam/Cli/Args.lean](../Beam/Cli/Args.lean). Project-root inference,
 Lean toolchain lookup, and Rocq command discovery live in [Beam/Cli/Project.lean](../Beam/Cli/Project.lean).
 Shared filesystem path helpers live in [Beam/Path.lean](../Beam/Path.lean). Use them instead of

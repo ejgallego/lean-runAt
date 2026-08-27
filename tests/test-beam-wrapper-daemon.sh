@@ -247,6 +247,56 @@ assert_json_field_equals "owned ensure response" "$ensure_json" ok true
 stats_json="$("$beam_script" --root "$tmp1" stats)"
 assert_json_field_equals "owned stats response" "$stats_json" ok true
 
+case "$(uname -s)" in
+  Darwin) registry_mode="$(stat -f '%Lp' "$registry")" ;;
+  *) registry_mode="$(stat -c '%a' "$registry")" ;;
+esac
+if [ "$registry_mode" != "600" ]; then
+  echo "expected the capability-bearing registry to use mode 600, got $registry_mode" >&2
+  exit 1
+fi
+
+port1="$(read_json_field "$registry" port)"
+python3 - "$port1" <<'PY'
+import json
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+
+def receive_frame(sock):
+    header = bytearray()
+    while not header.endswith(b"\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            raise RuntimeError("daemon closed before returning a framed error")
+        header.extend(chunk)
+    size = int(header[:-1])
+    payload = bytearray()
+    while len(payload) < size:
+        chunk = sock.recv(size - len(payload))
+        if not chunk:
+            raise RuntimeError("daemon closed during its framed error")
+        payload.extend(chunk)
+    return json.loads(payload)
+
+with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+    sock.sendall(b"16777217\n")
+    response = receive_frame(sock)
+    if "exceeds 16777216 bytes" not in response.get("payload", {}).get("error", {}).get("message", ""):
+        raise RuntimeError(f"unexpected oversized-frame response: {response}")
+
+with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+    time.sleep(5.5)
+    response = receive_frame(sock)
+    if "initial request timed out" not in response.get("payload", {}).get("error", {}).get("message", ""):
+        raise RuntimeError(f"unexpected first-message-timeout response: {response}")
+PY
+
+stats_after_limits_json="$("$beam_script" --root "$tmp1" stats)"
+assert_json_field_equals "stats after transport limit probes" "$stats_after_limits_json" ok true
+
 second_owner_out="$tmp1/second-owner.out"
 second_owner_err="$tmp1/second-owner.err"
 if "$beam_script" --root "$tmp1" ensure --hold > "$second_owner_out" 2> "$second_owner_err"; then
@@ -260,7 +310,6 @@ if ! grep -Fq "already owned" "$second_owner_err"; then
   exit 1
 fi
 
-port1="$(read_json_field "$registry" port)"
 collision_out="$tmp2/collision.out"
 collision_err="$tmp2/collision.err"
 if "$beam_script" --root "$tmp2" --port "$port1" ensure --hold > "$collision_out" 2> "$collision_err"; then
@@ -268,8 +317,8 @@ if "$beam_script" --root "$tmp2" --port "$port1" ensure --hold > "$collision_out
   cat "$collision_out" >&2
   exit 1
 fi
-if ! grep -Fq "already serves Beam root" "$collision_err"; then
-  echo "expected endpoint collision to identify the served project root" >&2
+if ! grep -Fq "invalid Beam daemon capability" "$collision_err"; then
+  echo "expected endpoint collision not to disclose an authenticated daemon's project" >&2
   cat "$collision_err" >&2
   exit 1
 fi
@@ -293,16 +342,66 @@ with open(replacement, "w", encoding="utf-8") as stream:
     stream.write("\n")
 os.replace(replacement, os.environ["STALE_REGISTRY"])
 PY
-"$beam_script" --root "$tmp2" shutdown > /dev/null
-if [ -e "$stale_registry" ]; then
-  echo "expected shutdown to remove a stale cross-root registry" >&2
-  cat "$stale_registry" >&2
+stale_shutdown_out="$tmp2/stale-cross-root-shutdown.out"
+stale_shutdown_err="$tmp2/stale-cross-root-shutdown.err"
+if "$beam_script" --root "$tmp2" shutdown \
+    > "$stale_shutdown_out" 2> "$stale_shutdown_err"; then
+  echo "expected shutdown to reject a registry whose endpoint serves another root" >&2
+  cat "$stale_shutdown_out" >&2
+  exit 1
+fi
+if ! grep -Fq "serves another root" "$stale_shutdown_err"; then
+  echo "expected cross-root registry rejection to explain the identity mismatch" >&2
+  cat "$stale_shutdown_err" >&2
+  exit 1
+fi
+if [ ! -e "$stale_registry" ]; then
+  echo "cross-root registry rejection must preserve the unsafe registry as recovery evidence" >&2
   exit 1
 fi
 if ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; then
-  echo "stale cross-root registry cleanup must not stop the daemon or owner serving the other root" >&2
+  echo "cross-root registry rejection must not stop the daemon or owner serving the other root" >&2
   exit 1
 fi
+rm -f -- "$stale_registry"
+
+LEGACY_REGISTRY="$stale_registry" LEGACY_ROOT="$tmp2" python3 - <<'PY'
+import json
+import os
+
+entry = {
+    "daemonId": "legacy-generation",
+    "pid": 999999999,
+    "ownerPid": 999999999,
+    "port": 42424,
+    "root": os.path.realpath(os.environ["LEGACY_ROOT"]),
+    "configHash": "legacy-config",
+    "startedAt": "2026-08-27T00:00:00Z",
+}
+with open(os.environ["LEGACY_REGISTRY"], "w", encoding="utf-8") as stream:
+    json.dump(entry, stream, separators=(",", ":"))
+    stream.write("\n")
+PY
+legacy_before="$(cat "$stale_registry")"
+legacy_owner_out="$tmp2/legacy-owner.out"
+legacy_owner_err="$tmp2/legacy-owner.err"
+if "$beam_script" --root "$tmp2" ensure --hold \
+    > "$legacy_owner_out" 2> "$legacy_owner_err"; then
+  echo "expected owner startup to reject a schema-less legacy registry" >&2
+  cat "$legacy_owner_out" >&2
+  exit 1
+fi
+if ! grep -Fq "legacy registry has no schemaVersion" "$legacy_owner_err"; then
+  echo "expected legacy-registry rejection to explain the unsupported schema" >&2
+  cat "$legacy_owner_err" >&2
+  exit 1
+fi
+if [ "$(cat "$stale_registry")" != "$legacy_before" ]; then
+  echo "legacy-registry rejection must preserve the recovery evidence" >&2
+  cat "$stale_registry" >&2
+  exit 1
+fi
+rm -f -- "$stale_registry"
 
 busy_port_file="$(mktemp "$tmp2/non-beam-port-XXXXXX")"
 python3 - "$busy_port_file" <<'PY' &
@@ -398,6 +497,37 @@ busy_port_file=""
 
 start_slow_request "$tmp1" "shutdown-active" "shutdown-active"
 
+# The desired configuration includes the installed bundle paths. Pointing an ordinary command at
+# an equivalent bundle in another location creates legitimate desired-hash drift without changing
+# the identity of the running generation. The lookup must preserve both the owner and its request.
+drift_bundle_dir="$tmp2/config-drift-bundles"
+mkdir -p "$drift_bundle_dir"
+rsync -a "$BEAM_INSTALL_BUNDLE_DIR/" "$drift_bundle_dir/"
+drift_out="$tmp1/config-drift.out"
+drift_err="$tmp1/config-drift.err"
+if BEAM_INSTALL_BUNDLE_DIR="$drift_bundle_dir" \
+    "$beam_script" --root "$tmp1" ensure > "$drift_out" 2> "$drift_err"; then
+  echo "expected desired configuration drift to reject attachment" >&2
+  cat "$drift_out" >&2
+  exit 1
+fi
+if ! grep -Fq "current owner was preserved" "$drift_err"; then
+  echo "expected configuration-drift diagnostics to preserve the current owner" >&2
+  cat "$drift_err" >&2
+  exit 1
+fi
+if [ "$(read_json_field "$registry" daemonId)" != "$daemon1_id" ] || \
+    [ "$(read_json_field "$registry" pid)" != "$daemon1_pid" ]; then
+  echo "configuration-drift lookup changed the live daemon generation" >&2
+  cat "$registry" >&2
+  exit 1
+fi
+if ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null || \
+    ! kill -0 "$active_request_pid" 2>/dev/null; then
+  echo "configuration-drift lookup terminated the owner, daemon, or active request" >&2
+  exit 1
+fi
+
 shutdown_json="$("$beam_script" --root "$tmp1" shutdown)"
 assert_json_field_equals "explicit session shutdown" "$shutdown_json" ok true
 expect_slow_request_cancelled "$tmp1" "shutdown-active" "shutdown-active"
@@ -457,19 +587,26 @@ if [ -e "$registry" ]; then
   exit 1
 fi
 
-start_owner "$tmp1" "owner-unpublish-before-drain"
+start_owner "$tmp1" "owner-draining-fence"
 draining_daemon_pid="$(read_json_field "$registry" pid)"
+draining_daemon_id="$(read_json_field "$registry" daemonId)"
+start_slow_request "$tmp1" "draining-process-tree" "draining-process-tree"
+draining_backend_pids="$(pgrep -P "$draining_daemon_pid" || true)"
+if [ -z "$draining_backend_pids" ]; then
+  echo "expected the active request to create a daemon-owned backend process" >&2
+  exit 1
+fi
 kill -STOP "$draining_daemon_pid"
 paused_daemon_pid="$draining_daemon_pid"
 kill -INT "$hold_pid"
 for _ in $(seq 1 40); do
-  if [ ! -e "$registry" ]; then
+  if [ -e "$registry" ] && [ "$(read_json_field "$registry" lifecycle)" = "draining" ]; then
     break
   fi
   sleep 0.05
 done
-if [ -e "$registry" ]; then
-  echo "expected an interrupted owner to unpublish its generation before daemon drain" >&2
+if [ ! -e "$registry" ] || [ "$(read_json_field "$registry" lifecycle)" != "draining" ]; then
+  echo "expected an interrupted owner to retain a draining generation fence" >&2
   cat "$registry" >&2
   exit 1
 fi
@@ -480,24 +617,62 @@ fi
 draining_lookup_out="$tmp1/draining-lookup.out"
 draining_lookup_err="$tmp1/draining-lookup.err"
 if "$beam_script" --root "$tmp1" ensure > "$draining_lookup_out" 2> "$draining_lookup_err"; then
-  echo "expected an ordinary command not to attach to an unpublished draining generation" >&2
+  echo "expected an ordinary command not to attach to a draining generation" >&2
   cat "$draining_lookup_out" >&2
   exit 1
 fi
-if ! grep -Fq "lean-beam ensure --hold" "$draining_lookup_err"; then
-  echo "expected draining-generation recovery to require a new explicit owner" >&2
+if ! grep -Fq "is draining" "$draining_lookup_err"; then
+  echo "expected ordinary commands to report the draining generation" >&2
   cat "$draining_lookup_err" >&2
   exit 1
 fi
-kill -CONT "$draining_daemon_pid"
-paused_daemon_pid=""
-if ! wait_for_exit "$hold_pid" "owner after unpublish-before-drain check" 200 0.05; then
-  cat "$tmp1/owner-unpublish-before-drain.err" >&2
+replacement_owner_out="$tmp1/replacement-during-drain.out"
+replacement_owner_err="$tmp1/replacement-during-drain.err"
+if "$beam_script" --root "$tmp1" ensure --hold \
+    > "$replacement_owner_out" 2> "$replacement_owner_err"; then
+  echo "expected a draining generation to fence out a replacement owner" >&2
+  cat "$replacement_owner_out" >&2
+  exit 1
+fi
+if ! grep -Fq "is draining" "$replacement_owner_err"; then
+  echo "expected replacement-owner rejection to identify the draining generation" >&2
+  cat "$replacement_owner_err" >&2
+  exit 1
+fi
+if [ "$(read_json_field "$registry" daemonId)" != "$draining_daemon_id" ] || \
+    [ "$(read_json_field "$registry" pid)" != "$draining_daemon_pid" ]; then
+  echo "replacement attempt changed the draining generation fence" >&2
+  cat "$registry" >&2
+  exit 1
+fi
+if ! wait_for_exit "$hold_pid" "owner after forced draining-fence cleanup" 300 0.05; then
+  cat "$tmp1/owner-draining-fence.err" >&2
   exit 1
 fi
 wait "$hold_pid"
 hold_pid=""
-if ! wait_for_exit "$draining_daemon_pid" "daemon after unpublish-before-drain check" 200 0.05; then
+paused_daemon_pid=""
+if ! wait_for_exit "$draining_daemon_pid" "daemon after forced draining-fence cleanup" 40 0.05; then
+  exit 1
+fi
+for backend_pid in $draining_backend_pids; do
+  if ! wait_for_exit "$backend_pid" "backend after forced draining-fence cleanup" 40 0.05; then
+    echo "forced owner cleanup left backend pid $backend_pid alive" >&2
+    exit 1
+  fi
+done
+set +e
+wait "$active_request_pid"
+draining_request_status="$?"
+set -e
+active_request_pid=""
+if [ "$draining_request_status" -eq 0 ]; then
+  echo "expected the active request to fail when forced drain kills its process group" >&2
+  exit 1
+fi
+if [ -e "$registry" ]; then
+  echo "expected the draining fence to disappear only after the daemon was reaped" >&2
+  cat "$registry" >&2
   exit 1
 fi
 
@@ -526,9 +701,8 @@ if ! grep -Fq "lean-beam ensure --hold" "$owner_loss_err"; then
   cat "$owner_loss_err" >&2
   exit 1
 fi
-if [ -e "$registry" ]; then
-  echo "expected owner-loss recovery to remove the stale registry" >&2
-  cat "$registry" >&2
+if [ ! -e "$registry" ]; then
+  echo "ordinary owner-loss lookup must not mutate the stale registry" >&2
   exit 1
 fi
 
@@ -537,15 +711,18 @@ start_owner "$tmp2" "owner-generation"
 generation_daemon_pid="$(read_json_field "$generation_registry" pid)"
 generation_id="$(read_json_field "$generation_registry" daemonId)"
 replacement_generation_id="$generation_id-replacement"
-python3 - "$generation_registry" "$replacement_generation_id" <<'PY'
+replacement_generation_capability="replacement-generation-capability"
+python3 - "$generation_registry" "$replacement_generation_id" \
+    "$replacement_generation_capability" <<'PY'
 import json
 import os
 import sys
 
-path, replacement_id = sys.argv[1:]
+path, replacement_id, replacement_capability = sys.argv[1:]
 with open(path, "r", encoding="utf-8") as stream:
     entry = json.load(stream)
 entry["daemonId"] = replacement_id
+entry["capability"] = replacement_capability
 replacement = path + ".replacement"
 with open(replacement, "w", encoding="utf-8") as stream:
     json.dump(entry, stream, separators=(",", ":"))
@@ -563,6 +740,12 @@ if ! wait_for_exit "$generation_daemon_pid" "daemon after generation replacement
 fi
 if [ "$(read_json_field "$generation_registry" daemonId)" != "$replacement_generation_id" ]; then
   echo "expected old-owner cleanup to preserve the replacement registry generation" >&2
+  cat "$generation_registry" >&2
+  exit 1
+fi
+if [ "$(read_json_field "$generation_registry" capability)" != \
+    "$replacement_generation_capability" ]; then
+  echo "expected old-owner cleanup to preserve the replacement capability" >&2
   cat "$generation_registry" >&2
   exit 1
 fi
@@ -587,5 +770,9 @@ set -e
 hold_pid=""
 if [ "$root_owner_status" -ne 0 ]; then
   echo "expected root-disappearance owner to exit cleanly, got $root_owner_status" >&2
+  exit 1
+fi
+if [ -e "$tmp1" ]; then
+  echo "owner cleanup recreated the removed project root" >&2
   exit 1
 fi

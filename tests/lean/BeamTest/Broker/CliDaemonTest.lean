@@ -28,6 +28,7 @@ private def require (label : String) (cond : Bool) : IO Unit := do
 private def projectDaemonClientForTest
     (endpoint : Beam.Broker.Transport.Endpoint) : Beam.Cli.ProjectDaemonClient := {
   endpoint
+  capability := "test-capability"
 }
 
 private def checkDaemonDebugWarnings : IO Unit := do
@@ -175,7 +176,8 @@ private def checkSilentEndpointProbeTimeout : IO Unit := do
         configHash := "silent-endpoint"
       }
       match ← Beam.Daemon.daemonGenerationStatus endpoint
-          Beam.Cli.projectDaemonWorkspaceId (System.FilePath.mk "/tmp") identity with
+          Beam.Cli.projectDaemonWorkspaceId (System.FilePath.mk "/tmp") identity
+          "test-capability" with
       | .unrecognized (.responseTimeout timeoutMs) =>
           require "silent endpoint should preserve its typed response timeout"
             (timeoutMs == 2000)
@@ -195,7 +197,7 @@ private def checkSilentShutdownTimeout : IO Unit := do
     let serverTask ← IO.asTask (prio := Task.Priority.dedicated) <|
       holdAcceptedConnection listener release
     try
-      match ← Beam.Cli.requestDaemonShutdown endpoint 50 with
+      match ← Beam.Cli.requestDaemonShutdown endpoint "test-capability" 50 with
       | .error (.responseTimeout timeoutMs) =>
           require "silent shutdown should preserve its typed response timeout" (timeoutMs == 50)
       | .error failure =>
@@ -586,7 +588,10 @@ private def checkDaemonFailureContext : IO Unit := do
       IO.FS.createDirAll parent
     let pidDomain? ← Beam.currentPidDomain?
     let entry : Beam.Daemon.RegistryEntry := {
+      schemaVersion := Beam.Daemon.registrySchemaVersion
+      lifecycle := .live
       daemonId := "daemon-test"
+      capability := "test-capability"
       pid := 999999999
       pidDomain?
       ownerPid := 999999999
@@ -628,6 +633,8 @@ private def checkDaemonFailureContext : IO Unit := do
     let incidentRegistry ← IO.ofExcept <| fromJson? (α := Beam.Daemon.RegistryEntry) incidentRegistryJson
     require "daemon failure incident should include daemon id"
       (incidentRegistry.daemonId == "daemon-test")
+    require "daemon failure incident must redact the per-generation capability"
+      (incidentRegistry.capability == "<redacted>")
     requireJsonString "daemon failure incident should include registry pid status"
       "registryPidStatus" "not alive" incidentJson
     requireJsonString "daemon failure incident should include endpoint summary"
@@ -724,7 +731,10 @@ private def writeTestRegistryEntry
   if let some parent := registryPath.parent then
     IO.FS.createDirAll parent
   let entry : Beam.Daemon.RegistryEntry := {
+    schemaVersion := Beam.Daemon.registrySchemaVersion
+    lifecycle := .live
     daemonId := "daemon-test"
+    capability := "test-capability"
     pid := 999999999
     ownerPid := 999999999
     port?
@@ -735,6 +745,65 @@ private def writeTestRegistryEntry
     startedAt := "2026-07-05T00:00:00Z"
   }
   IO.FS.writeFile registryPath ((toJson entry).pretty ++ "\n")
+
+private def checkTypedRegistryReads : IO Unit := do
+  let root := System.FilePath.mk s!"/tmp/beam-typed-registry-test-{← IO.monoNanosNow}"
+  try
+    IO.FS.createDirAll root
+    let registryPath ← Beam.Daemon.registryPath root
+    if let some parent := registryPath.parent then
+      IO.FS.createDirAll parent
+
+    match ← Beam.Daemon.readRegistry root with
+    | .absent => pure ()
+    | state => throw <| IO.userError s!"missing registry was classified as {state.status}"
+
+    IO.FS.writeFile registryPath "{\"daemonId\":\"legacy\"}\n"
+    match ← Beam.Daemon.readRegistry root with
+    | .legacy => pure ()
+    | state => throw <| IO.userError s!"legacy registry was classified as {state.status}"
+
+    IO.FS.writeFile registryPath "{\"schemaVersion\":999}\n"
+    match ← Beam.Daemon.readRegistry root with
+    | .unsupported 999 => pure ()
+    | state => throw <| IO.userError s!"unsupported registry was classified as {state.status}"
+
+    IO.FS.writeFile registryPath "{\"schemaVersion\":\"one\"}\n"
+    match ← Beam.Daemon.readRegistry root with
+    | .malformed detail =>
+        require "mistyped registry schemaVersion should be malformed"
+          (detail.contains "invalid registry schemaVersion")
+    | state => throw <| IO.userError s!"mistyped registry version was classified as {state.status}"
+
+    IO.FS.writeFile registryPath "{"
+    match ← Beam.Daemon.readRegistry root with
+    | .malformed detail =>
+        require "malformed registry should preserve parse context" (detail.contains "invalid registry JSON")
+    | state => throw <| IO.userError s!"malformed registry was classified as {state.status}"
+
+    IO.FS.writeFile registryPath "{\"schemaVersion\":1}\n"
+    match ← Beam.Daemon.readRegistry root with
+    | .malformed detail =>
+        require "incomplete current registry should preserve schema context"
+          (detail.contains "invalid registry schema")
+    | state => throw <| IO.userError s!"incomplete registry was classified as {state.status}"
+
+    writeTestRegistryEntry root
+    match ← Beam.Daemon.readRegistry root with
+    | .current entry =>
+        require "current registry should preserve its generation capability"
+          (entry.capability == "test-capability")
+    | state => throw <| IO.userError s!"current registry was classified as {state.status}"
+    let debug ← Beam.Daemon.daemonDebugContextJson root
+    let debugRegistry ← IO.ofExcept <| debug.getObjVal? "registry"
+    requireJsonString "daemon debug context must redact its capability"
+      "capability" "<redacted>" debugRegistry
+  finally
+    try
+      if ← root.pathExists then
+        IO.FS.removeDirAll root
+    catch _ =>
+      pure ()
 
 private def checkBrokerConnectionClosedIncident : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-broker-connection-closed-incident-{← IO.monoNanosNow}"
@@ -937,38 +1006,6 @@ private def checkCurrentPidDomain : IO Unit := do
     require "Darwin processes should share the explicit host PID domain"
       (domain? == some "host:Darwin")
 
-private def checkCrossDomainRegistryPidGuard : IO Unit := do
-  let child ← IO.Process.spawn {
-    cmd := "sleep"
-    args := #["30"]
-    stdin := .null
-    stdout := .null
-    stderr := .null
-  }
-  try
-    let entry : Beam.Daemon.RegistryEntry := {
-      daemonId := "cross-domain-pid-guard"
-      pid := child.pid.toNat
-      pidDomain? := some "beam-test-other-pid-domain"
-      ownerPid := child.pid.toNat
-      ownerPidDomain? := some "beam-test-other-pid-domain"
-      root := "/tmp/beam-cross-domain-pid-guard"
-      configHash := "cross-domain-pid-guard"
-      startedAt := "2026-08-25T00:00:00Z"
-    }
-    Beam.Cli.finishRegistryDaemonShutdown entry
-    require "a cross-domain registry PID must not be waited on or killed"
-      (← child.tryWait).isNone
-  finally
-    try
-      child.kill
-    catch _ =>
-      pure ()
-    try
-      discard <| child.wait
-    catch _ =>
-      pure ()
-
 private def checkPathCanonicalization : IO Unit := do
   let stamp ← IO.monoNanosNow
   let root := System.FilePath.mk s!"/tmp/beam-path-canonical-root-{stamp}"
@@ -994,52 +1031,22 @@ private def checkPathCanonicalization : IO Unit := do
 
 private def checkLockLifecycle : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-cli-lock-test-{← IO.monoNanosNow}"
-  let lockDir := root / "lock"
-  let some pidDomain := ← Beam.currentPidDomain?
-    | throw <| IO.userError "lock lifecycle test requires a known PID domain"
-  let writeOwner := fun (pid : Nat) (domain : String) => do
-    IO.FS.writeFile (lockDir / "pid") s!"{pid}\n"
-    IO.FS.writeFile (lockDir / "pid-domain") s!"{domain}\n"
+  let lockPath := root / "lock"
   try
-    Beam.Cli.withLock lockDir do
-      require "lock directory should exist while lock is held" (← lockDir.pathExists)
-      require "lock pid file should exist while lock is held" (← (lockDir / "pid").pathExists)
-      require "lock PID domain file should exist while lock is held"
-        (← (lockDir / "pid-domain").pathExists)
-    require "lock directory should be removed after release" (!(← lockDir.pathExists))
+    Beam.Cli.withLock lockPath do
+      require "lock file should exist while lock is held" (← lockPath.pathExists)
+      expectIoErrorContains "contended kernel lock timeout" "timed out after" <|
+        Beam.Cli.withLockTimeout lockPath 100 do
+          pure ()
+    require "stable lock file should remain after release" (← lockPath.pathExists)
 
-    IO.FS.createDirAll lockDir
-    writeOwner 999999999 pidDomain
-    Beam.Cli.withLock lockDir do
-      let pidText := (← IO.FS.readFile (lockDir / "pid")).trimAscii.toString
-      require "stale lock should be replaced with this process lock" (pidText != "999999999")
+    Beam.Cli.withLockTimeout lockPath 100 do
+      require "released kernel lock should be immediately reusable" true
 
-    IO.FS.createDirAll lockDir
-    let selfPid ← IO.Process.getPID
-    writeOwner selfPid.toNat pidDomain
-    expectIoErrorContains "live lock timeout" s!"lock owner: pid {selfPid}" <|
-      Beam.Cli.withLockTimeout lockDir 100 do
-        pure ()
-    IO.FS.removeDirAll lockDir
-
-    IO.FS.createDirAll lockDir
-    writeOwner 999999999 (pidDomain ++ "-other")
-    expectIoErrorContains "cross-domain dead lock timeout" "lock owner: pid 999999999" <|
-      Beam.Cli.withLockTimeout lockDir 100 do
-        pure ()
-    require "a dead PID from another domain should not make a lock stale"
-      (← lockDir.pathExists)
-    IO.FS.removeDirAll lockDir
-
-    let deadPidTarget := root / "dead-pid"
-    IO.FS.writeFile deadPidTarget "999999999\n"
-    IO.FS.createDirAll lockDir
-    createSymlink "lock PID fixture" deadPidTarget (lockDir / "pid")
-    expectIoErrorContains "symlinked lock PID timeout" "lock owner: unknown owner" <|
-      Beam.Cli.withLockTimeout lockDir 100 do
-        pure ()
-    require "a lock with a non-regular PID file should not be removed as stale"
-      (← lockDir.pathExists)
+    Beam.Cli.withLock lockPath do
+      expectIoErrorContains "second contended kernel lock timeout" "timeout: 100 ms" <|
+        Beam.Cli.withLockTimeout lockPath 100 do
+          pure ()
   finally
     try
       if ← root.pathExists then
@@ -1338,12 +1345,12 @@ def main : IO Unit := do
   checkSilentShutdownTimeout
   checkPlainBrokerTaskCancellation
   checkBrokerConnectionClosedIncident
+  checkTypedRegistryReads
   checkDaemonFailureIncidentRetention
   checkDoctorDaemonFailureIncidentLines
   checkPathRelativeToRoot
   checkLeanModuleNamePathHelpers
   checkCurrentPidDomain
-  checkCrossDomainRegistryPidGuard
   checkPathCanonicalization
   checkLockLifecycle
   checkLeanToolchainPolicyParsing

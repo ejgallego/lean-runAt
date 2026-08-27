@@ -213,6 +213,7 @@ structure Request where
   workspaceId? : Option WorkspaceId := none
   workspaceMode? : Option Beam.Workspace.InitMode := none
   clientRequestId? : Option String := none
+  daemonCapability? : Option String := none
   cancelRequestId? : Option String := none
   root? : Option String := none
   path? : Option String := none
@@ -265,7 +266,7 @@ def Op.tracksActiveRequest : Op → Bool
   | .listWorkspaces | .dropWorkspace | .stats | .resetStats => true
 
 private def Op.optionalRequestFields (op : Op) : Array String :=
-  #["clientRequestId"] ++
+  #["clientRequestId", "daemonCapability"] ++
   (match op.workspaceScope with
   | .none => #[]
   | .optional | .required => #["workspaceId"]) ++
@@ -320,6 +321,7 @@ private def Request.optionalJsonFields (req : Request) : List (String × Json) :
   optionalJsonField "workspaceId" req.workspaceId? ++
   optionalJsonField "workspaceMode" req.workspaceMode? ++
   optionalJsonField "clientRequestId" req.clientRequestId? ++
+  optionalJsonField "daemonCapability" req.daemonCapability? ++
   optionalJsonField "cancelRequestId" req.cancelRequestId? ++
   optionalJsonField "root" req.root? ++
   optionalJsonField "path" req.path? ++
@@ -397,6 +399,7 @@ instance : FromJson Request where
     let workspaceId? ← optionalField? (α := WorkspaceId) j "workspaceId"
     let workspaceMode? ← optionalField? (α := Beam.Workspace.InitMode) j "workspaceMode"
     let clientRequestId? ← optionalField? (α := String) j "clientRequestId"
+    let daemonCapability? ← optionalField? (α := String) j "daemonCapability"
     let cancelRequestId? ← optionalField? (α := String) j "cancelRequestId"
     let root? ← optionalField? (α := String) j "root"
     let path? ← optionalField? (α := String) j "path"
@@ -424,7 +427,8 @@ instance : FromJson Request where
     let handle? ← optionalField? (α := Handle) j "handle"
     let codeAction? ← optionalField? (α := Lsp.CodeAction) j "codeAction"
     let request : Request := {
-      op, backend, workspaceId?, workspaceMode?, clientRequestId?, cancelRequestId?,
+      op, backend, workspaceId?, workspaceMode?, clientRequestId?, daemonCapability?,
+      cancelRequestId?,
       root?, path?, version?, line?, character?, endLine?, endCharacter?,
       text?, query?, includeDeclaration?, kinds?, suggest?, storeHandle?,
       linear?, mode?, compact?, ppFormat?, diagnosticScope?, diagnosticsInResult?,

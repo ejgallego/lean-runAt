@@ -167,8 +167,8 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
   | .rocq => printRocqDoctorInfo home root
   let registry ← Beam.Daemon.registryPath root
   IO.println s!"registry: {registry}"
-  match ← registryLiveFor root with
-  | some entry =>
+  match ← observeProjectRegistry root with
+  | .liveExact entry =>
       IO.println "daemon status: live"
       IO.println s!"daemon pid: {entry.pid}"
       if let some pidDomain := entry.pidDomain? then
@@ -178,11 +178,25 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
       else
         IO.println "daemon endpoint: invalid"
       IO.println s!"daemon config hash: {entry.configHash}"
-  | none =>
-      if ← registry.pathExists then
-        IO.println "daemon status: stale"
-      else
-        IO.println "daemon status: absent"
+  | .liveConfigMismatch entry expectedHash =>
+      IO.println "daemon status: config mismatch"
+      IO.println s!"daemon config hash: {entry.configHash}"
+      IO.println s!"expected config hash: {expectedHash}"
+  | .draining entry =>
+      IO.println "daemon status: draining"
+      IO.println s!"daemon generation: {entry.daemonId}"
+  | .staleConfirmed _ => IO.println "daemon status: stale"
+  | .absent => IO.println "daemon status: absent"
+  | .legacy => IO.println "daemon status: legacy registry"
+  | .unsupported schemaVersion =>
+      IO.println "daemon status: unsupported registry"
+      IO.println s!"registry schema version: {schemaVersion}"
+  | .malformed detail =>
+      IO.println "daemon status: malformed registry"
+      IO.println s!"registry error: {detail}"
+  | .unusable _ reason =>
+      IO.println "daemon status: unsafe"
+      IO.println s!"daemon safety error: {reason.message}"
   printDaemonFailureIncidentDoctorInfo root
 
 def printValidatedToolchains (home : System.FilePath) (backendName : String) : IO Unit := do

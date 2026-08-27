@@ -94,27 +94,40 @@ private def versionIdentityJson (home : System.FilePath) : IO Json := do
 private def collectDaemonPayload
     (root : System.FilePath)
     (warnings : Array String) : IO (Json × Json × Array String) := do
-  match ← registryLiveFor root with
-  | none =>
-      pure (Json.null, Json.null, warnings.push "no live Beam daemon was available for stats/open-files")
-  | some entry =>
+  match ← observeProjectRegistry root with
+  | .liveExact entry =>
       match Beam.Daemon.registryEndpoint? entry with
       | none =>
           pure (Json.null, Json.null, warnings.push "Beam daemon registry did not contain a valid endpoint")
       | some endpoint =>
-          let statsResp ← sendRequest endpoint {
+          let client : ProjectDaemonClient := { endpoint, capability := entry.capability }
+          let statsResp ← sendRequest endpoint <| client.authorize {
             op := .stats
             workspaceId? := some Beam.Cli.projectDaemonWorkspaceId
             root? := some root.toString
           }
           let (stats, warnings) := Beam.Feedback.responsePayloadOrWarning "stats" statsResp warnings
-          let openResp ← sendRequest endpoint {
+          let openResp ← sendRequest endpoint <| client.authorize {
             op := .openDocs
             workspaceId? := some Beam.Cli.projectDaemonWorkspaceId
             root? := some root.toString
           }
           let (openDocs, warnings) := Beam.Feedback.responsePayloadOrWarning "open-files" openResp warnings
           pure (stats, openDocs, warnings)
+  | .absent | .staleConfirmed _ =>
+      pure (Json.null, Json.null, warnings.push "no live Beam daemon was available for stats/open-files")
+  | .liveConfigMismatch _ _ =>
+      pure (Json.null, Json.null, warnings.push "the live Beam daemon has a different configuration")
+  | .draining _ =>
+      pure (Json.null, Json.null, warnings.push "the Beam daemon is draining")
+  | .legacy =>
+      pure (Json.null, Json.null, warnings.push "the Beam daemon registry is legacy and unsupported")
+  | .unsupported _ =>
+      pure (Json.null, Json.null, warnings.push "the Beam daemon registry schema is unsupported")
+  | .malformed detail =>
+      pure (Json.null, Json.null, warnings.push s!"the Beam daemon registry is malformed: {detail}")
+  | .unusable _ reason =>
+      pure (Json.null, Json.null, warnings.push s!"the Beam daemon registry is unsafe: {reason.message}")
 
 private def collectNonConfidential
     (home : System.FilePath)
