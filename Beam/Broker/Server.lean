@@ -2697,17 +2697,11 @@ private structure DaemonResources where
 
 private def closeDaemonParts
     (runtime : ServerRuntime)
-    (transport? : Option DaemonTransport)
+    (transport : DaemonTransport)
     (rootWatcher? ownerWatcher? : Option DaemonWatcherTask) : IO Unit := do
-  let firstError? ←
-    match transport? with
-    | none => pure none
-    | some transport => recordFirstCleanupError none <| transport.stop.set true
-  let firstError? ←
-    match transport? with
-    | none => pure firstError?
-    | some transport =>
-        recordFirstCleanupError firstError? <| Transport.closeListener transport.listener
+  let firstError? ← recordFirstCleanupError none <| transport.stop.set true
+  let firstError? ← recordFirstCleanupError firstError? <|
+    Transport.closeListener transport.listener
   let firstError? ←
     match ownerWatcher? with
     | none => pure firstError?
@@ -2728,7 +2722,7 @@ private def closeDaemonParts
     throw err
 
 private def DaemonResources.close (resources : DaemonResources) : IO Unit :=
-  closeDaemonParts resources.runtime (some resources.transport) (some resources.rootWatcher)
+  closeDaemonParts resources.runtime resources.transport (some resources.rootWatcher)
     resources.ownerWatcher?
 
 private def throwAfterBestEffortCleanup
@@ -2756,7 +2750,7 @@ private def acquireDaemonResources
     try
       IO.asTask (prio := Task.Priority.dedicated) <| watchRoot runtime transport root
     catch err =>
-      throwAfterBestEffortCleanup err <| closeDaemonParts runtime (some transport) none none
+      throwAfterBestEffortCleanup err <| closeDaemonParts runtime transport none none
   let ownerWatcher? ←
     try
       if opts.sessionOwnerStdin then
@@ -2766,8 +2760,22 @@ private def acquireDaemonResources
         pure none
     catch err =>
       throwAfterBestEffortCleanup err <|
-        closeDaemonParts runtime (some transport) (some rootWatcher) none
+        closeDaemonParts runtime transport (some rootWatcher) none
   pure { runtime, transport, rootWatcher, ownerWatcher? }
+
+/-- Acquire the daemon runtime, listener, and watcher tasks for exactly the dynamic extent of `act`. -/
+private def withDaemonResources
+    (opts : CliOptions)
+    (config : BrokerConfig)
+    (workspaceId : WorkspaceId)
+    (daemonIdentity? : Option DaemonIdentity)
+    (root : System.FilePath)
+    (act : DaemonResources → IO α) : IO α := do
+  let resources ← acquireDaemonResources opts config workspaceId daemonIdentity? root
+  try
+    act resources
+  finally
+    resources.close
 
 def main (args : List String) : IO Unit := do
   let opts ← IO.ofExcept <| parseCliOptions {} args
@@ -2796,10 +2804,7 @@ def main (args : List String) : IO Unit := do
     leanPlugin? := leanPlugin?
     rocqCmd? := opts.rocqCmd?
   }
-  let resources ← acquireDaemonResources opts config workspaceId daemonIdentity? root
-  try
+  withDaemonResources opts config workspaceId daemonIdentity? root fun resources =>
     acceptLoop resources.runtime resources.transport
-  finally
-    resources.close
 
 end Beam.Broker

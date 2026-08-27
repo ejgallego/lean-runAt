@@ -64,9 +64,16 @@ private structure OutputSink where
 private def OutputSink.create : BaseIO OutputSink := do
   pure { mutex := ← Std.Mutex.new () }
 
-private def OutputSink.send (sink : OutputSink) (json : Json) : IO Unit := do
+private def OutputSink.sendWhen
+    (sink : OutputSink)
+    (condition : IO Bool)
+    (json : Json) : IO Unit := do
   sink.mutex.atomically do
-    writeJsonLine json
+    if ← condition then
+      writeJsonLine json
+
+private def OutputSink.send (sink : OutputSink) (json : Json) : IO Unit := do
+  sink.sendWhen (pure true) json
 
 private inductive RequestPhase where
   | active
@@ -106,11 +113,12 @@ private inductive RequestRegistrationError where
 /-
 Nested coordinator locks flow in one direction:
 
-* progress → request → output for request notifications
-* request → output for active request messages
+* progress → output → request for request notifications
+* output → request for active request messages
 
 Routing is released before runtime control, request, or output is acquired. Runtime control is owned
-by `ServerState` and does not acquire coordinator locks. Output acquires no coordinator lock.
+by `ServerState` and does not acquire coordinator locks. Request state is inspected only after output
+serialization is available, so cancellation never waits for a blocked stdout write.
 -/
 private structure Coordinator where
   state : ServerState
@@ -225,9 +233,7 @@ private def InFlightRequest.sendIfActive
     (request : InFlightRequest)
     (output : OutputSink)
     (json : Json) : IO Unit := do
-  request.state.atomically do
-    if (← get).phase == .active then
-      output.send json
+  output.sendWhen request.isActive json
 
 private def InFlightRequest.bindBrokerRequest
     (request : InFlightRequest)
