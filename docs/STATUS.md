@@ -194,11 +194,12 @@ Exact event ordering and examples live in
   `lean-beam shutdown` unpublishes the registry generation so the holder closes it cleanly.
 - A startup failure that reports `operation not permitted` through `.beam/beam-daemon-startup.log` is
   usually an environment restriction, not a bundle-resolution mismatch.
-- Typed broker transport and invalid-response failures include registry/log context and write a JSON
-  incident record under `.beam/daemon-failures/` or the per-root subdirectory of
-  `BEAM_CONTROL_DIR`. Incident kinds are `brokerTransportFailure` and `invalidBrokerResponse`;
-  callback/display failures do not create daemon incidents. Beam keeps the latest 50 incident records,
-  and `lean-beam doctor` lists recent incident paths.
+- Typed broker transport, invalid-response, and response-timeout failures include registry/log
+  context and write a JSON incident record under `.beam/daemon-failures/` or the per-root
+  subdirectory of `BEAM_CONTROL_DIR`. Incident kinds are `brokerTransportFailure`,
+  `invalidBrokerResponse`, and `brokerResponseTimeout`; callback/display failures do not create
+  daemon incidents. Beam keeps the latest 50 incident records, and `lean-beam doctor` lists recent
+  incident paths.
 - A standalone Beam daemon watches its canonical project root. If a git worktree or project
   directory is removed while the daemon is active, it shuts down its backend sessions and exits
   instead of remaining undiscoverable after its project-local registry disappears. A later wrapper

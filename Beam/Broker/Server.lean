@@ -182,35 +182,30 @@ private partial def waitForProcessExitWithTimeout
           loop (remainingMs - min pollMs remainingMs)
   loop timeoutMs
 
-private def shutdownSession (session : Session) : IO Unit := do
-  try
-    writeLspRequest session.stdin ({ id := 0, method := "shutdown", param := Json.null : Lean.JsonRpc.Request Json })
-    let task ← IO.asTask (prio := Task.Priority.dedicated) session.stdout.readLspMessage
-    let _ ← waitForTaskWithTimeout task sessionShutdownReplyTimeoutMs
-    pure ()
-  catch _ =>
-    pure ()
-  try
-    writeLspNotification session.stdin ({ method := "exit", param := Json.null : Lean.JsonRpc.Notification Json })
-  catch _ =>
-    pure ()
-  unless ← waitForProcessExitWithTimeout session.proc sessionShutdownReplyTimeoutMs do
+private def terminateBackendProcess (proc : IO.Process.Child brokerStdio) : IO Unit := do
+  let running ←
     try
-      session.proc.kill
+      pure (← proc.tryWait).isNone
+    catch _ =>
+      pure true
+  if running then
+    try
+      proc.kill
     catch _ =>
       pure ()
-    try
-      if let some kill := ← killCommand? then
-        let _ ← IO.Process.output {
-          cmd := kill.toString
-          args := #["-9", toString session.proc.pid.toNat]
-        }
+    unless ← waitForProcessExitWithTimeout proc sessionShutdownReplyTimeoutMs do
+      try
+        if let some kill := ← killCommand? then
+          let _ ← IO.Process.output {
+            cmd := kill.toString
+            args := #["-9", toString proc.pid.toNat]
+          }
+          pure ()
+      catch _ =>
         pure ()
-    catch _ =>
-      pure ()
-    discard <| waitForProcessExitWithTimeout session.proc sessionShutdownReplyTimeoutMs
+      discard <| waitForProcessExitWithTimeout proc sessionShutdownReplyTimeoutMs
   try
-    discard <| session.proc.tryWait
+    discard <| proc.tryWait
   catch _ =>
     pure ()
 
@@ -462,14 +457,7 @@ partial def sessionReaderLoop (session : Session) : IO Unit := do
       code := .workerExited
       message := e.toString
     }
-    try
-      session.proc.kill
-    catch _ =>
-      pure ()
-    try
-      discard <| session.proc.tryWait
-    catch _ =>
-      pure ()
+    terminateBackendProcess session.proc
 
 private def startRequestJsonTrackedDetailed
     (session : Session)
@@ -518,6 +506,29 @@ private def startRequestJsonTrackedDetailed
       pure ()
     throw e
 
+private def shutdownSession (session : Session) : IO Unit := do
+  let session ←
+    try
+      let (session, pending) ←
+        startRequestJsonTrackedDetailed session "shutdown" Json.null
+      let task ← IO.asTask (prio := Task.Priority.dedicated) pending.awaitOutcome
+      if (← waitForTaskWithTimeout task sessionShutdownReplyTimeoutMs).isNone then
+        PendingRequestStore.failAll session.pending <| BrokerFailure.toResponseFailure {
+          code := .workerExited
+          message := "backend session shutdown timed out"
+        }
+        discard <| waitForTaskWithTimeout task sessionShutdownReplyTimeoutMs
+      pure session
+    catch _ =>
+      pure session
+  try
+    writeLspNotification session.stdin
+      ({ method := "exit", param := Json.null : Lean.JsonRpc.Notification Json })
+  catch _ =>
+    pure ()
+  unless ← waitForProcessExitWithTimeout session.proc sessionShutdownReplyTimeoutMs do
+    terminateBackendProcess session.proc
+
 def sendRequestJsonTrackedDetailed
     (session : Session)
     (method : String)
@@ -555,6 +566,76 @@ private partial def awaitInitializeResponse (stdout : IO.FS.Stream) : IO Unit :=
   | .request .. =>
       throw <| IO.userError "unexpected server request before initialize completed"
 
+private def backendInitializeTimeoutMs : Nat :=
+  30000
+
+/--
+Acquire a fully initialized backend session or terminate the provisional child before failing.
+
+The caller adopts the returned session into broker state. No child ownership escapes this function
+until the initialization response and `initialized` notification have both completed.
+-/
+private def acquireBackendSession
+    (workspaceId : WorkspaceId)
+    (backend : Backend)
+    (config : BrokerConfig)
+    (epoch : Nat) : IO Session := do
+  let root := config.root
+  let (cmd, args, env) ← backendCommand config backend
+  let proc ← IO.Process.spawn {
+    toStdioConfig := brokerStdio
+    cmd := cmd
+    args := args
+    env := env
+    cwd := root.toString
+  }
+  let (session, initializeTask) ←
+    try
+      let stdin := IO.FS.Stream.ofHandle proc.stdin
+      let stdout := IO.FS.Stream.ofHandle proc.stdout
+      let pending ← PendingRequestStore.create
+      let sessionToken ← mkSessionToken
+      let session : Session := {
+        workspaceId
+        backend
+        root
+        epoch
+        sessionToken
+        proc
+        stdin
+        stdout
+        pending
+      }
+      writeLspRequest stdin
+        ({ id := 0, method := "initialize", param := initializeParams backend root
+          : Lean.JsonRpc.Request Json })
+      let initializeTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+        awaitInitializeResponse stdout
+      pure (session, initializeTask)
+    catch err =>
+      terminateBackendProcess proc
+      throw err
+  try
+    match ← waitForTaskWithTimeout initializeTask backendInitializeTimeoutMs with
+    | some (.ok ()) => pure ()
+    | some (.error err) => throw err
+    | none =>
+        throw <| IO.userError <|
+          s!"backend initialize timed out after {backendInitializeTimeoutMs} ms"
+    writeLspNotification session.stdin
+      ({ method := "initialized", param := Json.mkObj [] : Lean.JsonRpc.Notification Json })
+    let _ ← IO.asTask (prio := Task.Priority.dedicated) do
+      try
+        sessionReaderLoop session
+      catch e =>
+        IO.eprintln s!"broker session reader task failed: {e.toString}"
+    pure session
+  catch err =>
+    IO.cancel initializeTask
+    terminateBackendProcess proc
+    discard <| waitForTaskWithTimeout initializeTask sessionShutdownReplyTimeoutMs
+    throw err
+
 private def requireWorkspace (workspaceId : WorkspaceId) : M WorkspaceState := do
   let state ← get
   match getWorkspace? state workspaceId with
@@ -568,7 +649,6 @@ private def ensureSession (workspaceId : WorkspaceId) (backend : Backend) : M Se
     | some workspace => pure workspace
     | none => throw <| IO.userError s!"unknown Beam workspace '{workspaceId}'"
   let config := workspace.config
-  let root := config.root
   let backendState := getBackendState workspace backend
   let (backendState, restart) ← match backendState.session? with
     | some session =>
@@ -587,37 +667,8 @@ private def ensureSession (workspaceId : WorkspaceId) (backend : Backend) : M Se
         | none => st
       pure session
   | none =>
-      let (cmd, args, env) ← backendCommand config backend
-      let proc ← IO.Process.spawn {
-        toStdioConfig := brokerStdio
-        cmd := cmd
-        args := args
-        env := env
-        cwd := root.toString
-      }
-      let stdin := IO.FS.Stream.ofHandle proc.stdin
-      let stdout := IO.FS.Stream.ofHandle proc.stdout
-      let pending ← PendingRequestStore.create
-      let sessionToken ← mkSessionToken
-      let mut session : Session := {
-        workspaceId
-        backend
-        root
-        epoch := backendState.nextEpoch
-        sessionToken
-        proc
-        stdin
-        stdout
-        pending
-      }
-      writeLspRequest stdin ({ id := 0, method := "initialize", param := initializeParams backend root : Lean.JsonRpc.Request Json })
-      awaitInitializeResponse stdout
-      writeLspNotification stdin ({ method := "initialized", param := Json.mkObj [] : Lean.JsonRpc.Notification Json })
-      let _ ← IO.asTask (prio := Task.Priority.dedicated) do
-        try
-          sessionReaderLoop session
-        catch e =>
-          IO.eprintln s!"broker session reader task failed: {e.toString}"
+      let session ←
+        acquireBackendSession workspaceId backend config backendState.nextEpoch
       recordSessionSpawn workspaceId backend restart
       let backendState := { backendState with session? := some session }
       modify fun st =>
@@ -885,9 +936,7 @@ private def modifyCurrentSessionIfMatching
 
 structure ServerRuntime where
   state : Std.Mutex State
-  endpoint : Transport.Endpoint
   daemonIdentity? : Option DaemonIdentity
-  stop : IO.Ref Bool
   activeRequests : ActiveRequestRegistry
   private closeMutex : Std.Mutex Bool
   private closeDone : IO.Promise (Except IO.Error Unit)
@@ -929,7 +978,6 @@ private def ServerRuntime.statsResponse
 def ServerRuntime.create
     (config : BrokerConfig)
     (workspaceId : WorkspaceId)
-    (endpoint : Transport.Endpoint := .tcp 0)
     (daemonIdentity? : Option DaemonIdentity := none) : IO ServerRuntime := do
   unless validWorkspaceId workspaceId do
     throw <| IO.userError "workspace id must be non-empty"
@@ -937,9 +985,7 @@ def ServerRuntime.create
   let state := mkInitialState config workspaceId startMonoNanos
   pure {
     state := ← Std.Mutex.new state
-    endpoint := endpoint
     daemonIdentity?
-    stop := ← IO.mkRef false
     activeRequests := ← ActiveRequestRegistry.create
     closeMutex := ← Std.Mutex.new false
     closeDone := ← IO.Promise.new
@@ -960,11 +1006,7 @@ private def detachBackendSession
 
 private def collectSessions
     (left? right? : Option Session) : Array Session :=
-  match left?, right? with
-  | none, none => #[]
-  | some left, none => #[left]
-  | none, some right => #[right]
-  | some left, some right => #[left, right]
+  #[left?, right?].filterMap id
 
 private def detachWorkspaceSessions
     (workspace : WorkspaceState) : WorkspaceState × Array Session :=
@@ -975,16 +1017,32 @@ private def detachWorkspaceSessions
 private def detachRuntimeSessions (server : ServerRuntime) : IO (Array Session) := do
   server.withState do
     let state ← get
-    let (state, sessions) := state.workspaces.toList.foldl (init := (state, #[])) fun
+    let (state, sessions) := state.workspaces.toList.foldl (init := (state, [])) fun
         (state, sessions) (workspaceId, workspace) =>
       let (workspace, detached) := detachWorkspaceSessions workspace
-      (setWorkspace state workspaceId workspace, sessions ++ detached)
+      (setWorkspace state workspaceId workspace, detached.toList.reverse ++ sessions)
     set state
-    pure sessions
+    pure sessions.reverse.toArray
+
+private def recordFirstCleanupError
+    (firstError? : Option IO.Error)
+    (phase : IO Unit) : IO (Option IO.Error) := do
+  try
+    phase
+    pure firstError?
+  catch err =>
+    pure (firstError? <|> some err)
+
+private def shutdownSessionsBestEffort :
+    List Session → Option IO.Error → IO Unit
+  | [], none => pure ()
+  | [], some err => throw err
+  | session :: sessions, firstError? => do
+      let firstError? ← recordFirstCleanupError firstError? <| shutdownSession session
+      shutdownSessionsBestEffort sessions firstError?
 
 private def shutdownRuntimeSessions (server : ServerRuntime) : IO Unit := do
-  for session in ← detachRuntimeSessions server do
-    shutdownSession session
+  shutdownSessionsBestEffort (← detachRuntimeSessions server).toList none
 
 private def awaitRuntimeClose
     (promise : IO.Promise (Except IO.Error Unit)) : IO Unit := do
@@ -1007,18 +1065,18 @@ def ServerRuntime.close (server : ServerRuntime) : IO Unit := do
       set true
       pure true
   if leadsClose then
-    let outcome ←
-      try
-        ActiveRequestRegistry.closeAdmission server.activeRequests
-        -- The first sweep unblocks requests already waiting on a backend. An admitted request may
-        -- have been between admission and session creation when closure began, so repeat the sweep
-        -- after every dispatch scope has drained to guarantee that no late session survives.
-        shutdownRuntimeSessions server
-        ActiveRequestRegistry.awaitDrained server.activeRequests
-        shutdownRuntimeSessions server
-        pure (.ok () : Except IO.Error Unit)
-      catch err =>
-        pure (.error err)
+    -- Retain the first failure but run every teardown phase. In particular, a failed first session
+    -- sweep must not skip admission drain or the final sweep for sessions created during closure.
+    let firstError? ← recordFirstCleanupError none <|
+      ActiveRequestRegistry.closeAdmission server.activeRequests
+    let firstError? ← recordFirstCleanupError firstError? <| shutdownRuntimeSessions server
+    let firstError? ← recordFirstCleanupError firstError? <|
+      ActiveRequestRegistry.awaitDrained server.activeRequests
+    let firstError? ← recordFirstCleanupError firstError? <| shutdownRuntimeSessions server
+    let outcome :=
+      match firstError? with
+      | none => .ok ()
+      | some err => .error err
     server.closeDone.resolve outcome
     match outcome with
     | .ok () => pure ()
@@ -1230,20 +1288,32 @@ private def propagatePendingCancellation
     (cancelRef? : Option (IO.Ref Bool)) : IO Unit := do
   PendingRequestStore.propagateCancellation session.pending session.stdin cancelRef?
 
-private def requestStop (server : ServerRuntime) : IO Unit := do
-  server.stop.set true
+private structure DaemonTransport where
+  endpoint : Transport.Endpoint
+  listener : Transport.Listener
+  stop : IO.Ref Bool
+
+private def DaemonTransport.create (endpoint : Transport.Endpoint) : IO DaemonTransport := do
+  let stop ← IO.mkRef false
+  let listener ← Transport.bindAndListen endpoint 16
+  pure { endpoint, listener, stop }
+
+private def requestStop (transport : DaemonTransport) : IO Unit := do
+  transport.stop.set true
   try
     -- Wake the blocking accept. Both ends are intentionally left to scope cleanup: performing a
     -- graceful TCP shutdown on the wake-up pair can wait for its peer and deadlock daemon exit.
-    discard <| Transport.connect server.endpoint
+    discard <| Transport.connect transport.endpoint
   catch _ =>
     pure ()
 
-private def closeAndRequestStop (server : ServerRuntime) : IO Unit := do
+private def closeAndRequestStop
+    (server : ServerRuntime)
+    (transport : DaemonTransport) : IO Unit := do
   try
     server.close
   finally
-    requestStop server
+    requestStop transport
 
 private structure WorkspaceRequest extends Request where
   workspaceId : WorkspaceId
@@ -2450,8 +2520,11 @@ A standalone daemon cannot rely on its registry after the project directory disa
 default registry lives below that directory and is removed with it. Stop the broker proactively so
 removing a git worktree does not strand either the daemon or its backend processes.
 -/
-private partial def watchRoot (server : ServerRuntime) (root : System.FilePath) : IO Unit := do
-  if ← server.stop.get then
+private partial def watchRoot
+    (server : ServerRuntime)
+    (transport : DaemonTransport)
+    (root : System.FilePath) : IO Unit := do
+  if ← transport.stop.get then
     pure ()
   else
     let rootAvailable ←
@@ -2461,18 +2534,20 @@ private partial def watchRoot (server : ServerRuntime) (root : System.FilePath) 
         pure false
     if !rootAvailable then
       IO.eprintln s!"Beam daemon root is no longer available; shutting down: {root}"
-      closeAndRequestStop server
+      closeAndRequestStop server transport
     else
       IO.sleep rootWatchPollMs
-      watchRoot server root
+      watchRoot server transport root
 
-private def watchSessionOwnerStdin (server : ServerRuntime) : IO Unit := do
+private def watchSessionOwnerStdin
+    (server : ServerRuntime)
+    (transport : DaemonTransport) : IO Unit := do
   try
     discard <| (← IO.getStdin).readToEnd
   catch _ =>
     pure ()
-  unless ← server.stop.get do
-    closeAndRequestStop server
+  unless ← transport.stop.get do
+    closeAndRequestStop server transport
 
 private def watchClientDisconnect
     (client : Transport.Connection)
@@ -2485,7 +2560,10 @@ private def watchClientDisconnect
     pure ()
   discard <| handle.cancel
 
-private def handleClient (server : ServerRuntime) (client : Transport.Connection) : IO Unit := do
+private def handleClient
+    (server : ServerRuntime)
+    (transport : DaemonTransport)
+    (client : Transport.Connection) : IO Unit := do
   let clientRequestIdRef ← IO.mkRef (none : Option String)
   let terminalSentRef ← IO.mkRef false
   let sendResponse (clientRequestId? : Option String) (resp : Response) : IO Unit := do
@@ -2532,7 +2610,7 @@ private def handleClient (server : ServerRuntime) (client : Transport.Connection
           try
             sendResponse req.clientRequestId? resp
           finally
-            requestStop server
+            requestStop transport
         else
           sendResponse req.clientRequestId? resp
   catch e =>
@@ -2546,20 +2624,22 @@ private def handleClient (server : ServerRuntime) (client : Transport.Connection
   finally
     Transport.closeConnection client
 
-private partial def acceptLoop (server : ServerRuntime) (listener : Transport.Listener) : IO Unit := do
-  if ← server.stop.get then
+private partial def acceptLoop
+    (server : ServerRuntime)
+    (transport : DaemonTransport) : IO Unit := do
+  if ← transport.stop.get then
     pure ()
   else
-    let client ← Transport.accept listener
-    if ← server.stop.get then
+    let client ← Transport.accept transport.listener
+    if ← transport.stop.get then
       pure ()
     else
       let _ ← IO.asTask (prio := Task.Priority.dedicated) do
         try
-          handleClient server client
+          handleClient server transport client
         catch e =>
           IO.eprintln s!"broker client task failed: {e.toString}"
-      acceptLoop server listener
+      acceptLoop server transport
 
 private structure CliOptions where
   endpoint : Transport.Endpoint := .tcp 8765
@@ -2635,22 +2715,35 @@ def main (args : List String) : IO Unit := do
     leanPlugin? := leanPlugin?
     rocqCmd? := opts.rocqCmd?
   }
-  let listener ← Transport.bindAndListen opts.endpoint 16
-  let runtime ← ServerRuntime.create config workspaceId opts.endpoint daemonIdentity?
-  let rootWatcher ← IO.asTask (prio := Task.Priority.dedicated) <| watchRoot runtime root
+  let runtime ← ServerRuntime.create config workspaceId daemonIdentity?
+  let transport ← DaemonTransport.create opts.endpoint
+  let rootWatcher ← IO.asTask (prio := Task.Priority.dedicated) <|
+    watchRoot runtime transport root
   let ownerWatcher? ←
     if opts.sessionOwnerStdin then
-      some <$> IO.asTask (prio := Task.Priority.dedicated) (watchSessionOwnerStdin runtime)
+      some <$> IO.asTask (prio := Task.Priority.dedicated)
+        (watchSessionOwnerStdin runtime transport)
     else
       pure none
   try
-    acceptLoop runtime listener
+    acceptLoop runtime transport
   finally
-    runtime.stop.set true
-    Transport.closeListener listener
-    if let some ownerWatcher := ownerWatcher? then
-      IO.cancel ownerWatcher
-    discard <| IO.wait rootWatcher
-    runtime.close
+    let firstError? ← recordFirstCleanupError none <| transport.stop.set true
+    let firstError? ← recordFirstCleanupError firstError? <|
+      Transport.closeListener transport.listener
+    let firstError? ←
+      match ownerWatcher? with
+      | none => pure firstError?
+      | some ownerWatcher =>
+          recordFirstCleanupError firstError? do
+            try
+              IO.cancel ownerWatcher
+            finally
+              discard <| IO.wait ownerWatcher
+    let firstError? ← recordFirstCleanupError firstError? do
+      discard <| IO.wait rootWatcher
+    let firstError? ← recordFirstCleanupError firstError? runtime.close
+    if let some err := firstError? then
+      throw err
 
 end Beam.Broker

@@ -969,7 +969,7 @@ private def checkLifecycleTeardownReleasesStateMutex
   let targetConfig : BrokerConfig := { root := targetRoot }
   let replacementConfig : BrokerConfig := { root := replacementRoot }
   let observerConfig : BrokerConfig := { root := observerRoot }
-  let runtime ← ServerRuntime.create targetConfig targetId (.tcp 0)
+  let runtime ← ServerRuntime.create targetConfig targetId
   let session ← stubbornSession targetId targetRoot sentinel
   runtime.state.atomically do
     let state ← get
@@ -1038,7 +1038,7 @@ private partial def waitForCancellation
 private def checkSessionCloseAdmission : IO Unit := do
   let root := System.FilePath.mk "/tmp/beam-session-close-admission"
   let runtime ← Beam.Broker.ServerRuntime.create
-    ({ root } : Beam.Broker.BrokerConfig) "fixture" (.tcp 0)
+    ({ root } : Beam.Broker.BrokerConfig) "fixture"
   let beforeClose ← runtime.dispatchRequest { op := .stats }
   require "stats should be admitted before session close" beforeClose.ok
   let active ←

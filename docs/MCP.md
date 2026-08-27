@@ -144,7 +144,8 @@ cancellable requests, waits for every admitted request and non-cancellable works
 finish, then closes the broker runtime and all remaining backend sessions. A JSON-RPC request ID is
 active only until its request reaches terminal completion. The server retires that exact admission
 before publishing its terminal response, so a client may reuse the ID after observing the response;
-the completion barrier is resolved only after the response write finishes.
+the completion barrier is resolved only after the terminal response write attempt finishes, including
+when that write fails.
 
 CLI ingress has a different transport lifetime: a broker daemon accepts one request per socket
 connection, and disconnecting that connection cancels its exact broker admission. MCP carries many

@@ -317,9 +317,11 @@ private def RequestStatusEmitter.emitOnce
     Std.Internal.UV.Timer.stop emitter.timer
 
 private def RequestStatusEmitter.finish (emitter : RequestStatusEmitter) : IO Unit := do
-  emitter.state.atomically do
-    modify fun current => { current with finished := true }
-  Std.Internal.UV.Timer.stop emitter.timer
+  try
+    emitter.state.atomically do
+      modify fun current => { current with finished := true }
+  finally
+    Std.Internal.UV.Timer.stop emitter.timer
 
 private def RequestStatusEmitter.create
     (notifier : Notifier)
@@ -328,19 +330,26 @@ private def RequestStatusEmitter.create
     (path? : Option String) : IO RequestStatusEmitter := do
   let delayMs ← requestStatusDelayMs
   let timer ← Std.Internal.UV.Timer.mk delayMs.toUInt64 false
-  let emitter : RequestStatusEmitter := {
-    requestId := requestId.json
-    tool
-    path?
-    state := ← Std.Mutex.new {}
-    timer
-    emitStatus := emitToolStatusLog notifier
-  }
-  let timerResult ← timer.next
-  IO.chainTask timerResult.result? fun
-    | some () => emitter.emitOnce .running s!"{toolTarget tool path?} is still working."
-    | none => pure ()
-  pure emitter
+  try
+    let emitter : RequestStatusEmitter := {
+      requestId := requestId.json
+      tool
+      path?
+      state := ← Std.Mutex.new {}
+      timer
+      emitStatus := emitToolStatusLog notifier
+    }
+    let timerResult ← timer.next
+    IO.chainTask timerResult.result? fun
+      | some () => emitter.emitOnce .running s!"{toolTarget tool path?} is still working."
+      | none => pure ()
+    pure emitter
+  catch err =>
+    try
+      Std.Internal.UV.Timer.stop timer
+    catch _ =>
+      pure ()
+    throw err
 
 private def toolPath? (arguments : Json) : Option String :=
   (arguments.getObjValAs? String "path").toOption
@@ -840,8 +849,8 @@ def Internal.handleToolCall
         Internal.traceMcp s!"tools/call invalid input id={req.id.label} tool={params.name.key} error={err}"
         return .ok <| callToolErrorResult <| ToolError.invalidInput err
   let reporter ← CallReporter.create notifier req.id params progress?
-  reporter.emitPreparing
   try
+    reporter.emitPreparing
     let (runtime, root) ←
       match ← ensureRuntimeForWorkspace state opts workspace.workspaceId workspace.root with
       | .ok runtimeAndRoot =>

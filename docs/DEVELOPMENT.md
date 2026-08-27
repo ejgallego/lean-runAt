@@ -189,8 +189,10 @@ per socket connection, so the connection itself supplies response routing and di
 MCP multiplexes requests over one stdio stream, so `Beam.Mcp.StdioServer` must own exact JSON-RPC ID
 routing, serialized output, client cancellation, and workspace-control barriers. Both paths converge
 on `ServerRuntime.dispatchRequestWithHandle`, whose admission handle is the shared cancellation and
-drain boundary. Keep the two ingress coordinators separate unless a future transport has the same
-wire-level ownership rules; do not duplicate semantic operation dispatch above that boundary.
+drain boundary. `ServerRuntime` remains transport-agnostic; the daemon's private transport context
+owns its endpoint, listener, and stop state. Keep the two ingress coordinators separate unless a
+future transport has the same wire-level ownership rules; do not duplicate semantic operation
+dispatch above that boundary.
 
 The executable path is split into importable modules:
 
@@ -211,6 +213,9 @@ Keep these stdio invariants explicit:
 - the server emits no JSON-RPC requests to clients
 - request IDs preserve their string-versus-integer type and their original JSON spelling
 - ordinary calls may overlap; cache eviction is a full stream-order fence and shutdown drains work
+- once a request is registered, synchronous setup must either transfer it to an owned worker or
+  complete it terminally; worker finalization always retires the request and releases its control
+  fence, including after task-start, reporting, or output failures
 - ordinary tool calls bind cancellation to the exact broker admission handle; do not reintroduce
   request-ID polling between MCP and the broker
 - routing/output locks do not acquire setup, progress, or per-request locks
@@ -325,6 +330,8 @@ handle has been validated, never fall back to matching a reusable client request
 the `PendingRequest` as one value instead of separating its promise from its cancellation reference.
 Once that reference is marked, cancellation takes precedence over a concurrent backend failure;
 an already-completed backend success remains successful.
+After initialization, `sessionReaderLoop` is the backend session's only stdout reader. Shutdown
+replies use the same pending-request store and reader loop; do not add a second direct stdout read.
 
 `ServerRuntime.close` is the shared runtime teardown boundary. It closes admission, marks every
 admitted request for cancellation, shuts down backend sessions to unblock pending work, waits for
@@ -333,6 +340,12 @@ was between admission and session creation cannot leave a late process behind. C
 repeated callers wait for the same result. Transport owners decide what triggers closure and how
 their listener or stdio connection stops; they must not duplicate broker draining or backend
 teardown.
+
+A newly spawned backend remains a provisional resource until its initialization response arrives
+within the 30-second startup deadline and the broker sends `initialized`. Any initialization error,
+timeout, or notification-write failure terminates and reaps that child before the acquisition fails;
+only a fully initialized session enters workspace state. Keep this acquisition bracket intact so
+runtime closure never has to discover an unowned provisional process.
 
 The thick part of the broker is request orchestration. For `sync`, `runAt`, `goals`, `runWith`,
 `release`, and `save`, the broker reads the source file, updates the LSP document mirror, waits for
@@ -407,15 +420,15 @@ the registry stale; cleanup remains generation-scoped and PID fallback is permit
 typed PID-domain boundary.
 
 The owner also watches its exact registry generation and daemon child. `lean-beam shutdown` removes
-that generation after the typed shutdown response, which makes the holder close its pipe and lets
-the daemon's stdin watcher finish. On every holder exit path, the holder removes its exact registry
-generation before waiting for the daemon child to drain, then retries the same generation-scoped
-removal after bounded child cleanup. A draining daemon is therefore never advertised as attachable,
-and neither removal can delete a replacement generation. An unexpected nonzero daemon exit is
-reported by the holder. Interrupting or killing the holder closes the pipe by process lifetime. A
-paused holder keeps the pipe open, so the session remains valid without time-based expiry. If the
-project root disappears, the daemon's root watcher and the holder both converge on the same shutdown
-path.
+that generation after the typed shutdown response or a bounded response failure, which makes the
+holder close its pipe and lets the daemon's stdin watcher finish. On every holder exit path, the
+holder removes its exact registry generation before waiting for the daemon child to drain, then
+retries the same generation-scoped removal after bounded child cleanup. A draining daemon is
+therefore never advertised as attachable, and neither removal can delete a replacement generation.
+An unexpected nonzero daemon exit is reported by the holder. Interrupting or killing the holder
+closes the pipe by process lifetime. A paused holder keeps the pipe open, so the session remains valid
+without time-based expiry. If the project root disappears, the daemon's root watcher and the holder
+both converge on the same shutdown path.
 
 This model prevents PID-isolated commands from making contradictory ownership decisions: later
 commands may attach to a validated endpoint, but none can silently become a replacement owner.
@@ -441,8 +454,8 @@ Keep these invariants covered:
 
 Generic process helpers and the typed `RecordedPid.observe` boundary live in
 [Beam/System.lean](../Beam/System.lean). Persisted registry and lock-owner PIDs must pass
-through that boundary; only a matching recorded/current PID-domain pair permits a local liveness,
-zombie, or termination operation. Generic directory locks live in
+through that boundary; only a matching recorded/current PID-domain pair permits a local liveness or
+termination operation. Generic directory locks live in
 [Beam/Cli/Lock.lean](../Beam/Cli/Lock.lean). Their owner metadata records both PID and PID domain;
 only a proven dead same-domain owner is reaped, while missing, malformed, unknown-domain, and
 different-domain owners fail closed. Project daemon control locks use a bounded wait so a live but

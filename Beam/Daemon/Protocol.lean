@@ -158,7 +158,7 @@ def daemonGenerationStatus
   match ← daemonProbe endpoint workspaceId with
   | .error failure =>
       match failure with
-      | .transport _ =>
+      | .transport _ _ =>
           if ← endpointAcceptsConnection endpoint then
             pure <| .unrecognized failure
           else

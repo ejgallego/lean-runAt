@@ -104,7 +104,8 @@ Additional Beam lanes:
 
 Current Beam coverage includes:
 
-- fast Beam daemon smoke, request-stream, save-stream, startup-handshake, tracked-diagnostic dedup,
+- fast Beam daemon smoke, request-stream, save-stream, startup-handshake with failed provisional
+  backend cleanup, tracked-diagnostic dedup,
   exact broker request-handle lifetime, identity-matched daemon-generation probes, terminal shutdown
   response delivery, shutdown after the requesting TCP client resets its connection, protocol tests,
   and validated-toolchain/release-line CI policy consistency through
@@ -234,8 +235,9 @@ exact modern and legacy broker cancellation, per-request progress ordering, dete
 between a gated request in one workspace and a fast request in another, single-flight first use,
 simultaneous cold first use of distinct roots, stateless multi-root isolation, non-cancellable cache
 eviction with ordering on both sides of the global fence, lazy recreation, and EOF cancellation and
-teardown. The full stdio suite also checks modern request-ID reuse and rejects a proof handle carried
-across an MCP process restart. The slow Beam suite runs
+teardown. The full stdio suite also checks modern request-ID reuse, synchronous and workspace-control
+closed-output teardown, and rejects a proof handle carried across an MCP process restart. The slow
+Beam suite runs
 `--scenario multi-toolchain-workspaces` after installing both fixture toolchains and verifies that
 one MCP process keeps both project-specific Lean sessions active.
 

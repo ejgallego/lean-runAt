@@ -66,19 +66,6 @@ private def localPidAlive (pid : Nat) : IO Bool := do
   let out ← IO.Process.output { cmd := (← killCommand), args := #["-0", toString pid] }
   pure (out.exitCode == 0)
 
-/-- Inspect zombie state for a PID already known to belong to the caller's process domain. -/
-private def localPidZombie (pid : Nat) : IO Bool := do
-  try
-    let out ← IO.Process.output {
-      cmd := "ps"
-      args := #["-o", "stat=", "-p", toString pid]
-      stdin := .null
-      stderr := .null
-    }
-    pure <| out.exitCode == 0 && (trimLine out.stdout).startsWith "Z"
-  catch _ =>
-    pure false
-
 def currentPidDomain? : IO (Option String) := do
   try
     let domain ← readCmdTrim "readlink" #["/proc/self/ns/pid"]
@@ -132,12 +119,6 @@ def RecordedPid.observe (recorded : RecordedPid) : IO RecordedPidObservation := 
   | .local => pure <| .local (← localPidAlive recorded.pid)
   | .different => pure .differentDomain
   | .unknown => pure .unknownDomain
-
-/-- Return zombie state only when a persisted PID belongs to the caller's current process domain. -/
-def RecordedPid.zombieIfLocal? (recorded : RecordedPid) : IO (Option Bool) := do
-  match ← recorded.domainRelation with
-  | .local => some <$> localPidZombie recorded.pid
-  | .invalid | .different | .unknown => pure none
 
 /-- Send the default termination signal only to a persisted PID in the caller's current domain. -/
 def RecordedPid.terminateIfLocal (recorded : RecordedPid) : IO Bool := do

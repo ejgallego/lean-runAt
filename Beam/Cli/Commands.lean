@@ -15,7 +15,6 @@ import Beam.Cli.LeanOperation
 import Beam.Cli.Project
 import Beam.Cli.RuntimeBundle
 import Beam.Cli.Usage
-import Std.Internal.UV.Signal
 
 open Lean
 
@@ -101,30 +100,14 @@ private def runLeanRelease
 
 private def shutdownProjectDaemon (opts : CliOptions) : IO Unit := do
   let root ← projectRootAny opts
-  withProjectControlLock root do
-    match ← registryLiveFor root with
-    | some entry =>
-        if let some endpoint := Beam.Daemon.registryEndpoint? entry then
-          let result ← requestDaemonShutdown endpoint
-          try
-            match result with
-            | .ok resp => printResponse resp
-            | .error failure =>
-                throw <| IO.userError (← daemonFailureMessage root failure)
-          finally
-            -- Unpublishing this exact generation releases its wrapper owner. The owner remains the
-            -- sole process responsible for closing the inherited pipe and reaping its daemon child.
-            removeRegistryGeneration root entry.daemonId
-        else
-          stopRegisteredDaemon root
-          printJsonLine <| Json.mkObj [
-            ("result", Json.mkObj [("shutdown", toJson false), ("reason", toJson ("notFound" : String))])
-          ]
-    | none =>
-        stopRegisteredDaemon root
-        printJsonLine <| Json.mkObj [
-          ("result", Json.mkObj [("shutdown", toJson false), ("reason", toJson ("notFound" : String))])
-        ]
+  match ← shutdownRegisteredProjectDaemon root with
+  | .ok (some resp) => printResponse resp
+  | .ok none =>
+      printJsonLine <| Json.mkObj [
+        ("result", Json.mkObj [("shutdown", toJson false), ("reason", toJson ("notFound" : String))])
+      ]
+  | .error failure =>
+      throw <| IO.userError (← daemonFailureMessage root failure)
 
 private def parseBackendName (name : String) : IO Backend := do
   match fromJson? (Json.str name) with
@@ -142,27 +125,17 @@ private def validateRequestedPortScope (opts : CliOptions) : IO Unit := do
 
 private def runThenHoldUntilInterrupted
     (owner : ProjectDaemonOwner)
-    (act : IO Unit) : IO Unit := do
-  let signal ← Std.Internal.UV.Signal.mk 2 false
-  let promise ← Std.Internal.UV.Signal.next signal
-  let task ← IO.asTask (prio := Task.Priority.dedicated) do
-    let some _ ← IO.wait promise.result?
-      | throw <| IO.userError "SIGINT watcher promise dropped"
-    pure ()
-  try
+    (act : IO Unit) : IO Unit :=
+  withInterruptWatcher fun watcher => do
     act
-    while !(← IO.hasFinished task) && (← owner.exitCode?).isNone &&
+    while !(← watcher.interrupted) && (← owner.exitCode?).isNone &&
         (← owner.registered) && !(← IO.checkCanceled) do
       IO.sleep 50
-    if ← IO.hasFinished task then
-      match ← IO.wait task with
-      | .ok () => pure ()
-      | .error err => throw err
+    if ← watcher.interrupted then
+      watcher.awaitInterrupt
     else if let some exitCode ← owner.exitCode? then
       unless exitCode == 0 do
         throw <| IO.userError s!"owned Beam daemon exited with status {exitCode}"
-  finally
-    Std.Internal.UV.Signal.stop signal
 
 private def ensureBackend
     (home : System.FilePath)

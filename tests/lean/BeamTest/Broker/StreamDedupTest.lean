@@ -158,7 +158,7 @@ private def fakeServerWithLeanSession
     config
     lean := { nextEpoch := 1, session? := some session }
   }
-  let server ← Beam.Broker.ServerRuntime.create config fixtureWorkspaceId (.tcp 0)
+  let server ← Beam.Broker.ServerRuntime.create config fixtureWorkspaceId
   server.state.atomically do
     set ({
       bootstrapConfig := config

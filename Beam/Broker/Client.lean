@@ -19,15 +19,29 @@ structure StreamCallbacks where
 
 abbrev Endpoint := Transport.Endpoint
 
+/-- The transport operation that produced a typed broker client failure. -/
+inductive BrokerTransportOperation where
+  | connect
+  | send
+  | receive
+  deriving Repr, BEq
+
+private def BrokerTransportOperation.label : BrokerTransportOperation → String
+  | .connect => "connect"
+  | .send => "send"
+  | .receive => "receive"
+
 /-- Keep broker client failures typed until a CLI or transport presentation boundary. -/
 inductive BrokerClientFailure where
-  | transport (error : IO.Error)
+  | transport (operation : BrokerTransportOperation) (error : IO.Error)
   | invalidResponse (detail : String)
   | streamCallback (error : IO.Error)
   | responseTimeout (timeoutMs : Nat)
 
 def BrokerClientFailure.detail : BrokerClientFailure → String
-  | .transport error | .streamCallback error => error.toString
+  | .transport operation error =>
+      s!"Beam daemon {operation.label} failed: {error}"
+  | .streamCallback error => error.toString
   | .invalidResponse detail => detail
   | .responseTimeout timeoutMs =>
       s!"Beam daemon response timed out after {timeoutMs} ms"
@@ -35,13 +49,14 @@ def BrokerClientFailure.detail : BrokerClientFailure → String
 instance : Repr BrokerClientFailure where
   reprPrec failure _ := Std.Format.text <|
     match failure with
-    | .transport error => s!"BrokerClientFailure.transport {error}"
+    | .transport operation error => s!"BrokerClientFailure.transport {repr operation} {error}"
     | .invalidResponse detail => s!"BrokerClientFailure.invalidResponse {detail}"
     | .streamCallback error => s!"BrokerClientFailure.streamCallback {error}"
     | .responseTimeout timeoutMs => s!"BrokerClientFailure.responseTimeout {timeoutMs}"
 
 private def BrokerClientFailure.toIOError : BrokerClientFailure → IO.Error
-  | .transport error | .streamCallback error => error
+  | failure@(.transport ..) => IO.userError failure.detail
+  | .streamCallback error => error
   | .invalidResponse detail => IO.userError detail
   | .responseTimeout timeoutMs =>
       IO.userError s!"Beam daemon response timed out after {timeoutMs} ms"
@@ -113,11 +128,11 @@ private partial def sendRequestWithStreamResultCore
     (onStream : StreamMessage → IO Unit)
     (responseTimeoutMs? : Option Nat) : IO (Except BrokerClientFailure Response) := do
   let client ←
-    match ← captureClientFailure .transport (Transport.connect endpoint) with
+    match ← captureClientFailure (.transport .connect) (Transport.connect endpoint) with
     | .ok client => pure client
     | .error failure => return .error failure
   try
-    match ← captureClientFailure .transport <|
+    match ← captureClientFailure (.transport .send) <|
         Transport.sendMsg client (toJson req).compress with
     | .ok () => pure ()
     | .error failure => return .error failure
@@ -130,11 +145,11 @@ private partial def sendRequestWithStreamResultCore
       let msg ←
         match deadline? with
         | none =>
-            match ← captureClientFailure .transport (Transport.recvMsg client) with
+            match ← captureClientFailure (.transport .receive) (Transport.recvMsg client) with
             | .ok msg => pure msg
             | .error failure => return .error failure
         | some deadline =>
-            match ← captureClientFailure .transport <|
+            match ← captureClientFailure (.transport .receive) <|
                 Transport.recvMsgUntil client deadline.deadlineNanos with
             | .ok (some msg) => pure msg
             | .ok none => return .error (.responseTimeout deadline.timeoutMs)

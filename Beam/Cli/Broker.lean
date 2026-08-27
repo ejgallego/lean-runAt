@@ -27,7 +27,7 @@ def inProjectDaemonWorkspace (req : Request) : Request :=
       if req.workspaceId?.isSome then req
       else { req with workspaceId? := some projectDaemonWorkspaceId }
 
-def withBrokerErrorContext
+private def withBrokerErrorContext
     {α}
     (root : System.FilePath)
     (action : IO (Except BrokerClientFailure α)) : IO α := do
@@ -45,17 +45,41 @@ structure BrokerWaitSpec where
   failureBoundary : String := "before the request completed"
   responseNote? : Response → Option String := fun _ => none
 
-private structure InterruptWatcher where
-  signal : Std.Internal.UV.Signal
-  task : Task (Except IO.Error Unit)
+structure InterruptWatcher where
+  interrupted : IO Bool
+  awaitInterrupt : IO Unit
 
-private def InterruptWatcher.stop (watcher : InterruptWatcher) : IO Unit :=
-  Std.Internal.UV.Signal.stop watcher.signal
+private def closeInterruptSignal (signal : Std.Internal.UV.Signal) : IO Unit := do
+  -- `Signal.stop` alone leaves an unresolved `next` promise and its waiter leaked. Cancel the
+  -- pending wait first, then stop the underlying signal resource.
+  try
+    Std.Internal.UV.Signal.cancel signal
+  finally
+    Std.Internal.UV.Signal.stop signal
 
-private def InterruptWatcher.interrupted (watcher : InterruptWatcher) : IO Bool :=
-  IO.hasFinished watcher.task
+/-- Acquire one non-repeating SIGINT watcher and release its pending wait on every exit path. -/
+def withInterruptWatcher (act : InterruptWatcher → IO α) : IO α := do
+  let signal ← Std.Internal.UV.Signal.mk 2 false
+  let promise ←
+    try
+      Std.Internal.UV.Signal.next signal
+    catch err =>
+      Std.Internal.UV.Signal.stop signal
+      throw err
+  let event := promise.result?
+  let watcher : InterruptWatcher := {
+    interrupted := IO.hasFinished event
+    awaitInterrupt := do
+      let some _ ← IO.wait event
+        | throw <| IO.userError "SIGINT watcher promise dropped"
+      pure ()
+  }
+  try
+    act watcher
+  finally
+    closeInterruptSignal signal
 
-def progressEnabled : IO Bool := do
+private def progressEnabled : IO Bool := do
   match ← envFlag? "BEAM_PROGRESS" with
   | some enabled =>
       pure enabled
@@ -64,6 +88,7 @@ def progressEnabled : IO Bool := do
 
 private structure WrapperBrokerRequest where
   request : Request
+  clientRequestId : String
   visibleClientRequestId? : Option String
 
 private def mkWrapperClientRequestId (req : Request) : IO String := do
@@ -77,12 +102,14 @@ private def withWrapperClientRequestId (req : Request) : IO WrapperBrokerRequest
   | some clientRequestId =>
       pure {
         request := req
+        clientRequestId
         visibleClientRequestId? := some clientRequestId
       }
   | none =>
       let clientRequestId ← mkWrapperClientRequestId req
       pure {
         request := { req with clientRequestId? := some clientRequestId }
+        clientRequestId
         visibleClientRequestId? := none
       }
 
@@ -90,28 +117,16 @@ private def prepareWrapperBrokerRequest
     (req : Request) : IO WrapperBrokerRequest :=
   withWrapperClientRequestId <| inProjectDaemonWorkspace req
 
-private def mkInterruptWatcher? (clientRequestId? : Option String) : IO (Option InterruptWatcher) := do
-  match clientRequestId? with
-  | none => pure none
-  | some _ =>
-      let signal ← Std.Internal.UV.Signal.mk 2 false
-      let promise ← Std.Internal.UV.Signal.next signal
-      let task ← IO.asTask (prio := Task.Priority.dedicated) do
-        let some _ ← IO.wait promise.result?
-          | throw <| IO.userError "SIGINT watcher promise dropped"
-        pure ()
-      pure <| some { signal, task }
-
 def decodeCancelAcknowledged? (resp : Response) : Option Bool := do
   let result ← resp.result?
   result.getObjValAs? Bool "cancelled" |>.toOption
 
 private def sendBrokerCancellation
     (endpoint : Transport.Endpoint)
-    (req : Request) : IO (Option Bool) := do
+    (clientRequestId : String) : IO (Option Bool) := do
   let cancelReq : Request := {
     op := .cancel
-    cancelRequestId? := req.clientRequestId?
+    cancelRequestId? := some clientRequestId
   }
   try
     let resp ← sendRequest endpoint (← withEnvClientRequestId cancelReq)
@@ -122,74 +137,60 @@ private def sendBrokerCancellation
 private def awaitBrokerResponse
     (task : Task (Except IO.Error (Except BrokerClientFailure Response)))
     (endpoint : Transport.Endpoint)
-    (req : Request)
+    (clientRequestId : String)
     (visibleClientRequestId? : Option String)
     (progressSpec? : Option BrokerWaitSpec)
-    (interruptWatcher? : Option InterruptWatcher) : IO (Except BrokerClientFailure Response) := do
+    (interruptWatcher : InterruptWatcher) : IO (Except BrokerClientFailure Response) := do
   let mut interruptObserved := false
   let mut cancelAcknowledged := false
   let emit := fun msg => IO.eprintln <| annotateRunatMessage visibleClientRequestId? msg
   if let some spec := progressSpec? then
     emit spec.startMsg
   let mut waitedMs := 0
-  try
-    while !(← IO.hasFinished task) do
-      let signalInterrupted ←
-        match interruptWatcher? with
-        | some watcher => watcher.interrupted
-        | none => pure false
-      if signalInterrupted || (← IO.checkCanceled) then
-        if !interruptObserved then
-          interruptObserved := true
-          emit "beam: requesting broker cancellation"
-        if !cancelAcknowledged then
-          -- SIGINT can arrive after the wrapper starts the request task but before the broker
-          -- has registered the client request id as active. Retry until the broker acknowledges
-          -- cancellation or the original request finishes.
-          match ← sendBrokerCancellation endpoint req with
-          | some true => cancelAcknowledged := true
-          | some false | none => pure ()
-      IO.sleep 500
-      if !(← IO.hasFinished task) then
-        waitedMs := waitedMs + 500
-        if waitedMs % 1000 == 0 then
-          if let some spec := progressSpec? then
-            emit <| spec.stillWaitingMsg (waitedMs / 1000)
-    let result ←
-      match (← IO.wait task) with
-      | .ok result => pure result
-      | .error err => throw err
-    match result with
-    | .ok response =>
+  while !(← IO.hasFinished task) do
+    let signalInterrupted ← interruptWatcher.interrupted
+    if signalInterrupted || (← IO.checkCanceled) then
+      if !interruptObserved then
+        interruptObserved := true
+        emit "beam: requesting broker cancellation"
+      if !cancelAcknowledged then
+        -- SIGINT can arrive after the wrapper starts the request task but before the broker
+        -- has registered the client request id as active. Retry until the broker acknowledges
+        -- cancellation or the original request finishes.
+        match ← sendBrokerCancellation endpoint clientRequestId with
+        | some true => cancelAcknowledged := true
+        | some false | none => pure ()
+    IO.sleep 500
+    if !(← IO.hasFinished task) then
+      waitedMs := waitedMs + 500
+      if waitedMs % 1000 == 0 then
         if let some spec := progressSpec? then
-          emit <| spec.completeMsg response
-        pure <| .ok response
-    | .error failure =>
-        pure <| .error failure
-  finally
-    match interruptWatcher? with
-    | some watcher => watcher.stop
-    | none => pure ()
+          emit <| spec.stillWaitingMsg (waitedMs / 1000)
+  let result ←
+    match (← IO.wait task) with
+    | .ok result => pure result
+    | .error err => throw err
+  match result with
+  | .ok response =>
+      if let some spec := progressSpec? then
+        emit <| spec.completeMsg response
+      pure <| .ok response
+  | .error failure =>
+      pure <| .error failure
 
 private def awaitBrokerResponseWithInterrupts
     (endpoint : Transport.Endpoint)
-    (req : Request)
+    (clientRequestId : String)
     (visibleClientRequestId? : Option String)
     (progressSpec? : Option BrokerWaitSpec)
     (action : IO (Except BrokerClientFailure Response)) :
     IO (Except BrokerClientFailure Response) := do
   -- Wrapper calls synthesize a broker clientRequestId when the user did not provide one. That id
   -- gives SIGINT cancellation a stable broker key but is kept out of the CLI's public output.
-  let interruptWatcher? ← mkInterruptWatcher? req.clientRequestId?
-  let task ←
-    try
-      IO.asTask (prio := Task.Priority.dedicated) action
-    catch e =>
-      match interruptWatcher? with
-      | some watcher => watcher.stop
-      | none => pure ()
-      throw e
-  awaitBrokerResponse task endpoint req visibleClientRequestId? progressSpec? interruptWatcher?
+  withInterruptWatcher fun interruptWatcher => do
+    let task ← IO.asTask (prio := Task.Priority.dedicated) action
+    awaitBrokerResponse task endpoint clientRequestId visibleClientRequestId? progressSpec?
+      interruptWatcher
 
 private structure WrapperBrokerResponse where
   response : Response
@@ -202,7 +203,7 @@ private def requestBrokerResponse
   let wrapperReq ← prepareWrapperBrokerRequest req
   let req := wrapperReq.request
   let response ← withBrokerErrorContext root do
-    awaitBrokerResponseWithInterrupts client.endpoint req
+    awaitBrokerResponseWithInterrupts client.endpoint wrapperReq.clientRequestId
       wrapperReq.visibleClientRequestId? none <|
       sendRequestWithCallbacksResult client.endpoint req
   pure { response, visibleClientRequestId? := wrapperReq.visibleClientRequestId? }
@@ -442,8 +443,8 @@ def callBrokerWithProgress
   }
   let progressSpec? := if showProgress then some spec else none
   let resp ← withBrokerErrorContext root do
-    awaitBrokerResponseWithInterrupts client.endpoint req visibleClientRequestId?
-      progressSpec? <|
+    awaitBrokerResponseWithInterrupts client.endpoint wrapperReq.clientRequestId
+      visibleClientRequestId? progressSpec? <|
       sendRequestWithCallbacksResult client.endpoint req callbacks
   match responseErrorSummary? spec.action spec.failureBoundary resp with
   | some note =>

@@ -15,6 +15,11 @@ namespace Beam.Cli
 private def lockPollMs : Nat :=
   100
 
+private structure LockDeadline where
+  timeoutMs : Nat
+  startedNanos : Nat
+  deadlineNanos : Nat
+
 private structure LockOwner where
   pid : Nat
   pidDomain? : Option String
@@ -61,8 +66,7 @@ private def removeStaleLock? (lockDir : System.FilePath) (owner? : Option LockOw
 
 private partial def acquireLockCore
     (lockDir : System.FilePath)
-    (timeoutMs? : Option Nat)
-    (waitedMs : Nat := 0) : IO Unit := do
+    (deadline? : Option LockDeadline) : IO Unit := do
   if let some parent := lockDir.parent then
     IO.FS.createDirAll parent
   let selfPid ← IO.Process.getPID
@@ -93,34 +97,36 @@ private partial def acquireLockCore
   else
     let owner? ← readLockOwner? lockDir
     if ← removeStaleLock? lockDir owner? then
-      acquireLockCore lockDir timeoutMs? waitedMs
+      acquireLockCore lockDir deadline?
     else
-      match timeoutMs? with
-      | some timeoutMs =>
-          if waitedMs >= timeoutMs then
-            throw <| IO.userError (lockTimeoutMessage lockDir owner? waitedMs timeoutMs)
+      match deadline? with
+      | some deadline =>
+          let now ← IO.monoNanosNow
+          if now >= deadline.deadlineNanos then
+            let waitedMs := (now - deadline.startedNanos) / 1000000
+            throw <| IO.userError <|
+              lockTimeoutMessage lockDir owner? waitedMs deadline.timeoutMs
       | none =>
           pure ()
       IO.sleep lockPollMs.toUInt32
-      acquireLockCore lockDir timeoutMs? (waitedMs + lockPollMs)
+      acquireLockCore lockDir deadline?
 
-def acquireLock (lockDir : System.FilePath) : IO Unit :=
+private def acquireLock (lockDir : System.FilePath) : IO Unit :=
   acquireLockCore lockDir none
 
-/--
-Acquire a directory lock, but fail with lock owner diagnostics after `timeoutMs`.
+private def acquireLockTimeout (lockDir : System.FilePath) (timeoutMs : Nat) : IO Unit := do
+  let startedNanos ← IO.monoNanosNow
+  acquireLockCore lockDir <| some {
+    timeoutMs
+    startedNanos
+    deadlineNanos := startedNanos + timeoutMs * 1000000
+  }
 
-The unbounded `acquireLock` remains available for long-running build/install locks. This bounded
-variant is for short project-control critical sections where silent infinite waiting hides daemon
-or wrapper failures.
--/
-def acquireLockTimeout (lockDir : System.FilePath) (timeoutMs : Nat) : IO Unit :=
-  acquireLockCore lockDir (some timeoutMs)
-
-def releaseLock (lockDir : System.FilePath) : IO Unit := do
+private def releaseLock (lockDir : System.FilePath) : IO Unit := do
   if ← lockDir.pathExists then
     IO.FS.removeDirAll lockDir
 
+/-- Run `act` while holding an unbounded directory lock. -/
 def withLock (lockDir : System.FilePath) (act : IO α) : IO α := do
   acquireLock lockDir
   try
@@ -128,7 +134,7 @@ def withLock (lockDir : System.FilePath) (act : IO α) : IO α := do
   finally
     releaseLock lockDir
 
-/-- Run `act` while holding a bounded directory lock. -/
+/-- Run `act` while holding a directory lock until an absolute monotonic deadline. -/
 def withLockTimeout (lockDir : System.FilePath) (timeoutMs : Nat) (act : IO α) : IO α := do
   acquireLockTimeout lockDir timeoutMs
   try

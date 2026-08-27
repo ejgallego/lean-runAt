@@ -3177,53 +3177,117 @@ def run_legacy_eof_teardown(repo_root, fixture_root, timeout):
             client.close()
 
 
+def require_clean_exit_after_closed_stdout(client, message, label):
+    try:
+        client.proc.stdout.close()
+        client.send_message(message)
+        client.close_input()
+        try:
+            client.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            client.proc.kill()
+            fail(f"lean-beam-mcp did not exit after stdout was closed during {label}")
+        client.stderr_thread.join(timeout=1)
+        stderr = "\n".join(client.stderr_lines)
+        require(
+            client.proc.returncode == 0,
+            f"lean-beam-mcp exited with {client.proc.returncode} during {label}\n{stderr}",
+        )
+        if client.server_trace:
+            unexpected = [
+                line for line in stderr.splitlines()
+                if not line.startswith("lean-beam-mcp trace ")
+            ]
+            require(
+                not unexpected,
+                f"lean-beam-mcp wrote unexpected non-trace stderr during {label}:\n"
+                + "\n".join(unexpected),
+            )
+        else:
+            require(
+                stderr.strip() == "",
+                f"lean-beam-mcp wrote unexpected stderr during {label}:\n{stderr}",
+            )
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
+            client.proc.wait(timeout=5)
+
+
 def run_closed_stdout_regression(repo_root, fixture_root, timeout):
     with tempfile.TemporaryDirectory(prefix="lean-beam-mcp-closed-stdout-") as tmp:
         project_root = Path(tmp) / "project"
         copy_project_fixture(fixture_root, project_root)
-        client = McpClient(
+        initialize_client = McpClient(
             repo_root,
             project_root,
             timeout,
-            label="closed-stdout-regression",
+            label="closed-stdout-initialize",
             drain_stdout=False,
         )
-        stderr = ""
+        require_clean_exit_after_closed_stdout(
+            initialize_client,
+            {
+                "jsonrpc": "2.0",
+                "id": "closed-stdout-initialize",
+                "method": "initialize",
+                "params": initialize_params(),
+            },
+            "initialize response",
+        )
+
+        control_client = McpClient(
+            repo_root,
+            project_root,
+            timeout,
+            label="closed-stdout-control",
+            drain_stdout=False,
+        )
         try:
-            client.proc.stdout.close()
-            client.send_message(
+            control_client.send_message(
                 {
                     "jsonrpc": "2.0",
-                    "id": "closed-stdout",
+                    "id": "closed-stdout-control-initialize",
                     "method": "initialize",
                     "params": initialize_params(),
                 }
             )
-            client.proc.stdin.close()
-            try:
-                client.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                client.proc.kill()
-                fail("lean-beam-mcp did not exit after stdout was closed")
-            client.stderr_thread.join(timeout=1)
-            stderr = "\n".join(client.stderr_lines)
-            require(client.proc.returncode == 0, f"lean-beam-mcp exited with {client.proc.returncode}\n{stderr}")
-            if client.server_trace:
-                unexpected = [
-                    line for line in stderr.splitlines()
-                    if not line.startswith("lean-beam-mcp trace ")
-                ]
-                require(
-                    not unexpected,
-                    "lean-beam-mcp wrote unexpected non-trace stderr after closed stdout:\n"
-                    + "\n".join(unexpected),
-                )
-            else:
-                require(stderr.strip() == "", f"lean-beam-mcp wrote unexpected stderr after closed stdout:\n{stderr}")
+            ready, _, _ = select.select([control_client.proc.stdout], [], [], timeout)
+            require(ready, "closed-stdout control regression did not receive initialize response")
+            initialized = json.loads(control_client.proc.stdout.readline())
+            require(
+                initialized.get("id") == "closed-stdout-control-initialize",
+                f"closed-stdout control regression received wrong initialize response: {initialized}",
+            )
+            expect_result(initialized)
+            control_client.send_message(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                }
+            )
+            require_clean_exit_after_closed_stdout(
+                control_client,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "closed-stdout-control",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "lean_drop_workspace",
+                        "arguments": {
+                            "workspace": workspace_descriptor(project_root),
+                        },
+                        "_meta": {
+                            "progressToken": "closed-stdout-control-progress",
+                        },
+                    },
+                },
+                "workspace-control response",
+            )
         finally:
-            if client.proc.poll() is None:
-                client.proc.kill()
-                client.proc.wait(timeout=5)
+            if control_client.proc.poll() is None:
+                control_client.proc.kill()
+                control_client.proc.wait(timeout=5)
 
 
 def main():

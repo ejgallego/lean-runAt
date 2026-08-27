@@ -67,7 +67,7 @@ private def requireSubstring (label needle haystack : String) : IO Unit := do
   require s!"{label}: expected '{needle}' in '{haystack}'" (Beam.Cli.hasSubstring haystack needle)
 
 private def brokerTransportFailure (detail : String) : Beam.Broker.BrokerClientFailure :=
-  .transport (IO.userError detail)
+  .transport .receive (IO.userError detail)
 
 private def requireJsonNat (label field : String) (expected : Nat) (json : Json) : IO Unit := do
   let actual ← IO.ofExcept <| json.getObjValAs? Nat field
@@ -597,7 +597,8 @@ private def checkDaemonFailureContext : IO Unit := do
     let startupLog ← Beam.Daemon.daemonStartupLogPath root
     IO.FS.writeFile startupLog "line 1\nline 2\n"
     let detail := "synthetic broker transport failure"
-    let msg ← Beam.Cli.daemonFailureMessage root (brokerTransportFailure detail)
+    let failure := brokerTransportFailure detail
+    let msg ← Beam.Cli.daemonFailureMessage root failure
     requireSubstring "daemon failure context should include registry path" "Beam daemon registry" msg
     requireSubstring "daemon failure context should include daemon id" "daemonId: daemon-test" msg
     requireSubstring "daemon failure context should include dead pid status" "pid: 999999999 (not alive)" msg
@@ -612,8 +613,8 @@ private def checkDaemonFailureContext : IO Unit := do
     requireJsonNat "daemon failure incident should use schema version" "schemaVersion" 1 incidentJson
     requireJsonString "daemon failure incident should classify the typed transport failure"
       "kind" "brokerTransportFailure" incidentJson
-    requireJsonString "daemon failure incident should keep original detail"
-      "detail" detail incidentJson
+    requireJsonString "daemon failure incident should retain typed operation context"
+      "detail" failure.detail incidentJson
     requireJsonString "daemon failure incident should include root"
       "root" root.toString incidentJson
     requireJsonString "daemon failure incident should include registry path"

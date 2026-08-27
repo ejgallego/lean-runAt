@@ -199,14 +199,22 @@ private def Coordinator.currentControlBarrier?
   coordinator.routing.atomically do
     pure (← get).controlBarrier?
 
+private structure ControlRequestFence where
+  previous? : Option (IO.Promise Unit)
+  done : IO.Promise Unit
+  priorRequests : Array InFlightRequest
+
 private def Coordinator.pushControlBarrier
-    (coordinator : Coordinator) : IO (Option (IO.Promise Unit) × IO.Promise Unit) := do
+    (coordinator : Coordinator)
+    (request : InFlightRequest) : IO ControlRequestFence := do
   let done ← IO.Promise.new
-  let previous? ← coordinator.routing.atomically do
+  let (previous?, priorRequests) ← coordinator.routing.atomically do
     let routing ← get
+    let priorRequests := routing.admitted.toList.filterMap (fun (_, other) =>
+      if other.brokerId == request.brokerId then none else some other) |>.toArray
     set { routing with controlBarrier? := some done }
-    pure routing.controlBarrier?
-  pure (previous?, done)
+    pure (routing.controlBarrier?, priorRequests)
+  pure { previous?, done, priorRequests }
 
 private def awaitControlBarrier (barrier? : Option (IO.Promise Unit)) : IO Unit := do
   match barrier? with
@@ -236,28 +244,97 @@ private def Coordinator.finishRequest
     (coordinator : Coordinator)
     (request : InFlightRequest)
     (response : Json) : IO Unit := do
-  let sendResponse ← request.state.atomically do
-    let current ← get
-    match current.phase with
-    | .active =>
-        set { current with phase := .completed }
-        pure true
-    | .clientCancelled =>
-        set { current with phase := .completed }
-        pure false
-    | .completed =>
-        pure false
-  -- Retire the exact admission before its terminal response becomes visible. A client may reuse
-  -- an ID as soon as it observes that response; retaining the routing entry until after the write
-  -- creates a race in which the new request is mistaken for a duplicate active request.
-  coordinator.retireRequestId request
   try
+    let sendResponse ← request.state.atomically do
+      let current ← get
+      match current.phase with
+      | .active =>
+          set { current with phase := .completed }
+          pure true
+      | .clientCancelled =>
+          set { current with phase := .completed }
+          pure false
+      | .completed =>
+          pure false
+    -- Retire the exact admission before its terminal response becomes visible. A client may reuse
+    -- an ID as soon as it observes that response; retaining the routing entry until after the write
+    -- creates a race in which the new request is mistaken for a duplicate active request.
+    coordinator.retireRequestId request
     if sendResponse then
       coordinator.output.send response
   finally
-    -- Barriers continue to observe completion only after the terminal write has finished.
-    coordinator.completeRequest request
-    request.resolveDone
+    -- Retry retirement when an earlier state/routing operation failed, and make every cleanup step
+    -- independent. Barriers observe completion only after the terminal write has finished.
+    try
+      coordinator.retireRequestId request
+    finally
+      try
+        coordinator.completeRequest request
+      finally
+        request.resolveDone
+
+private def traceMcpSafely (message : String) : IO Unit := do
+  try
+    Internal.traceMcp message
+  catch _ =>
+    pure ()
+
+/--
+Own one registered request through terminal completion.
+
+`after` belongs to the same ownership scope and runs after the request's terminal write attempt. In
+particular, a workspace-control fence is not released before the request is retired and its `done`
+promise is resolved.
+-/
+private def Coordinator.runOwnedRequest
+    (coordinator : Coordinator)
+    (req : Request)
+    (request : InFlightRequest)
+    (work : IO Json)
+    (after : IO Unit := pure ()) : IO Unit := do
+  try
+    let response ←
+      try
+        work
+      catch e =>
+        traceMcpSafely s!"request work failed id={req.id.label}: {e.toString}"
+        pure <| errorResponse req.id (RpcError.internalError e.toString)
+    try
+      coordinator.finishRequest request response
+    catch e =>
+      if !Beam.Mcp.Stdio.isClosedOutputError e then
+        traceMcpSafely s!"request completion failed id={req.id.label}: {e.toString}"
+    pure ()
+  finally
+    try
+      after
+    catch e =>
+      traceMcpSafely s!"request finalizer failed id={req.id.label}: {e.toString}"
+
+/-- Project a worker or setup failure through the registered request's single completion path. -/
+private def Coordinator.failOwnedRequest
+    (coordinator : Coordinator)
+    (req : Request)
+    (request : InFlightRequest)
+    (error : IO.Error)
+    (after : IO Unit := pure ()) : IO Unit := do
+  traceMcpSafely s!"request work failed id={req.id.label}: {error.toString}"
+  coordinator.runOwnedRequest req request
+    (pure <| errorResponse req.id (RpcError.internalError error.toString)) after
+
+/-- Transfer a registered request to a worker, or complete it synchronously if task startup fails. -/
+private def Coordinator.spawnOwnedRequest
+    (coordinator : Coordinator)
+    (req : Request)
+    (request : InFlightRequest)
+    (work : IO Json)
+    (after : IO Unit := pure ()) : IO Unit := do
+  try
+    let _ ← IO.asTask (prio := Task.Priority.dedicated) do
+      coordinator.runOwnedRequest req request work after
+    pure ()
+  catch e =>
+    coordinator.failOwnedRequest req request e after
 
 private def InFlightRequest.markClientCancelled
     (request : InFlightRequest) : IO (Bool × Option Beam.Broker.RequestHandle) := do
@@ -312,17 +389,12 @@ private def awaitRequests (requests : Array InFlightRequest) : IO Unit := do
   for request in requests do
     awaitRequestDone request
 
-private def Coordinator.otherAdmittedRequests
-    (coordinator : Coordinator)
-    (request : InFlightRequest) : IO (Array InFlightRequest) := do
-  coordinator.routing.atomically do
-    pure <| (← get).admitted.toList.filterMap (fun (_, other) =>
-      if other.brokerId == request.brokerId then none else some other) |>.toArray
-
 private def Coordinator.closeTransport (coordinator : Coordinator) : IO Unit := do
-  let requests ← coordinator.beginClosing
-  awaitRequests requests
-  coordinator.state.closeRuntime
+  try
+    let requests ← coordinator.beginClosing
+    awaitRequests requests
+  finally
+    coordinator.state.closeRuntime
 
 private def Coordinator.admitToolRequest
     (coordinator : Coordinator)
@@ -343,21 +415,18 @@ private def Coordinator.executeToolRequest
   let notifications : NotificationSink := {
     send := fun json => request.sendIfActive coordinator.output json
   }
-  try
-    match ← Internal.handleToolCall
-        coordinator.state
-        opts
-        request.brokerId
-        request.bindBrokerRequest
-        req
-        admitted
-        parsedParams
-        notifications
-        initialProgress with
-    | .ok result => pure <| successResponseForEra admitted.era req.id result
-    | .error err => pure <| errorResponse req.id err
-  catch e =>
-    pure <| errorResponse req.id (RpcError.internalError e.toString)
+  match ← Internal.handleToolCall
+      coordinator.state
+      opts
+      request.brokerId
+      request.bindBrokerRequest
+      req
+      admitted
+      parsedParams
+      notifications
+      initialProgress with
+  | .ok result => pure <| successResponseForEra admitted.era req.id result
+  | .error err => pure <| errorResponse req.id err
 
 private def Coordinator.toolRequestResponse
     (coordinator : Coordinator)
@@ -368,15 +437,12 @@ private def Coordinator.toolRequestResponse
     (request : InFlightRequest)
     (barrier? : Option (IO.Promise Unit))
     (initialProgress : Nat := 0) : IO Json := do
-  try
-    awaitControlBarrier barrier?
-    if ← request.isActive then
-      coordinator.executeToolRequest opts req admitted parsedParams request initialProgress
-    else
-      pure <| errorResponse req.id <|
-        RpcError.invalidRequest "request was cancelled before execution"
-  catch e =>
-    pure <| errorResponse req.id (RpcError.internalError e.toString)
+  awaitControlBarrier barrier?
+  if ← request.isActive then
+    coordinator.executeToolRequest opts req admitted parsedParams request initialProgress
+  else
+    pure <| errorResponse req.id <|
+      RpcError.invalidRequest "request was cancelled before execution"
 
 private def finishReporterSafely
     (req : Request)
@@ -384,7 +450,7 @@ private def finishReporterSafely
   try
     finishReporter
   catch e =>
-    Internal.traceMcp s!"request reporter finish failed id={req.id.label}: {e.toString}"
+    traceMcpSafely s!"request reporter finish failed id={req.id.label}: {e.toString}"
 
 private def Coordinator.spawnToolRequest
     (coordinator : Coordinator)
@@ -393,22 +459,26 @@ private def Coordinator.spawnToolRequest
     (evidence : RequestProtocolEvidence)
     (parsedParams : Except String CallToolParams)
     (request : InFlightRequest) : IO Unit := do
+  let admission ←
+    try
+      coordinator.admitToolRequest req evidence
+    catch e =>
+      coordinator.failOwnedRequest req request e
+      return
   let admitted ←
-    match ← coordinator.admitToolRequest req evidence with
+    match admission with
     | .ok admitted => pure admitted
     | .error response =>
-        coordinator.finishRequest request response
+        coordinator.runOwnedRequest req request (pure response)
         return
-  let barrier? ← coordinator.currentControlBarrier?
-  let _ ← IO.asTask (prio := Task.Priority.dedicated) do
+  let barrier? ←
     try
-      let response ←
-        coordinator.toolRequestResponse opts req admitted parsedParams request barrier?
-      coordinator.finishRequest request response
+      coordinator.currentControlBarrier?
     catch e =>
-      if !Beam.Mcp.Stdio.isBrokenPipeError e then
-        Internal.traceMcp s!"request completion failed id={req.id.label}: {e.toString}"
-  pure ()
+      coordinator.failOwnedRequest req request e
+      return
+  coordinator.spawnOwnedRequest req request <|
+    coordinator.toolRequestResponse opts req admitted parsedParams request barrier?
 
 private def Coordinator.handleControlToolRequest
     (coordinator : Coordinator)
@@ -417,46 +487,45 @@ private def Coordinator.handleControlToolRequest
     (evidence : RequestProtocolEvidence)
     (parsedParams : Except String CallToolParams)
     (request : InFlightRequest) : IO Unit := do
-  match ← coordinator.admitToolRequest req evidence with
-  | .error response => coordinator.finishRequest request response
+  let admission ←
+    try
+      coordinator.admitToolRequest req evidence
+    catch e =>
+      coordinator.failOwnedRequest req request e
+      return
+  match admission with
+  | .error response => coordinator.runOwnedRequest req request (pure response)
   | .ok admitted =>
-      let notifications : NotificationSink := {
-        send := fun json => request.sendIfActive coordinator.output json
-      }
-      let reporter? ←
-        match parsedParams with
-        | .ok params =>
-            Internal.createPreDispatchReporter?
-              coordinator.state req.id admitted params notifications
-        | .error _ => pure none
-      let initialProgress := reporter?.map (·.initialProgress) |>.getD 0
-      let finishReporter : IO Unit :=
-        match reporter? with
-        | some reporter => reporter.finish
-        | none => pure ()
-      let (previous?, done) ← coordinator.pushControlBarrier
-      let priorRequests ← coordinator.otherAdmittedRequests request
-      let _ ← IO.asTask (prio := Task.Priority.dedicated) do
-        let response ←
-          try
-            -- A control operation is a full stream-order fence: work admitted before it drains,
-            -- while work admitted afterward waits on `done`.
-            awaitRequests priorRequests
-            coordinator.toolRequestResponse opts req admitted parsedParams request previous?
-              initialProgress
-          catch e =>
-            if !Beam.Mcp.Stdio.isBrokenPipeError e then
-              Internal.traceMcp s!"workspace control completion failed id={req.id.label}: {e.toString}"
-            pure <| errorResponse req.id (RpcError.internalError e.toString)
+      let fence ←
         try
-          finishReporterSafely req finishReporter
-          coordinator.finishRequest request response
+          coordinator.pushControlBarrier request
         catch e =>
-          if !Beam.Mcp.Stdio.isBrokenPipeError e then
-            Internal.traceMcp s!"workspace control completion failed id={req.id.label}: {e.toString}"
-        finally
-          resolvePromise done
-      pure ()
+          coordinator.failOwnedRequest req request e
+          return
+      let work : IO Json := do
+        let notifications : NotificationSink := {
+          send := fun json => request.sendIfActive coordinator.output json
+        }
+        let reporter? ←
+          match parsedParams with
+          | .ok params =>
+              Internal.createPreDispatchReporter?
+                coordinator.state req.id admitted params notifications
+          | .error _ => pure none
+        let run (initialProgress : Nat) : IO Json := do
+          -- A control operation is a full stream-order fence: work admitted before it drains,
+          -- while work admitted afterward waits on `done`.
+          awaitRequests fence.priorRequests
+          coordinator.toolRequestResponse opts req admitted parsedParams request fence.previous?
+            initialProgress
+        match reporter? with
+        | none => run 0
+        | some reporter =>
+            try
+              run reporter.initialProgress
+            finally
+              finishReporterSafely req reporter.finish
+      coordinator.spawnOwnedRequest req request work (resolvePromise fence.done)
 
 private def isWorkspaceControl : Except String CallToolParams → Bool
   | .ok params => params.name == .leanDropWorkspace
@@ -567,7 +636,7 @@ partial def runStdio (opts : Options) : IO Unit := do
   try
     loop
   catch e =>
-    if Beam.Mcp.Stdio.isBrokenPipeError e then
+    if Beam.Mcp.Stdio.isClosedOutputError e then
       pure ()
     else
       throw e

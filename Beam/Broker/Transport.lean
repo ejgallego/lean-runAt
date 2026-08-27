@@ -39,7 +39,7 @@ private def waitTcpPromise (promise : IO.Promise (Except IO.Error α)) (failureM
     | throw <| IO.userError failureMessage
   match result with
   | .ok value => pure value
-  | .error err => throw <| IO.userError s!"{failureMessage}: {err}"
+  | .error err => throw err
 
 private inductive ReceiveWaitResult (α : Type) where
   | completed (value : α)
@@ -58,7 +58,7 @@ private partial def waitTcpReceivePromiseUntil
         | throw <| IO.userError failureMessage
       match result with
       | .ok value => pure <| .completed value
-      | .error err => throw <| IO.userError s!"{failureMessage}: {err}"
+      | .error err => throw err
     else if (← IO.monoNanosNow) >= deadlineNanos then
       -- The caller abandons and closes this connection after timeout. Cancel the exact pending UV
       -- receive first so no read remains attached to the socket.
@@ -103,8 +103,11 @@ def closeConnection (conn : Connection) : IO Unit := do
 
 def closeListener (listener : Listener) : IO Unit := do
   match listener with
-  | .tcp _ =>
-      pure ()
+  | .tcp server =>
+      try
+        TCP.Socket.cancelAccept server
+      catch _ =>
+        pure ()
 
 private def sendMsgTcp (client : TCP.Socket) (msg : String) : IO Unit := do
   let bytes := msg.toUTF8
