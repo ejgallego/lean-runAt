@@ -282,6 +282,20 @@ def receive_frame(sock):
     return json.loads(payload)
 
 with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+    request = json.dumps({
+        "op": "shutdown",
+        "daemonCapability": "not-the-owner-capability",
+    }).encode()
+    sock.sendall(str(len(request)).encode() + b"\n" + request)
+    response = receive_frame(sock)
+    payload = response.get("payload", {})
+    if payload.get("ok") is not False:
+        raise RuntimeError(f"unauthorized shutdown unexpectedly succeeded: {response}")
+    message = payload.get("error", {}).get("message", "")
+    if "invalid Beam daemon capability" not in message:
+        raise RuntimeError(f"unexpected unauthorized-shutdown response: {response}")
+
+with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
     sock.sendall(b"16777217\n")
     response = receive_frame(sock)
     if "exceeds 16777216 bytes" not in response.get("payload", {}).get("error", {}).get("message", ""):
@@ -294,8 +308,14 @@ with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
         raise RuntimeError(f"unexpected first-message-timeout response: {response}")
 PY
 
-stats_after_limits_json="$("$beam_script" --root "$tmp1" stats)"
-assert_json_field_equals "stats after transport limit probes" "$stats_after_limits_json" ok true
+stats_after_security_probes_json="$("$beam_script" --root "$tmp1" stats)"
+assert_json_field_equals \
+  "stats after unauthorized shutdown and transport limit probes" \
+  "$stats_after_security_probes_json" ok true
+if ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; then
+  echo "expected unauthorized shutdown to preserve both owner and daemon" >&2
+  exit 1
+fi
 
 second_owner_out="$tmp1/second-owner.out"
 second_owner_err="$tmp1/second-owner.err"

@@ -95,7 +95,7 @@ private def collectDaemonPayload
     (root : System.FilePath)
     (warnings : Array String) : IO (Json × Json × Array String) := do
   match ← observeProjectRegistry root with
-  | .liveExact entry =>
+  | .live entry =>
       match Beam.Daemon.registryEndpoint? entry with
       | none =>
           pure (Json.null, Json.null, warnings.push "Beam daemon registry did not contain a valid endpoint")
@@ -116,8 +116,6 @@ private def collectDaemonPayload
           pure (stats, openDocs, warnings)
   | .absent | .staleConfirmed _ =>
       pure (Json.null, Json.null, warnings.push "no live Beam daemon was available for stats/open-files")
-  | .liveConfigMismatch _ _ =>
-      pure (Json.null, Json.null, warnings.push "the live Beam daemon has a different configuration")
   | .draining _ =>
       pure (Json.null, Json.null, warnings.push "the Beam daemon is draining")
   | .legacy =>

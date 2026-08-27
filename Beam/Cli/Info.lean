@@ -168,7 +168,7 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
   let registry ← Beam.Daemon.registryPath root
   IO.println s!"registry: {registry}"
   match ← observeProjectRegistry root with
-  | .liveExact entry =>
+  | .live entry =>
       IO.println "daemon status: live"
       IO.println s!"daemon pid: {entry.pid}"
       if let some pidDomain := entry.pidDomain? then
@@ -178,10 +178,6 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
       else
         IO.println "daemon endpoint: invalid"
       IO.println s!"daemon config hash: {entry.configHash}"
-  | .liveConfigMismatch entry expectedHash =>
-      IO.println "daemon status: config mismatch"
-      IO.println s!"daemon config hash: {entry.configHash}"
-      IO.println s!"expected config hash: {expectedHash}"
   | .draining entry =>
       IO.println "daemon status: draining"
       IO.println s!"daemon generation: {entry.daemonId}"

@@ -110,12 +110,14 @@ Current Beam coverage includes:
   response delivery, shutdown after the requesting TCP client resets its connection, protocol tests,
   and validated-toolchain/release-line CI policy consistency through
   [tests/test-beam-fast.sh](../tests/test-beam-fast.sh)
-- wrapper coverage through [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh), which aggregates focused probe, runtime, sync/save, handle, and diagnostic slices
+- wrapper coverage through [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh), which reports
+  focused probe, runtime, sync/save, handle, and diagnostic slices independently
 - focused daemon lifecycle coverage in [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh),
   including the no-implicit-start contract, duplicate-owner rejection, Beam and non-Beam endpoint
   collision safety without cross-project disclosure, authenticated generation probes, mode-`0600`
-  registry publication, oversized-frame and first-message limits, a bounded identity probe against
-  a silent non-Beam listener, cross-root unsafe-registry preservation that does not affect the daemon
+  registry publication, unauthorized-shutdown rejection without listener teardown, oversized-frame
+  and first-message limits, a bounded identity probe against a silent non-Beam listener, cross-root
+  unsafe-registry preservation that does not affect the daemon
   serving the other root, configuration-drift preservation of the owner and active request,
   explicit shutdown, cancellation of requests active during shutdown or owner loss,
   exact-generation cleanup that preserves a replacement registry, a published draining fence while

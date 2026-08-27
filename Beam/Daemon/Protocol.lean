@@ -62,6 +62,9 @@ def RegistryEntry.identity (entry : RegistryEntry) : DaemonIdentity := {
   configHash := entry.configHash
 }
 
+def RegistryEntry.redactedJson (entry : RegistryEntry) : Json :=
+  (toJson entry).setObjVal! "capability" (toJson "<redacted>")
+
 structure DesiredConfig where
   root : System.FilePath
   leanCmd? : Option String := none

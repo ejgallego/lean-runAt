@@ -12,6 +12,7 @@ import Beam.Cli.Lock
 import Beam.Cli.Project
 import Beam.Daemon.Debug
 import Beam.Daemon.Paths
+import Beam.Daemon.Registry
 
 open Lean
 
@@ -102,11 +103,23 @@ private def writeRegistry (control : ProjectControl) (entry : RegistryEntry) : I
   if let some parent := control.registry.parent then
     IO.FS.createDirAll parent
   let tmp := control.registry.withExtension "tmp"
-  IO.FS.writeFile tmp ((toJson entry).pretty ++ "\n")
-  IO.setAccessRights tmp {
-    user := { read := true, write := true }
-  }
-  IO.FS.rename tmp control.registry
+  try
+    IO.FS.withFile tmp .write fun handle => do
+      -- The registry contains the daemon capability. Make the inode private before publishing any
+      -- bytes, rather than relying on a post-write chmod window or the caller's umask.
+      IO.setAccessRights tmp {
+        user := { read := true, write := true }
+      }
+      handle.putStr ((toJson entry).pretty ++ "\n")
+      handle.flush
+    IO.FS.rename tmp control.registry
+  catch err =>
+    try
+      if ← tmp.pathExists then
+        IO.FS.removeFile tmp
+    catch _ =>
+      pure ()
+    throw err
 
 private def writeExistingRegistry (control : ProjectControl) (entry : RegistryEntry) : IO Unit := do
   -- Teardown must not create a path while the project tree is being removed. Rewrite through an
@@ -164,8 +177,7 @@ inductive RegistryObservation where
   | legacy
   | unsupported (schemaVersion : Nat)
   | malformed (detail : String)
-  | liveExact (entry : RegistryEntry)
-  | liveConfigMismatch (entry : RegistryEntry) (expectedHash : String)
+  | live (entry : RegistryEntry)
   | draining (entry : RegistryEntry)
   | staleConfirmed (entry : RegistryEntry)
   | unusable (entry : RegistryEntry) (reason : RegistryUnsafeReason)
@@ -183,9 +195,7 @@ private def registryProcessesGone (entry : RegistryEntry) : IO Bool := do
 private def registryOwnerKnownDead (entry : RegistryEntry) : IO Bool :=
   recordedPidGone entry.ownerPid entry.ownerPidDomain?
 
-def observeProjectRegistry
-    (root : System.FilePath)
-    (expectedHash? : Option String := none) : IO RegistryObservation := do
+def observeProjectRegistry (root : System.FilePath) : IO RegistryObservation := do
   match ← readRegistry root with
   | .absent => pure .absent
   | .legacy => pure .legacy
@@ -212,13 +222,7 @@ def observeProjectRegistry
           if ownerDead then
             pure <| .unusable entry .ownerDead
           else
-            match expectedHash? with
-            | some expectedHash =>
-                if expectedHash == entry.configHash then
-                  pure <| .liveExact entry
-                else
-                  pure <| .liveConfigMismatch entry expectedHash
-            | none => pure <| .liveExact entry
+            pure <| .live entry
       | .unavailable =>
           if ownerDead && (← registryProcessesGone entry) then
             pure <| .staleConfirmed entry
@@ -359,7 +363,7 @@ private def writeDaemonFailureIncident?
       controlDir := control.toString
       registryPath := registryFile.toString
       registry := registry.map fun entry =>
-        (toJson entry).setObjVal! "capability" (toJson "<redacted>")
+        entry.redactedJson
       registryPidStatus := pidStatus
       registryEndpoint := endpoint
       startupLogPath := logTail?.map (fun (path, _) => path.toString)
@@ -477,9 +481,15 @@ private def startDaemon
     cwd := some desired.root
     setsid := true
   }
-  child.stdin.putStrLn capability
-  child.stdin.flush
-  pure child
+  try
+    child.stdin.putStrLn capability
+    child.stdin.flush
+    pure child
+  catch err =>
+    -- Once spawned, the retained child handle owns the whole setsid process group. Do not leak
+    -- that acquisition when publishing the capability through the owner pipe fails.
+    terminateDaemonChild child
+    throw err
 
 private def daemonStartupTimeoutMs : Nat :=
   30000
@@ -716,6 +726,12 @@ private def registryRecoveryMessage (root : System.FilePath) (detail : String) :
   s!"Beam cannot safely use or replace the daemon registry for {root}: {detail}. " ++
     "Preserve the registry, stop the matching foreground owner or daemon explicitly, and retry"
 
+private def registryReadRecoveryMessage
+    (root : System.FilePath)
+    (registryRead : RegistryRead) : String :=
+  registryRecoveryMessage root <|
+    registryRead.detail?.getD s!"unexpected registry state '{registryRead.status}'"
+
 private def markRegistryDraining (control : ProjectControl) (entry : RegistryEntry) : IO Unit := do
   match ← readRegistry control.root with
   | .current current =>
@@ -736,21 +752,16 @@ def shutdownRegisteredProjectDaemon
     | .staleConfirmed entry =>
         removeRegistryGeneration control entry
         pure ShutdownPlan.none
-    | .liveExact entry =>
+    | .live entry =>
         markRegistryDraining control entry
         pure <| ShutdownPlan.request entry
     | .draining entry => pure <| ShutdownPlan.request entry
-    | .liveConfigMismatch entry _ =>
-        markRegistryDraining control entry
-        pure <| ShutdownPlan.request entry
     | .legacy =>
-        throw <| IO.userError <| registryRecoveryMessage root <|
-          RegistryRead.legacy.detail?.getD "legacy registry"
+        throw <| IO.userError <| registryReadRecoveryMessage root .legacy
     | .unsupported schemaVersion =>
-        throw <| IO.userError <| registryRecoveryMessage root <|
-          (RegistryRead.unsupported schemaVersion).detail?.getD "unsupported registry"
+        throw <| IO.userError <| registryReadRecoveryMessage root (.unsupported schemaVersion)
     | .malformed detail =>
-        throw <| IO.userError <| registryRecoveryMessage root detail
+        throw <| IO.userError <| registryReadRecoveryMessage root (.malformed detail)
     | .unusable _ reason =>
         throw <| IO.userError <| registryRecoveryMessage root reason.message
   match plan with
@@ -806,21 +817,22 @@ private def startOwnedProjectDaemon
     (control : ProjectControl)
     (desired : DesiredConfig)
     (opts : CliOptions) : IO OwnedProjectDaemon := do
-  match ← observeProjectRegistry desired.root (some desired.configHash) with
+  match ← observeProjectRegistry desired.root with
   | .absent => pure ()
   | .staleConfirmed entry => removeRegistryGeneration control entry
-  | .liveExact entry => throw <| IO.userError (activeOwnerMessage desired.root entry)
-  | .liveConfigMismatch entry expectedHash =>
-      throw <| IO.userError (configMismatchMessage desired.root entry expectedHash)
+  | .live entry =>
+      if entry.configHash == desired.configHash then
+        throw <| IO.userError (activeOwnerMessage desired.root entry)
+      else
+        throw <| IO.userError (configMismatchMessage desired.root entry desired.configHash)
   | .draining entry => throw <| IO.userError (drainingOwnerMessage desired.root entry)
   | .legacy =>
-      throw <| IO.userError <| registryRecoveryMessage desired.root <|
-        RegistryRead.legacy.detail?.getD "legacy registry"
+      throw <| IO.userError <| registryReadRecoveryMessage desired.root .legacy
   | .unsupported schemaVersion =>
-      throw <| IO.userError <| registryRecoveryMessage desired.root <|
-        (RegistryRead.unsupported schemaVersion).detail?.getD "unsupported registry"
+      throw <| IO.userError <|
+        registryReadRecoveryMessage desired.root (.unsupported schemaVersion)
   | .malformed detail =>
-      throw <| IO.userError <| registryRecoveryMessage desired.root detail
+      throw <| IO.userError <| registryReadRecoveryMessage desired.root (.malformed detail)
   | .unusable _ reason =>
       throw <| IO.userError <| registryRecoveryMessage desired.root reason.message
   let (endpoint, entry, child) ← startDaemonEntry desired opts
@@ -923,21 +935,24 @@ private def lookupProjectDaemon
     (expectedHash? : Option String := none)
     (backend? : Option Backend := none) : IO ProjectDaemonClient := do
   withProjectControl root fun _control => do
-    match ← observeProjectRegistry root expectedHash? with
-    | .liveExact entry => projectDaemonClient entry
+    match ← observeProjectRegistry root with
+    | .live entry =>
+        match expectedHash? with
+        | some expectedHash =>
+            if entry.configHash == expectedHash then
+              projectDaemonClient entry
+            else
+              throw <| IO.userError (configMismatchMessage root entry expectedHash)
+        | none => projectDaemonClient entry
     | .absent | .staleConfirmed _ =>
         throw <| IO.userError (missingOwnerMessage root backend?)
-    | .liveConfigMismatch entry expectedHash =>
-        throw <| IO.userError (configMismatchMessage root entry expectedHash)
     | .draining entry => throw <| IO.userError (drainingOwnerMessage root entry)
     | .legacy =>
-        throw <| IO.userError <| registryRecoveryMessage root <|
-          RegistryRead.legacy.detail?.getD "legacy registry"
+        throw <| IO.userError <| registryReadRecoveryMessage root .legacy
     | .unsupported schemaVersion =>
-        throw <| IO.userError <| registryRecoveryMessage root <|
-          (RegistryRead.unsupported schemaVersion).detail?.getD "unsupported registry"
+        throw <| IO.userError <| registryReadRecoveryMessage root (.unsupported schemaVersion)
     | .malformed detail =>
-        throw <| IO.userError <| registryRecoveryMessage root detail
+        throw <| IO.userError <| registryReadRecoveryMessage root (.malformed detail)
     | .unusable _ reason =>
         throw <| IO.userError <| registryRecoveryMessage root reason.message
 

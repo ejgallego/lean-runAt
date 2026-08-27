@@ -1055,6 +1055,9 @@ private def awaitRuntimeClose
   | .ok () => pure ()
   | .error err => throw err
 
+private def ServerRuntime.closeStarted (server : ServerRuntime) : IO Bool :=
+  server.closeMutex.atomically get
+
 /--
 Close broker admission, cancel admitted requests, shut down every backend session, and wait for
 all admitted dispatch scopes to unregister. Concurrent and repeated callers wait for the same
@@ -2628,10 +2631,6 @@ private def handleClient
     | Except.error failure =>
         sendResponse (← clientRequestIdRef.get) failure.toResponse
     | Except.ok req =>
-        let stopsTransport :=
-          req.op == .shutdown && match req.validateFields with
-            | .ok () => true
-            | .error _ => false
         let emitProgress : SyncFileProgress → IO Unit := fun progress =>
           Transport.sendMsg client
             (toJson (StreamMessage.fileProgress req.clientRequestId? progress)).compress
@@ -2641,6 +2640,10 @@ private def handleClient
         let resp ← server.dispatchRequestWithHandle req (fun handle => do
           let _ ← IO.asTask (prio := Task.Priority.dedicated) <| watchClientDisconnect client handle
           pure true) (some emitProgress) (some emitDiagnostic)
+        -- Request validation alone does not grant shutdown authority. Only stop the listener once
+        -- dispatch has authenticated the capability and started runtime closure.
+        let stopsTransport ←
+          if req.op == .shutdown then server.closeStarted else pure false
         if stopsTransport then
           -- A successful send is the transport's flush boundary. Wake the listener only after the
           -- terminal response has been handed off, but do so even when the caller disconnected so

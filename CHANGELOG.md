@@ -36,7 +36,7 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 - Wrapper daemons now have explicit session ownership: only `lean-beam ensure --hold` starts a
   generation, ordinary wrapper commands attach to it, `--port` is accepted only by that owner-start
   command, and holder exit cancels admitted requests before closing the daemon through an inherited
-  pipe without heartbeat leases or retirement fences
+  pipe without heartbeat leases or time-based retirement
   ([#241](https://github.com/leanprover/lean-beam/pull/241), @ejgallego).
 - Long-running Lean operations now separate liveness status, request progress, and diagnostics.
   Sync and refresh use the discoverable `diagnostic_scope: "errors" | "all"` and
