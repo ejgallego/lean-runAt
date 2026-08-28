@@ -440,14 +440,16 @@ private def checkCliRootParsing : IO Unit := do
   let control := root / "shared-control"
   try
     IO.FS.createDirAll control
+    let expectedRoot ← Beam.resolveExistingPath root
+    let expectedControl ← Beam.resolveExistingPath control
     let opts ← Beam.Cli.parseCliOptions {} [
       "--root", root.toString,
       "--control-dir", control.toString,
       "stats"
     ]
-    require "explicit CLI root should be canonicalized" (opts.explicitRoot? == some root)
+    require "explicit CLI root should be canonicalized" (opts.explicitRoot? == some expectedRoot)
     require "explicit control directory should remain an exact selection"
-      (opts.explicitControlDir? == some control)
+      (opts.explicitControlDir? == some expectedControl)
     require "global selectors should not leak into command arguments" (opts.args == ["stats"])
   finally
     if ← root.pathExists then

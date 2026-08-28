@@ -1604,8 +1604,18 @@ if ! printf '%s\n' "$unsupported_doctor_out" | grep -q 'bundle toolchain fingerp
 fi
 
 unsupported_err="$(mktemp "$tmp_root/install-unsupported-toolchain-XXXXXX")"
-if "$installed_lean_beam" --root "$unsupported_project_root" ensure >"$unsupported_err" 2>&1; then
-  echo "expected installed wrapper ensure lean to reject an unsupported toolchain" >&2
+"$installed_lean_beam" --root "$unsupported_project_root" ensure --hold >"$unsupported_err" 2>&1 &
+unsupported_owner_pid="$!"
+if ! wait_for_exit "$unsupported_owner_pid" "unsupported-toolchain session owner" 120 0.1; then
+  kill -INT "$unsupported_owner_pid" 2>/dev/null || true
+  wait "$unsupported_owner_pid" 2>/dev/null || true
+  echo "expected installed wrapper owner admission to reject an unsupported toolchain promptly" >&2
+  cat "$unsupported_err" >&2
+  remove_tmp_file "$unsupported_err"
+  exit 1
+fi
+if wait "$unsupported_owner_pid"; then
+  echo "expected installed wrapper owner admission to reject an unsupported toolchain" >&2
   cat "$unsupported_err" >&2
   remove_tmp_file "$unsupported_err"
   exit 1
