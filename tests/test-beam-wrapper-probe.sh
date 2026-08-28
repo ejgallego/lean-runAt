@@ -25,7 +25,7 @@ beam_wrapper_expect_file "$registry_path"
 
 pid1="$(read_json_field "$registry_path" pid)"
 port1="$(read_json_field "$registry_path" port)"
-root1="$(read_json_field "$registry_path" root)"
+root1="$(read_json_field "$registry_path" workspaces.0.root)"
 client1="$(read_json_field "$registry_path" clientBin 2>/dev/null || true)"
 if [ -z "$client1" ]; then
   client1="$client"

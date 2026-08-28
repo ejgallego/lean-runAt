@@ -16,7 +16,7 @@ namespace Beam.Daemon
 open Beam.Broker
 
 def registrySchemaVersion : Nat :=
-  1
+  2
 
 inductive RegistryLifecycle where
   | live
@@ -34,7 +34,26 @@ instance : FromJson RegistryLifecycle where
     | .str "draining" => .ok .draining
     | json => .error s!"expected registry lifecycle 'live' or 'draining', got {json.compress}"
 
-structure RegistryEntry where
+/-- One statically configured workspace owned by a CLI session. -/
+structure WorkspaceBinding where
+  workspaceId : WorkspaceId
+  root : String
+  configHash : String
+  leanCmd? : Option String := none
+  plugin? : Option String := none
+  rocqCmd? : Option String := none
+  toolchain? : Option String := none
+  bundleId? : Option String := none
+  deriving FromJson, ToJson
+
+/--
+The private descriptor for one wrapper-owned CLI session.
+
+The descriptor is deliberately shaped as a session with a nonempty workspace collection even
+while the public owner command creates one workspace. This keeps session identity separate from
+workspace routing and leaves static multi-workspace ownership as an additive CLI feature.
+-/
+structure SessionDescriptor where
   schemaVersion : Nat
   lifecycle : RegistryLifecycle
   daemonId : String
@@ -44,25 +63,24 @@ structure RegistryEntry where
   ownerPid : Nat
   ownerPidDomain? : Option String := none
   port? : Option Nat := none
-  root : String
+  workspaces : Array WorkspaceBinding
+  /-- Hash of the complete frozen session configuration. -/
   configHash : String
-  leanCmd? : Option String := none
-  plugin? : Option String := none
-  rocqCmd? : Option String := none
-  toolchain? : Option String := none
   clientBin? : Option String := none
   daemonBin? : Option String := none
-  bundleId? : Option String := none
   startedAt : String
   requestedPort? : Option Nat := none
   deriving FromJson, ToJson
 
-def RegistryEntry.identity (entry : RegistryEntry) : DaemonIdentity := {
+def SessionDescriptor.rootSummary (entry : SessionDescriptor) : String :=
+  String.intercalate ", " <| entry.workspaces.toList.map (·.root)
+
+def SessionDescriptor.identity (entry : SessionDescriptor) : DaemonIdentity := {
   daemonId := entry.daemonId
   configHash := entry.configHash
 }
 
-def RegistryEntry.redactedJson (entry : RegistryEntry) : Json :=
+def SessionDescriptor.redactedJson (entry : SessionDescriptor) : Json :=
   (toJson entry).setObjVal! "capability" (toJson "<redacted>")
 
 structure DesiredConfig where
@@ -80,13 +98,16 @@ structure DesiredConfig where
 def natToPort? (n : Nat) : Option UInt16 :=
   if n < UInt16.size then some n.toUInt16 else none
 
-def registryEndpoint? (entry : RegistryEntry) : Option Transport.Endpoint := do
+def registryEndpoint? (entry : SessionDescriptor) : Option Transport.Endpoint := do
   (natToPort? =<< entry.port?).map Transport.Endpoint.tcp
 
-def endpointFromEntry (entry : RegistryEntry) : IO Transport.Endpoint := do
+def endpointFromEntry (entry : SessionDescriptor) : IO Transport.Endpoint := do
   match registryEndpoint? entry with
   | some endpoint => pure endpoint
-  | none => throw <| IO.userError s!"invalid Beam daemon transport data in registry for {entry.root}"
+  | none =>
+      let message :=
+        s!"invalid Beam daemon transport data for session {entry.daemonId} ({entry.rootSummary})"
+      throw (IO.userError message)
 
 def endpointSummary (endpoint : Transport.Endpoint) : String :=
   Transport.endpointDescription endpoint

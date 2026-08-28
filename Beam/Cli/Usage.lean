@@ -47,7 +47,11 @@ def usage : String :=
     "  beam [--root PATH] stats",
     "  beam [--root PATH] reset-stats",
     "  beam [--root PATH] shutdown",
+    "  beam [--root PATH] [--control-dir DIR] recover --generation ID | --force",
+    "  beam --root PATH [--control-dir DIR] request-stream <json|->",
     "",
+    "Project-session commands accept --control-dir DIR as an exact alternate control selection.",
+    "Use the same --root and --control-dir for owner, attachment, diagnostics, shutdown, and recovery.",
     "Beam never applies source edits to `.lean` files on disk; the client applies source edits.",
     "Lean edit loop: save the file, then run lean-update for a broker document version.",
     "Run lean-sync when you need the diagnostics/readiness barrier. lean-save is lean-sync plus a",
@@ -63,6 +67,7 @@ def usage : String :=
     "Wrapper commands require one live session owner. Start ensure --hold in a foreground process",
     "and keep it running across wrapper invocations; interrupt it or run shutdown when finished.",
     "Plain ensure checks and warms that owned session but never starts one implicitly.",
+    "Abnormal session state remains fenced until recover --generation ID quarantines that record.",
     "Beam does not upload or submit feedback. Use feedback-report to print a pasteable report",
     "with cheap version, stats, open-files, daemon registry, and daemon incident context.",
     "Review non-confidential reports before posting because they may contain project context and",
@@ -78,7 +83,7 @@ def usage : String :=
     "Wrapper diagnostics and progress are human-facing on stderr.",
     "Set BEAM_DEBUG_TEXT=1 to print the exact escaped text and UTF-8 bytes sent for text-carrying",
     "Lean probe requests.",
-    "For machine-readable streaming diagnostics/progress, use beam-client request-stream.",
+    "For machine-readable streaming diagnostics/progress, use beam --root PATH request-stream.",
     "For the Lean workflow contract and anti-patterns, see skills/lean-beam/SKILL.md."
   ]
 

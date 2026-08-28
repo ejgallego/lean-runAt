@@ -22,8 +22,12 @@ private def usage : String :=
   String.intercalate "\n" [
     "usage: beam-client [--port N] request <json|-> | request-stream <json|->",
     "",
+    "beam-client is raw port-oriented maintainer/debug tooling.",
+    "For wrapper sessions, use: lean-beam --root PATH [--control-dir DIR] request-stream <json|->",
+    "That supported machine interface selects the session descriptor and injects routing/authentication.",
+    "",
     "request prints the final response on stdout and formats streamed diagnostics for humans on stderr.",
-    "request-stream is the preferred machine interface: it prints one compact StreamMessage JSON line",
+    "raw request-stream prints one compact StreamMessage JSON line",
     "per event on stdout using kind + payload + optional clientRequestId; kinds are",
     "diagnostic | fileProgress | response, and the final response is last."
   ]
@@ -41,9 +45,9 @@ private def parseRequestArg (json : String) : IO Request := do
 
 private def parseRequest (args : List String) : IO (ClientMode × Request) := do
   match args with
-  | "request" :: json :: _ =>
+  | ["request", json] =>
       pure (.request, ← parseRequestArg json)
-  | "request-stream" :: json :: _ =>
+  | ["request-stream", json] =>
       pure (.requestStream, ← parseRequestArg json)
   | _ =>
       throw <| IO.userError usage

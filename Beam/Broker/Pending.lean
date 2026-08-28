@@ -341,7 +341,13 @@ def propagateCancellation
 
 end PendingRequestStore
 
+private structure ActiveRequestKey where
+  workspaceId? : Option WorkspaceId
+  clientRequestId : String
+deriving BEq, Ord
+
 structure ActiveRequest where
+  workspaceId? : Option WorkspaceId
   clientRequestId? : Option String
   token : Nat
   cancelRef : IO.Ref Bool
@@ -349,7 +355,7 @@ structure ActiveRequest where
 private structure ActiveRequestRegistryState where
   nextToken : Nat := 1
   accepting : Bool := true
-  requests : Std.TreeMap String ActiveRequest := {}
+  requests : Std.TreeMap ActiveRequestKey ActiveRequest := {}
   anonymousRequests : Std.TreeMap Nat ActiveRequest := {}
   drainedSignaled : Bool := false
 
@@ -384,6 +390,7 @@ private def resolveDrainedIfNeeded
 
 def register
     (registry : ActiveRequestRegistry)
+    (workspaceId? : Option WorkspaceId)
     (clientRequestId? : Option String) : IO (Except BrokerFailure ActiveRequest) := do
   let cancelRef ← IO.mkRef false
   registry.mutex.atomically do
@@ -395,23 +402,28 @@ def register
       }
     match clientRequestId? with
     | none =>
-        let active : ActiveRequest := { clientRequestId?, token := state.nextToken, cancelRef }
+        let active : ActiveRequest := {
+          workspaceId?, clientRequestId?, token := state.nextToken, cancelRef
+        }
         set { state with
           nextToken := state.nextToken + 1
           anonymousRequests := state.anonymousRequests.insert active.token active
         }
         pure <| .ok active
     | some clientRequestId =>
-        if state.requests.contains clientRequestId then
+        let key : ActiveRequestKey := { workspaceId?, clientRequestId }
+        if state.requests.contains key then
           pure <| .error {
             code := .invalidParams
-            message := s!"clientRequestId '{clientRequestId}' is already active"
+            message := s!"clientRequestId '{clientRequestId}' is already active in this workspace"
           }
         else
-          let active : ActiveRequest := { clientRequestId?, token := state.nextToken, cancelRef }
+          let active : ActiveRequest := {
+            workspaceId?, clientRequestId?, token := state.nextToken, cancelRef
+          }
           set { state with
             nextToken := state.nextToken + 1
-            requests := state.requests.insert clientRequestId active
+            requests := state.requests.insert key active
           }
           pure <| .ok active
 
@@ -426,10 +438,11 @@ def unregister
         let state :=
           match active.clientRequestId? with
           | some clientRequestId =>
-              match state.requests.get? clientRequestId with
+              let key : ActiveRequestKey := { workspaceId? := active.workspaceId?, clientRequestId }
+              match state.requests.get? key with
               | some current =>
                   if current.token == active.token then
-                    { state with requests := state.requests.erase clientRequestId }
+                    { state with requests := state.requests.erase key }
                   else
                     state
               | none => state
@@ -474,9 +487,11 @@ def awaitDrained (registry : ActiveRequestRegistry) : IO Unit := do
 
 def markCancelled
     (registry : ActiveRequestRegistry)
+    (workspaceId? : Option WorkspaceId)
     (clientRequestId : String) : IO (Option ActiveRequest) := do
   registry.mutex.atomically do
-    let active? := (← get).requests.get? clientRequestId
+    let key : ActiveRequestKey := { workspaceId?, clientRequestId }
+    let active? := (← get).requests.get? key
     match active? with
     | none =>
         pure none
@@ -491,7 +506,8 @@ def markCancelledActive
     let state ← get
     let current? :=
       match active.clientRequestId? with
-      | some clientRequestId => state.requests.get? clientRequestId
+      | some clientRequestId =>
+          state.requests.get? { workspaceId? := active.workspaceId?, clientRequestId }
       | none => state.anonymousRequests.get? active.token
     match current? with
     | none => pure none

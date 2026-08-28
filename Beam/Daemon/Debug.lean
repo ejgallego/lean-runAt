@@ -13,9 +13,11 @@ open Lean
 
 namespace Beam.Daemon
 
-def daemonFailureIncidentEntries (root : System.FilePath) : IO (Array IO.FS.DirEntry) := do
+def daemonFailureIncidentEntries
+    (root : System.FilePath)
+    (explicitControlDir? : Option System.FilePath := none) : IO (Array IO.FS.DirEntry) := do
   try
-    let dir ← daemonFailureIncidentDir root
+    let dir ← daemonFailureIncidentDirFor root explicitControlDir?
     unless ← dir.pathExists do
       return #[]
     let entries ← dir.readDir
@@ -24,16 +26,22 @@ def daemonFailureIncidentEntries (root : System.FilePath) : IO (Array IO.FS.DirE
   catch _ =>
     pure #[]
 
-def recentDaemonFailureIncidentPaths (root : System.FilePath) (limit : Nat := 5) :
+def recentDaemonFailureIncidentPaths
+    (root : System.FilePath)
+    (limit : Nat := 5)
+    (explicitControlDir? : Option System.FilePath := none) :
     IO (Array System.FilePath) := do
-  let entries ← daemonFailureIncidentEntries root
+  let entries ← daemonFailureIncidentEntries root explicitControlDir?
   let keep := min limit entries.size
   let recent := entries.toList.drop (entries.size - keep)
   pure <| recent.foldl (fun acc entry => acc.push entry.path) #[]
 
-private def recentDaemonFailureIncidentJson (root : System.FilePath) (limit : Nat := 5) :
+private def recentDaemonFailureIncidentJson
+    (root : System.FilePath)
+    (limit : Nat := 5)
+    (explicitControlDir? : Option System.FilePath := none) :
     IO (Array Json) := do
-  let paths ← recentDaemonFailureIncidentPaths root limit
+  let paths ← recentDaemonFailureIncidentPaths root limit explicitControlDir?
   let mut incidents := #[]
   for path in paths do
     let payload ←
@@ -59,12 +67,12 @@ private def tailLines (text : String) (count : Nat := 20) : String :=
   let keep := min count lines.length
   String.intercalate "\n" <| lines.drop (lines.length - keep)
 
-def registryEndpointSummary (entry : RegistryEntry) : String :=
+def registryEndpointSummary (entry : SessionDescriptor) : String :=
   match registryEndpoint? entry with
   | some endpoint => endpointSummary endpoint
   | none => "invalid"
 
-def registryPidStatus (entry : RegistryEntry) : IO String := do
+def registryPidStatus (entry : SessionDescriptor) : IO String := do
   let recorded : Beam.RecordedPid := { pid := entry.pid, domain? := entry.pidDomain? }
   try
     match ← recorded.observe with
@@ -76,9 +84,12 @@ def registryPidStatus (entry : RegistryEntry) : IO String := do
   catch _ =>
     pure "unavailable"
 
-def startupLogTail? (root : System.FilePath) : IO (Option (System.FilePath × String)) := do
+def startupLogTail?
+    (root : System.FilePath)
+    (explicitControlDir? : Option System.FilePath := none) :
+    IO (Option (System.FilePath × String)) := do
   try
-    let logPath ← daemonStartupLogPath root
+    let logPath ← daemonStartupLogPathFor root explicitControlDir?
     if ← logPath.pathExists then
       let logText := Beam.trimLine (← IO.FS.readFile logPath)
       if logText.isEmpty then
@@ -103,7 +114,8 @@ private def jsonNonNullField (json : Json) (field : String) : Bool :=
 
 def daemonDebugWarnings (debug : Json) : Array String := Id.run do
   let mut warnings := #[]
-  let recoveryHint := "Run `lean-beam shutdown`, then start `lean-beam ensure --hold` from the project root to refresh the owned session."
+  let pidHint :=
+    "Persisted PIDs are diagnostic only; do not reclaim or replace the session from PID status alone."
   if jsonNonNullField debug "registry" then
     match jsonStringField? debug "registryPidStatus" with
     | some "not alive" =>
@@ -113,10 +125,10 @@ def daemonDebugWarnings (debug : Json) : Array String := Id.run do
           else
             ""
         warnings := warnings.push
-          s!"Beam daemon registry pid is not alive{detail}; stats/open-files may come from a live endpoint with stale registry metadata. {recoveryHint}"
+          s!"Beam daemon registry pid is not alive{detail}; stats/open-files may come from a live endpoint with stale registry metadata. {pidHint}"
     | some "unavailable" =>
         warnings := warnings.push
-          s!"Beam could not verify the daemon registry pid; stats/open-files may reflect a daemon whose registry metadata cannot be trusted. {recoveryHint}"
+          s!"Beam could not verify the daemon registry pid; stats/open-files may reflect a daemon whose registry metadata cannot be trusted. {pidHint}"
     | _ =>
         pure ()
   warnings
@@ -125,23 +137,30 @@ private def optionLine (label : String) : Option String → Option String
   | none => none
   | some value => some s!"  {label}: {value}"
 
-def daemonRegistryContext? (root : System.FilePath) : IO (Option String) := do
+def daemonRegistryContext?
+    (root : System.FilePath)
+    (explicitControlDir? : Option System.FilePath := none) : IO (Option String) := do
   try
-    match ← readRegistry root with
+    let path ← registryPathFor root explicitControlDir?
+    match ← readRegistryAt path with
     | .absent => pure none
     | .legacy =>
-        let path ← registryPath root
         pure <| some s!"Beam daemon registry ({path}):\n  status: legacy\n  detail: legacy registry has no schemaVersion"
     | .unsupported schemaVersion =>
-        let path ← registryPath root
         let detail := (RegistryRead.unsupported schemaVersion).detail?.getD "unsupported registry"
         pure <| some s!"Beam daemon registry ({path}):\n  status: unsupported\n  detail: {detail}"
     | .malformed detail =>
-        let path ← registryPath root
         pure <| some s!"Beam daemon registry ({path}):\n  status: malformed\n  detail: {detail}"
     | .current entry =>
-        let path ← registryPath root
         let pidStatus ← registryPidStatus entry
+        let workspaceLines := entry.workspaces.toList.flatMap fun workspace =>
+          ([
+            s!"  workspace: {workspace.workspaceId}",
+            s!"    root: {workspace.root}",
+            s!"    configHash: {workspace.configHash}"
+          ] ++
+            (optionLine "  toolchain" workspace.toolchain?).toList ++
+            (optionLine "  bundleId" workspace.bundleId?).toList)
         let lines := ([
           s!"Beam daemon registry ({path}):",
           s!"  schemaVersion: {entry.schemaVersion}",
@@ -150,26 +169,26 @@ def daemonRegistryContext? (root : System.FilePath) : IO (Option String) := do
           s!"  pid: {entry.pid} ({pidStatus})",
           s!"  endpoint: {registryEndpointSummary entry}",
           s!"  startedAt: {entry.startedAt}",
-          s!"  configHash: {entry.configHash}",
-          s!"  root: {entry.root}"
+          s!"  configHash: {entry.configHash}"
         ] ++
-          (optionLine "toolchain" entry.toolchain?).toList ++
-          (optionLine "bundleId" entry.bundleId?).toList ++
+          workspaceLines ++
           (optionLine "pidDomain" entry.pidDomain?).toList)
         pure <| some <| String.intercalate "\n" lines
   catch _ =>
     pure none
 
-def daemonDebugContextJson (root : System.FilePath) : IO Json := do
-  let registryFile ← registryPath root
-  let registryRead ← readRegistry root
+def daemonDebugContextJson
+    (root : System.FilePath)
+    (explicitControlDir? : Option System.FilePath := none) : IO Json := do
+  let registryFile ← registryPathFor root explicitControlDir?
+  let registryRead ← readRegistryAt registryFile
   let registry := registryRead.entry?
   let registryPidStatus ←
     match registry with
     | some entry => some <$> registryPidStatus entry
     | none => pure none
-  let startupLogTail ← startupLogTail? root
-  let incidents ← recentDaemonFailureIncidentJson root
+  let startupLogTail ← startupLogTail? root explicitControlDir?
+  let incidents ← recentDaemonFailureIncidentJson root 5 explicitControlDir?
   pure <| Json.mkObj <|
     [
       ("registryPath", toJson registryFile.toString),

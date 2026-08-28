@@ -247,12 +247,77 @@ assert_json_field_equals "owned ensure response" "$ensure_json" ok true
 stats_json="$("$beam_script" --root "$tmp1" stats)"
 assert_json_field_equals "owned stats response" "$stats_json" ok true
 
+machine_stats_json="$("$beam_script" --root "$tmp1" request-stream \
+  '{"op":"stats","clientRequestId":"machine-stats"}')"
+assert_json_field_equals "root-aware machine stream kind" "$machine_stats_json" kind response
+assert_json_field_equals \
+  "root-aware machine stream request id" "$machine_stats_json" clientRequestId machine-stats
+assert_json_field_equals \
+  "root-aware machine stream response" "$machine_stats_json" payload.ok true
+if "$beam_script" request-stream '{"op":"stats","clientRequestId":"missing-root"}' \
+    > "$tmp1/machine-missing-root.out" 2> "$tmp1/machine-missing-root.err"; then
+  echo "expected the machine stream interface to require --root" >&2
+  exit 1
+fi
+if ! grep -Fq "requires an explicit --root PATH" "$tmp1/machine-missing-root.err"; then
+  echo "expected missing-root machine diagnostics to explain the explicit selector" >&2
+  cat "$tmp1/machine-missing-root.err" >&2
+  exit 1
+fi
+if "$beam_script" --root "$tmp1" request-stream \
+    '{"op":"stats","clientRequestId":"caller-route","workspaceId":"beam-cli-project"}' \
+    > "$tmp1/machine-route.out" 2> "$tmp1/machine-route.err"; then
+  echo "expected machine requests to reject caller-selected session routing" >&2
+  exit 1
+fi
+if ! grep -Fq "session-owned fields: workspaceId" "$tmp1/machine-route.err"; then
+  echo "expected machine routing rejection to name the forbidden field" >&2
+  cat "$tmp1/machine-route.err" >&2
+  exit 1
+fi
+
+python3 - "$registry" "$tmp1" <<'PY'
+import json
+import os
+import sys
+
+registry, root = sys.argv[1:]
+with open(registry, encoding="utf-8") as stream:
+    entry = json.load(stream)
+if entry.get("schemaVersion") != 2:
+    raise SystemExit(f"unexpected session schema: {entry.get('schemaVersion')}")
+workspaces = entry.get("workspaces")
+if not isinstance(workspaces, list) or len(workspaces) != 1:
+    raise SystemExit(f"unexpected workspace bindings: {workspaces!r}")
+workspace = workspaces[0]
+if workspace.get("root") != os.path.realpath(root):
+    raise SystemExit(f"unexpected workspace root: {workspace!r}")
+if workspace.get("workspaceId") != "beam-cli-project":
+    raise SystemExit(f"unexpected workspace id: {workspace!r}")
+PY
+
 case "$(uname -s)" in
   Darwin) registry_mode="$(stat -f '%Lp' "$registry")" ;;
   *) registry_mode="$(stat -c '%a' "$registry")" ;;
 esac
 if [ "$registry_mode" != "600" ]; then
   echo "expected the capability-bearing registry to use mode 600, got $registry_mode" >&2
+  exit 1
+fi
+
+if "$beam_script" --root "$tmp1" recover --generation "$daemon1_id" \
+    > "$tmp1/live-recover.out" 2> "$tmp1/live-recover.err"; then
+  echo "expected explicit recovery to refuse a responding generation" >&2
+  exit 1
+fi
+if ! grep -Fq "still responds" "$tmp1/live-recover.err"; then
+  echo "expected live-generation recovery refusal to explain the active endpoint" >&2
+  cat "$tmp1/live-recover.err" >&2
+  exit 1
+fi
+if [ "$(read_json_field "$registry" daemonId)" != "$daemon1_id" ] || \
+    ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; then
+  echo "live-generation recovery refusal must preserve the owner and descriptor" >&2
   exit 1
 fi
 
@@ -355,7 +420,7 @@ import os
 
 with open(os.environ["REGISTRY_TEMPLATE"], encoding="utf-8") as stream:
     entry = json.load(stream)
-entry["root"] = os.path.realpath(os.environ["STALE_ROOT"])
+entry["workspaces"][0]["root"] = os.path.realpath(os.environ["STALE_ROOT"])
 replacement = os.environ["STALE_REGISTRY"] + ".replacement"
 with open(replacement, "w", encoding="utf-8") as stream:
     json.dump(entry, stream, separators=(",", ":"))
@@ -421,7 +486,18 @@ if [ "$(cat "$stale_registry")" != "$legacy_before" ]; then
   cat "$stale_registry" >&2
   exit 1
 fi
-rm -f -- "$stale_registry"
+legacy_recover_json="$("$beam_script" --root "$tmp2" recover --force)"
+assert_json_field_equals "opaque registry recovery" "$legacy_recover_json" recovered true
+if [ -e "$stale_registry" ]; then
+  echo "expected explicit opaque recovery to quarantine the legacy descriptor" >&2
+  exit 1
+fi
+legacy_quarantine="$(json_text_field "$legacy_recover_json" quarantinedPath)"
+if [ ! -f "$legacy_quarantine" ]; then
+  echo "expected opaque recovery to preserve quarantined evidence" >&2
+  printf '%s\n' "$legacy_recover_json" >&2
+  exit 1
+fi
 
 busy_port_file="$(mktemp "$tmp2/non-beam-port-XXXXXX")"
 python3 - "$busy_port_file" <<'PY' &
@@ -517,22 +593,40 @@ busy_port_file=""
 
 start_slow_request "$tmp1" "shutdown-active" "shutdown-active"
 
-# The desired configuration includes the installed bundle paths. Pointing an ordinary command at
-# an equivalent bundle in another location creates legitimate desired-hash drift without changing
-# the identity of the running generation. The lookup must preserve both the owner and its request.
+# The desired owner configuration includes installed bundle paths. An ordinary attaching command
+# must use the descriptor's frozen configuration without rebuilding a local desired hash. A second
+# owner still computes its proposed configuration and reports the mismatch without disturbing the
+# running generation.
 drift_bundle_dir="$tmp2/config-drift-bundles"
 mkdir -p "$drift_bundle_dir"
 rsync -a "$BEAM_INSTALL_BUNDLE_DIR/" "$drift_bundle_dir/"
 drift_out="$tmp1/config-drift.out"
 drift_err="$tmp1/config-drift.err"
-if BEAM_INSTALL_BUNDLE_DIR="$drift_bundle_dir" \
+if ! BEAM_INSTALL_BUNDLE_DIR="$drift_bundle_dir" \
     "$beam_script" --root "$tmp1" ensure > "$drift_out" 2> "$drift_err"; then
-  echo "expected desired configuration drift to reject attachment" >&2
-  cat "$drift_out" >&2
+  echo "expected ordinary attachment to use the owner's frozen configuration" >&2
+  cat "$drift_err" >&2
   exit 1
 fi
-if ! grep -Fq "current owner was preserved" "$drift_err"; then
-  echo "expected configuration-drift diagnostics to preserve the current owner" >&2
+assert_json_file_field_equals \
+  "frozen-configuration attachment" "$drift_out" ok true "$drift_err"
+drift_owner_out="$tmp1/config-drift-owner.out"
+drift_owner_err="$tmp1/config-drift-owner.err"
+if BEAM_INSTALL_BUNDLE_DIR="$drift_bundle_dir" \
+    "$beam_script" --root "$tmp1" ensure --hold \
+      > "$drift_owner_out" 2> "$drift_owner_err"; then
+  echo "expected a mismatched replacement owner to be rejected" >&2
+  cat "$drift_owner_out" >&2
+  exit 1
+fi
+if ! grep -Fq "current owner was preserved" "$drift_owner_err"; then
+  echo "expected replacement-owner drift diagnostics to preserve the current owner" >&2
+  cat "$drift_owner_err" >&2
+  exit 1
+fi
+if [ -s "$drift_err" ]; then
+  echo "ordinary frozen-configuration attachment produced unexpected diagnostics" >&2
+  cat "$drift_out" >&2
   cat "$drift_err" >&2
   exit 1
 fi
@@ -601,9 +695,25 @@ if ! grep -Fq "owned Beam daemon exited with status" "$tmp1/owner-2.err"; then
   cat "$tmp1/owner-2.err" >&2
   exit 1
 fi
-if [ -e "$registry" ]; then
-  echo "expected a crashed daemon's owner to remove its exact registry generation" >&2
+if [ ! -e "$registry" ]; then
+  echo "expected an unexpected daemon crash to preserve its exact session fence" >&2
+  exit 1
+fi
+if [ "$(read_json_field "$registry" daemonId)" != "$daemon2_id" ] || \
+    [ "$(read_json_field "$registry" lifecycle)" != "draining" ]; then
+  echo "expected an unexpected daemon crash to leave its generation draining" >&2
   cat "$registry" >&2
+  exit 1
+fi
+if "$beam_script" --root "$tmp1" ensure --hold \
+    > "$tmp1/crash-replacement.out" 2> "$tmp1/crash-replacement.err"; then
+  echo "expected crash-fenced state to reject a replacement owner" >&2
+  exit 1
+fi
+crash_recovery_json="$("$beam_script" --root "$tmp1" recover --generation "$daemon2_id")"
+assert_json_field_equals "unexpected-crash recovery" "$crash_recovery_json" recovered true
+if [ -e "$registry" ]; then
+  echo "expected exact-generation crash recovery to quarantine the fence" >&2
   exit 1
 fi
 
@@ -712,17 +822,70 @@ expect_slow_request_cancelled "$tmp1" "owner-loss-active" "owner-loss-active"
 owner_loss_out="$tmp1/owner-loss.out"
 owner_loss_err="$tmp1/owner-loss.err"
 if "$beam_script" --root "$tmp1" ensure > "$owner_loss_out" 2> "$owner_loss_err"; then
-  echo "expected a command after owner loss to require a replacement owner" >&2
+  echo "expected a command after owner loss to preserve the abnormal-session fence" >&2
   cat "$owner_loss_out" >&2
   exit 1
 fi
-if ! grep -Fq "lean-beam ensure --hold" "$owner_loss_err"; then
-  echo "expected owner-loss recovery to name ensure --hold" >&2
+owner_loss_generation="$(read_json_field "$registry" daemonId)"
+if ! grep -Fq "recover --generation $owner_loss_generation" "$owner_loss_err"; then
+  echo "expected owner-loss diagnostics to name exact-generation recovery" >&2
   cat "$owner_loss_err" >&2
   exit 1
 fi
 if [ ! -e "$registry" ]; then
   echo "ordinary owner-loss lookup must not mutate the stale registry" >&2
+  exit 1
+fi
+if "$beam_script" --root "$tmp1" recover --generation wrong-generation \
+    > "$tmp1/recover-wrong.out" 2> "$tmp1/recover-wrong.err"; then
+  echo "expected recovery with the wrong generation to fail closed" >&2
+  exit 1
+fi
+if [ ! -e "$registry" ]; then
+  echo "wrong-generation recovery must preserve the session fence" >&2
+  exit 1
+fi
+recover_json="$("$beam_script" --root "$tmp1" recover --generation "$owner_loss_generation")"
+assert_json_field_equals "exact-generation recovery" "$recover_json" recovered true
+if [ -e "$registry" ]; then
+  echo "expected explicit recovery to quarantine the stale session descriptor" >&2
+  exit 1
+fi
+quarantined_registry="$(json_text_field "$recover_json" quarantinedPath)"
+if [ ! -f "$quarantined_registry" ]; then
+  echo "expected explicit recovery to preserve quarantined evidence" >&2
+  printf '%s\n' "$recover_json" >&2
+  exit 1
+fi
+
+explicit_control="$tmp2/shared-control"
+mkdir -p "$explicit_control"
+"$beam_script" --root "$tmp2" --control-dir "$explicit_control" ensure --hold \
+  > "$tmp2/explicit-control-owner.out" 2> "$tmp2/explicit-control-owner.err" &
+hold_pid="$!"
+explicit_registry="$explicit_control/beam-daemon.json"
+if ! wait_for_nonempty_file "$explicit_registry" "explicit control-directory session descriptor"; then
+  cat "$tmp2/explicit-control-owner.err" >&2
+  exit 1
+fi
+explicit_stats="$("$beam_script" --root "$tmp2" --control-dir "$explicit_control" stats)"
+assert_json_field_equals "explicit control-directory attachment" "$explicit_stats" ok true
+if "$beam_script" --root "$tmp2" stats \
+    > "$tmp2/default-control-stats.out" 2> "$tmp2/default-control-stats.err"; then
+  echo "expected the default and explicit control selections to remain distinct" >&2
+  exit 1
+fi
+if [ -e "$tmp2/.beam/beam-daemon.json" ]; then
+  echo "explicit control-directory ownership must not publish a project-local descriptor" >&2
+  exit 1
+fi
+if [ ! -f "$explicit_control/beam-daemon-startup.log" ]; then
+  echo "expected explicit control-directory startup diagnostics beside the descriptor" >&2
+  exit 1
+fi
+stop_hold_process true
+if [ -e "$explicit_registry" ]; then
+  echo "expected normal explicit-control teardown to remove its descriptor" >&2
   exit 1
 fi
 

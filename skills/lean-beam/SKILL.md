@@ -126,11 +126,12 @@ Core workflow contract:
   to `leanOptions`, or use `lake build` when the arguments are intentionally batch-only
 - after changing a lakefile or related Lake workspace configuration, run `lean-beam shutdown`
   before the next command that uses the Lean server; `lean-beam refresh` does not restart it
-- treat wrapper `stderr` as human-facing only; use stdout JSON or `beam-client request-stream`
+- treat wrapper `stderr` as human-facing only; use stdout JSON or
+  `lean-beam --root ROOT request-stream`
   for machine-readable automation
-- when `beam-client` targets a wrapper-managed daemon, keep that session's
-  `lean-beam ensure --hold` owner active for the raw request lifetime; raw broker requests attach to
-  the session but do not own it, while a separately launched standalone daemon has its own owner
+- for a machine-readable wrapper stream, keep `lean-beam ensure --hold` active and use
+  `lean-beam --root ROOT request-stream`; raw `beam-client --port` requests are maintainer tooling
+  for separately managed brokers
 - `lean-beam feedback-report` and `beam_feedback_report` return a report to the caller; Beam does not
   upload or submit it; before posting non-confidential output, review caller-authored narrative,
   request/response payloads, local paths, Beam stats, open-file data, daemon logs/incidents, and
@@ -293,7 +294,10 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 
 - infers the target project root from the current directory or `--root`
 - keeps one Beam daemon per project root and records it in `<root>/.beam/beam-daemon.json`
-  - in sandboxed or read-only project trees, set `BEAM_CONTROL_DIR` to a writable directory; `lean-beam` uses a per-root subdirectory there
+  - in sandboxed or read-only project trees, set `BEAM_CONTROL_ROOT` to a writable directory;
+    `lean-beam` uses a per-root subdirectory there
+  - for an exact stable alternate session location, pass the same `--control-dir DIR` to the owner
+    and every attaching command; Beam does not search alternate control directories
 - resolves a toolchain-keyed Lean bundle, preferring the installed beam bundle cache and
   falling back to a project-local runtime bundle under `<root>/.beam/bundles` or `BEAM_BUNDLE_DIR`
 - fully validates exact Lean toolchains listed in `validated-lean-toolchains`, locally qualifies
@@ -310,6 +314,8 @@ Use `lean-beam`, not raw JSON and not raw LSP.
   `lean-beam compatible-release-lines`, and `lean-beam doctor` to inspect the decision
 - after effective Lean startup configuration changes, requires shutting down the old session and
   starting a new `lean-beam ensure --hold` owner
+- after abnormal owner/broker exit, preserves the session fence until explicit
+  `recover --generation ID`; recovery quarantines metadata and never signals its persisted PIDs
 - `lean-beam shutdown`, `lean-beam stats`, and `lean-beam reset-stats` apply to the current project only
 - `lean-beam prune` previews old installed runtimes; restart active agents and MCP clients before
   any `--apply`, and add `--bundles` when stale installed bundle caches should also be removed
@@ -443,7 +449,7 @@ Surface rule:
 - wrapper `stderr` is the human-facing diagnostic surface
 - wrapper `stderr` may distinguish request-level failures from a completed request whose payload
   failed inside Lean; use stdout JSON for machine decisions
-- `beam-client request-stream ...` is the machine-facing streamed surface
+- `lean-beam --root ROOT request-stream ...` is the supported machine-facing wrapper stream
 - do not parse wrapper `stderr` in tooling
 - MCP clients can attach `tools/call` `_meta.progressToken` for detailed live updates; without one,
   Beam keeps fast broker-backed Lean operations, feedback collection, and workspace drops quiet and
@@ -468,7 +474,7 @@ Use this when you are deciding between commands:
 - human after a real saved edit: `lean-beam sync`
 - human checkpointing one synced module: `lean-beam save` or `lean-beam close-save`
 - human diagnosing daemon or save-state trouble: `lean-beam open-files` and `lean-beam doctor`
-- tooling that wants streamed diagnostics or progress: `beam-client request-stream ...`
+- tooling that wants streamed diagnostics or progress: `lean-beam --root ROOT request-stream ...`
 
 ## References
 

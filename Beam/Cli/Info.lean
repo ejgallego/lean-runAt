@@ -145,8 +145,10 @@ private def printRocqDoctorInfo (home root : System.FilePath) : IO Unit := do
   IO.println s!"daemon binary: {paths.daemon}"
   IO.println s!"client binary: {paths.client}"
 
-def daemonFailureIncidentDoctorLines (root : System.FilePath) : IO (List String) := do
-  let incidents ← Beam.Daemon.recentDaemonFailureIncidentPaths root
+def daemonFailureIncidentDoctorLines
+    (root : System.FilePath)
+    (explicitControlDir? : Option System.FilePath := none) : IO (List String) := do
+  let incidents ← Beam.Daemon.recentDaemonFailureIncidentPaths root 5 explicitControlDir?
   if incidents.isEmpty then
     pure ["daemon incidents: none"]
   else
@@ -154,8 +156,10 @@ def daemonFailureIncidentDoctorLines (root : System.FilePath) : IO (List String)
       s!"daemon incidents: {incidents.size} recent" ::
         (incidents.toList.map fun path => s!"daemon incident: {path}")
 
-private def printDaemonFailureIncidentDoctorInfo (root : System.FilePath) : IO Unit := do
-  for line in ← daemonFailureIncidentDoctorLines root do
+private def printDaemonFailureIncidentDoctorInfo
+    (root : System.FilePath)
+    (explicitControlDir? : Option System.FilePath := none) : IO Unit := do
+  for line in ← daemonFailureIncidentDoctorLines root explicitControlDir? do
     IO.println line
 
 def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO Unit := do
@@ -165,9 +169,9 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
   match backend with
   | .lean => printLeanDoctorInfo home root
   | .rocq => printRocqDoctorInfo home root
-  let registry ← Beam.Daemon.registryPath root
+  let registry ← Beam.Daemon.registryPathFor root opts.explicitControlDir?
   IO.println s!"registry: {registry}"
-  match ← observeProjectRegistry root with
+  match ← observeProjectRegistry root opts.explicitControlDir? with
   | .live entry =>
       IO.println "daemon status: live"
       IO.println s!"daemon pid: {entry.pid}"
@@ -181,7 +185,6 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
   | .draining entry =>
       IO.println "daemon status: draining"
       IO.println s!"daemon generation: {entry.daemonId}"
-  | .staleConfirmed _ => IO.println "daemon status: stale"
   | .absent => IO.println "daemon status: absent"
   | .legacy => IO.println "daemon status: legacy registry"
   | .unsupported schemaVersion =>
@@ -193,7 +196,7 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
   | .unusable _ reason =>
       IO.println "daemon status: unsafe"
       IO.println s!"daemon safety error: {reason.message}"
-  printDaemonFailureIncidentDoctorInfo root
+  printDaemonFailureIncidentDoctorInfo root opts.explicitControlDir?
 
 def printValidatedToolchains (home : System.FilePath) (backendName : String) : IO Unit := do
   match backendName with

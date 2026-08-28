@@ -43,9 +43,9 @@ private def checkDaemonDebugWarnings : IO Unit := do
   let warnings := Beam.Daemon.daemonDebugWarnings debug
   require "dead registry pid should produce a feedback warning"
     (warnings.any (fun warning => warning.contains "registry pid is not alive"))
-  require "dead registry pid warning should include recovery hint"
+  require "dead registry pid warning should reject PID-based reclamation"
     (warnings.any (fun warning =>
-      warning.contains "lean-beam shutdown" && warning.contains "lean-beam ensure --hold"))
+      warning.contains "diagnostic only" && warning.contains "do not reclaim"))
 
 private def expectIoErrorMessage (label : String) (act : IO α) : IO String := do
   let result ←
@@ -294,6 +294,17 @@ private def checkProjectDaemonWorkspaceRouting : IO Unit := do
   } : Beam.Broker.Request)
   require "CLI routing should preserve an explicitly selected workspace"
     (explicitReq.workspaceId? == some "maintenance-fixture")
+  let selectedClient : Beam.Cli.ProjectDaemonClient := {
+    endpoint := .tcp 42424
+    capability := "test-capability"
+    workspaceId := "selected-workspace"
+  }
+  let selectedCancel := Beam.Cli.inSelectedDaemonWorkspace selectedClient {
+    op := .cancel
+    cancelRequestId? := some "request"
+  }
+  require "selected descriptor workspace should scope cancellation"
+    (selectedCancel.workspaceId? == some "selected-workspace")
 
 private def checkClientResponsePresentation : IO Unit := do
   let semantic := Beam.Broker.Response.success Json.null
@@ -425,6 +436,22 @@ private def checkCliRootParsing : IO Unit := do
     "missing explicit CLI root should use the workspace error boundary"
     "workspace root does not resolve"
     (Beam.Cli.parseCliOptions {} ["--root", missingRoot.toString, "ensure", "lean"])
+  let root := System.FilePath.mk s!"/tmp/beam-cli-root-{← IO.monoNanosNow}"
+  let control := root / "shared-control"
+  try
+    IO.FS.createDirAll control
+    let opts ← Beam.Cli.parseCliOptions {} [
+      "--root", root.toString,
+      "--control-dir", control.toString,
+      "stats"
+    ]
+    require "explicit CLI root should be canonicalized" (opts.explicitRoot? == some root)
+    require "explicit control directory should remain an exact selection"
+      (opts.explicitControlDir? == some control)
+    require "global selectors should not leak into command arguments" (opts.args == ["stats"])
+  finally
+    if ← root.pathExists then
+      IO.FS.removeDirAll root
 
 private def checkLeanOperationRequests : IO Unit := do
   let root := System.FilePath.mk "/repo"
@@ -587,7 +614,7 @@ private def checkDaemonFailureContext : IO Unit := do
     if let some parent := registryPath.parent then
       IO.FS.createDirAll parent
     let pidDomain? ← Beam.currentPidDomain?
-    let entry : Beam.Daemon.RegistryEntry := {
+    let entry : Beam.Daemon.SessionDescriptor := {
       schemaVersion := Beam.Daemon.registrySchemaVersion
       lifecycle := .live
       daemonId := "daemon-test"
@@ -597,10 +624,14 @@ private def checkDaemonFailureContext : IO Unit := do
       ownerPid := 999999999
       ownerPidDomain? := pidDomain?
       port? := some 42424
-      root := root.toString
+      workspaces := #[{
+        workspaceId := Beam.Cli.projectDaemonWorkspaceId
+        root := root.toString
+        configHash := "config-test"
+        toolchain? := some "leanprover/lean4:test"
+        bundleId? := some "bundle-test"
+      }]
       configHash := "config-test"
-      toolchain? := some "leanprover/lean4:test"
-      bundleId? := some "bundle-test"
       startedAt := "2026-07-02T00:00:00Z"
     }
     IO.FS.writeFile registryPath ((toJson entry).pretty ++ "\n")
@@ -630,7 +661,7 @@ private def checkDaemonFailureContext : IO Unit := do
     requireJsonString "daemon failure incident should include registry path"
       "registryPath" registryPath.toString incidentJson
     let incidentRegistryJson ← IO.ofExcept <| incidentJson.getObjVal? "registry"
-    let incidentRegistry ← IO.ofExcept <| fromJson? (α := Beam.Daemon.RegistryEntry) incidentRegistryJson
+    let incidentRegistry ← IO.ofExcept <| fromJson? (α := Beam.Daemon.SessionDescriptor) incidentRegistryJson
     require "daemon failure incident should include daemon id"
       (incidentRegistry.daemonId == "daemon-test")
     require "daemon failure incident must redact the per-generation capability"
@@ -730,7 +761,7 @@ private def writeTestRegistryEntry
   let registryPath ← Beam.Daemon.registryPath root
   if let some parent := registryPath.parent then
     IO.FS.createDirAll parent
-  let entry : Beam.Daemon.RegistryEntry := {
+  let entry : Beam.Daemon.SessionDescriptor := {
     schemaVersion := Beam.Daemon.registrySchemaVersion
     lifecycle := .live
     daemonId := "daemon-test"
@@ -738,10 +769,14 @@ private def writeTestRegistryEntry
     pid := 999999999
     ownerPid := 999999999
     port?
-    root := root.toString
+    workspaces := #[{
+      workspaceId := Beam.Cli.projectDaemonWorkspaceId
+      root := root.toString
+      configHash := "config-test"
+      toolchain? := some "leanprover/lean4:test"
+      bundleId? := some "bundle-test"
+    }]
     configHash := "config-test"
-    toolchain? := some "leanprover/lean4:test"
-    bundleId? := some "bundle-test"
     startedAt := "2026-07-05T00:00:00Z"
   }
   IO.FS.writeFile registryPath ((toJson entry).pretty ++ "\n")
@@ -781,7 +816,8 @@ private def checkTypedRegistryReads : IO Unit := do
         require "malformed registry should preserve parse context" (detail.contains "invalid registry JSON")
     | state => throw <| IO.userError s!"malformed registry was classified as {state.status}"
 
-    IO.FS.writeFile registryPath "{\"schemaVersion\":1}\n"
+    IO.FS.writeFile registryPath
+      ("{\"schemaVersion\":" ++ toString Beam.Daemon.registrySchemaVersion ++ "}\n")
     match ← Beam.Daemon.readRegistry root with
     | .malformed detail =>
         require "incomplete current registry should preserve schema context"
@@ -794,6 +830,18 @@ private def checkTypedRegistryReads : IO Unit := do
         require "current registry should preserve its generation capability"
           (entry.capability == "test-capability")
     | state => throw <| IO.userError s!"current registry was classified as {state.status}"
+
+    let validText ← IO.FS.readFile registryPath
+    let validJson ← IO.ofExcept <| Json.parse validText
+    IO.FS.writeFile registryPath <|
+      (validJson.setObjVal! "workspaces" (toJson (#[] : Array Beam.Daemon.WorkspaceBinding))).compress
+    match ← Beam.Daemon.readRegistry root with
+    | .malformed detail =>
+        require "empty workspace descriptors should fail the typed boundary"
+          (detail.contains "at least one workspace")
+    | state => throw <| IO.userError s!"empty workspace descriptor was classified as {state.status}"
+
+    IO.FS.writeFile registryPath validText
     let debug ← Beam.Daemon.daemonDebugContextJson root
     let debugRegistry ← IO.ofExcept <| debug.getObjVal? "registry"
     requireJsonString "daemon debug context must redact its capability"

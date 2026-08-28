@@ -1261,8 +1261,11 @@ private def cancelRegisteredRequest
   | some active =>
     let sessions ← server.withState do
       let state ← get
-      pure <| state.workspaces.toList.flatMap fun (_, workspace) =>
-        [workspace.lean.session?, workspace.rocq.session?]
+      pure <| state.workspaces.toList.flatMap fun (workspaceId, workspace) =>
+        if active.workspaceId?.all (fun selected => selected == workspaceId) then
+          [workspace.lean.session?, workspace.rocq.session?]
+        else
+          []
     for session? in sessions do
       if let some session := session? then
         discard <| PendingRequestStore.cancelMatching session.pending session.stdin active.cancelRef
@@ -1271,9 +1274,10 @@ private def cancelRegisteredRequest
 
 private def cancelActiveRequest
     (server : ServerRuntime)
+    (workspaceId? : Option WorkspaceId)
     (clientRequestId : String) : IO Bool :=
   cancelRegisteredRequest server <|
-    ActiveRequestRegistry.markCancelled server.activeRequests clientRequestId
+    ActiveRequestRegistry.markCancelled server.activeRequests workspaceId? clientRequestId
 
 /--
 Cancel the exact active admission represented by `handle`.
@@ -2414,7 +2418,7 @@ private def handleRequestIO
         match req.cancelRequestIdArg with
         | .ok targetClientRequestId => pure targetClientRequestId
         | .error failure => return failure.toResponse
-      let cancelled ← cancelActiveRequest server targetClientRequestId
+      let cancelled ← cancelActiveRequest server req.resolvedWorkspaceId? targetClientRequestId
       pure <| Response.success (Json.mkObj [("cancelled", toJson cancelled)])
   | op =>
       match ← validateRequestWorkspace server req with
@@ -2480,7 +2484,7 @@ private def ServerRuntime.withRequestAdmission
       let resp := errorResponseFor .invalidParams "invalid Beam daemon capability"
       recordDispatchMetrics server req resp startedAt
       return resp
-    if req.op == .initWorkspace || req.op == .dropWorkspace then
+    if req.op == .initWorkspace || req.op == .listWorkspaces || req.op == .dropWorkspace then
       let resp := errorResponseFor .invalidParams
         s!"broker op '{req.op.key}' is unavailable in wrapper-owned daemon mode"
       recordDispatchMetrics server req resp startedAt
@@ -2496,7 +2500,8 @@ private def ServerRuntime.withRequestAdmission
   try
     let active? ←
       if req.op.tracksActiveRequest then
-        match ← ActiveRequestRegistry.register server.activeRequests req.clientRequestId? with
+        match ← ActiveRequestRegistry.register
+            server.activeRequests req.resolvedWorkspaceId? req.clientRequestId? with
         | .ok active => pure (some active)
         | .error failure =>
             let resp := BrokerFailure.toResponse failure

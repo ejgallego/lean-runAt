@@ -93,28 +93,37 @@ private def versionIdentityJson (home : System.FilePath) : IO Json := do
 
 private def collectDaemonPayload
     (root : System.FilePath)
+    (explicitControlDir? : Option System.FilePath)
     (warnings : Array String) : IO (Json × Json × Array String) := do
-  match ← observeProjectRegistry root with
+  match ← observeProjectRegistry root explicitControlDir? with
   | .live entry =>
       match Beam.Daemon.registryEndpoint? entry with
       | none =>
           pure (Json.null, Json.null, warnings.push "Beam daemon registry did not contain a valid endpoint")
       | some endpoint =>
-          let client : ProjectDaemonClient := { endpoint, capability := entry.capability }
+          let some workspace ← Beam.Cli.sessionWorkspaceForRoot? entry root
+            | return (Json.null, Json.null,
+                warnings.push "the Beam session does not contain the selected project root")
+          let client : ProjectDaemonClient := {
+            endpoint
+            capability := entry.capability
+            workspaceId := workspace.workspaceId
+            controlDir? := explicitControlDir?
+          }
           let statsResp ← sendRequest endpoint <| client.authorize {
             op := .stats
-            workspaceId? := some Beam.Cli.projectDaemonWorkspaceId
+            workspaceId? := some client.workspaceId
             root? := some root.toString
           }
           let (stats, warnings) := Beam.Feedback.responsePayloadOrWarning "stats" statsResp warnings
           let openResp ← sendRequest endpoint <| client.authorize {
             op := .openDocs
-            workspaceId? := some Beam.Cli.projectDaemonWorkspaceId
+            workspaceId? := some client.workspaceId
             root? := some root.toString
           }
           let (openDocs, warnings) := Beam.Feedback.responsePayloadOrWarning "open-files" openResp warnings
           pure (stats, openDocs, warnings)
-  | .absent | .staleConfirmed _ =>
+  | .absent =>
       pure (Json.null, Json.null, warnings.push "no live Beam daemon was available for stats/open-files")
   | .draining _ =>
       pure (Json.null, Json.null, warnings.push "the Beam daemon is draining")
@@ -130,6 +139,7 @@ private def collectDaemonPayload
 private def collectNonConfidential
     (home : System.FilePath)
     (root? : Option System.FilePath)
+    (explicitControlDir? : Option System.FilePath)
     (warnings : Array String) : IO Beam.Feedback.Collection := do
   let generatedAt ← Beam.utcTimestamp
   let identity ← versionIdentityJson home
@@ -139,9 +149,9 @@ private def collectNonConfidential
         pure (Json.null, Json.null, Json.null,
           warnings.push "could not infer project root; daemon debug context was not collected")
     | some root => do
-        let daemon ← Beam.Daemon.daemonDebugContextJson root
+        let daemon ← Beam.Daemon.daemonDebugContextJson root explicitControlDir?
         let warnings := warnings ++ Beam.Daemon.daemonDebugWarnings daemon
-        let (stats, openDocs, warnings) ← collectDaemonPayload root warnings
+        let (stats, openDocs, warnings) ← collectDaemonPayload root explicitControlDir? warnings
         pure (stats, openDocs, daemon, warnings)
   pure {
     generatedAt
@@ -208,12 +218,13 @@ def run (home : System.FilePath) (cliOpts : CliOptions) (args : List String) : I
     else
       pure (none, #[])
   let collection ←
-    if input.confidential then collectConfidential else collectNonConfidential home root? warnings
+    if input.confidential then collectConfidential
+    else collectNonConfidential home root? cliOpts.explicitControlDir? warnings
   let allowedRoots ←
     if Beam.Feedback.Internal.needsEvidenceRoots input then
       match root? with
       | some root => do
-          let control ← Beam.Daemon.controlDir root
+          let control ← Beam.Daemon.controlDirFor root cliOpts.explicitControlDir?
           pure #[root, control]
       | none => pure #[]
     else

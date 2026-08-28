@@ -250,8 +250,9 @@ inductive WorkspaceScope where
 
 /-- Describe whether a broker operation is process-wide or resolves one workspace. -/
 def Op.workspaceScope : Op → WorkspaceScope
-  | .cancel | .listWorkspaces | .resetStats | .shutdown => .none
+  | .listWorkspaces | .resetStats | .shutdown => .none
   | .openDocs | .stats => .optional
+  | .cancel
   | .ensure | .updateFile | .syncFile | .refreshFile | .close | .runAt | .hover
   | .signatureHelp | .definition | .references | .documentSymbols | .workspaceSymbols
   | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release
@@ -436,6 +437,71 @@ instance : FromJson Request where
     }
     request.validateFields
     pure request
+
+/--
+A semantic request accepted by the supported project-session client.
+
+Session routing and authority are supplied by the selected session descriptor, not by caller JSON.
+The generic `Request` remains the internal broker protocol used by maintenance tooling.
+-/
+structure ProjectRequest where
+  private request : Request
+  private requestId : String
+
+private def projectRequestForbiddenFields : Array String :=
+  #["workspaceId", "workspaceMode", "daemonCapability", "root", "leanCmd", "leanPlugin", "rocqCmd"]
+
+private def ProjectRequest.supportedOp : Op → Bool
+  | .initWorkspace | .listWorkspaces | .dropWorkspace => false
+  | _ => true
+
+def ProjectRequest.ofRequest (request : Request) : Except String ProjectRequest := do
+  unless ProjectRequest.supportedOp request.op do
+    throw s!"broker op '{request.op.key}' is not available through a project session"
+  if request.workspaceId?.isSome || request.workspaceMode?.isSome ||
+      request.daemonCapability?.isSome || request.root?.isSome || request.leanCmd?.isSome ||
+      request.leanPlugin?.isSome || request.rocqCmd?.isSome then
+    throw "project requests cannot select session routing, authority, or executable configuration"
+  let some clientRequestId := request.clientRequestId?
+    | throw "project requests require a non-empty clientRequestId"
+  if clientRequestId.isEmpty then
+    throw "project requests require a non-empty clientRequestId"
+  request.validateFields
+  pure { request, requestId := clientRequestId }
+
+instance : FromJson ProjectRequest where
+  fromJson? json := do
+    match json with
+    | .obj fields =>
+        let forbidden := projectRequestForbiddenFields.filter fields.contains
+        unless forbidden.isEmpty do
+          throw s!"project request contains session-owned fields: {String.intercalate ", " forbidden.toList}"
+    | _ => pure ()
+    ProjectRequest.ofRequest (← fromJson? json)
+
+def ProjectRequest.op (request : ProjectRequest) : Op :=
+  request.request.op
+
+def ProjectRequest.clientRequestId (request : ProjectRequest) : String :=
+  request.requestId
+
+/-- Attach one semantic request to a selected, authenticated workspace session. -/
+def ProjectRequest.attach
+    (request : ProjectRequest)
+    (workspaceId : WorkspaceId)
+    (root capability : String) : Request :=
+  let request := request.request
+  let request := { request with daemonCapability? := some capability }
+  match request.op.workspaceScope with
+  | .none => request
+  | .optional | .required =>
+    let request := { request with workspaceId? := some workspaceId }
+    if request.op == .cancel then
+      request
+    else {
+      request with
+      root? := some root
+    }
 
 structure Error where
   code : String

@@ -224,10 +224,52 @@ lean-beam run-at "Foo.lean" "$version" 10 2 "exact trivial"
 inherited ownership pipe defines the session lifetime: interrupt the holder, or run
 `lean-beam shutdown`, to close the daemon and its backend processes. Plain `lean-beam ensure` and
 all other wrapper commands attach to an existing owner and fail with a recovery command when none
-is live. If the desired bundle or project configuration changes, attaching commands preserve the
-old owner and ask you to stop it explicitly. During shutdown the registry reports `draining` and a
+is live. Attaching commands use the owner's frozen configuration and do not rebuild a competing
+desired configuration. A second owner does resolve its proposed configuration and reports any
+mismatch while preserving the old owner. During shutdown the registry reports `draining` and a
 replacement owner is refused until the old process tree has exited. MCP clients do not need a
 separate holder; the stdio MCP process owns its runtime session.
+
+The default session descriptor and lock live in `<root>/.beam`. This is intentional for
+project-scoped agent sandboxes: clients that can access the same workspace can discover the same
+session. Use an exact alternate directory when the project is read-only or several explicitly
+coordinated clients need another stable control plane:
+
+```bash
+lean-beam --root /workspace/a --control-dir /workspace/control ensure --hold
+lean-beam --root /workspace/a --control-dir /workspace/control stats
+```
+
+Every participant must supply the same `--root` and `--control-dir`; Beam does not search alternate
+control directories. `BEAM_CONTROL_ROOT=/writable/base` is the sandbox convenience form: Beam
+derives a separate hashed directory for each canonical root below that base. An explicit control
+directory is also the intended future location for a statically configured multi-workspace CLI
+session. The current public owner command still publishes one frozen workspace, and wrapper mode
+does not allow runtime `init_workspace`, `list_workspaces`, or `drop_workspace` requests.
+Use a stable external control directory when ownership must remain fenced while the project path is
+deleted and recreated; deleting a project-local `.beam` necessarily deletes its default fence.
+
+An abnormal owner or broker exit leaves the descriptor as a safety fence. After independently
+establishing that the recorded generation is no longer authoritative, quarantine that exact record
+without signalling its recorded PIDs:
+
+```bash
+lean-beam --root /workspace/a recover --generation GENERATION_ID
+```
+
+Use the same `--control-dir` selection when applicable. `recover --force` is reserved for opaque
+legacy, unsupported, or malformed descriptors. Recovery preserves the old file under a
+`beam-daemon.recovered-*.json` name for diagnosis.
+
+Machine clients should avoid root auto-detection and raw port/session fields:
+
+```bash
+lean-beam --root /workspace/a request-stream \
+  '{"op":"stats","clientRequestId":"agent-stats-1"}'
+```
+
+The wrapper selects the frozen workspace and injects root, workspace identity, generation
+capability, and endpoint. `beam-client --port ...` is lower-level maintainer/debug tooling.
 
 The `python3` line extracts `result.version` for shell examples. You can also copy that version
 number from the printed `lean-beam update` JSON.

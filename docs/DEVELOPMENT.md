@@ -400,65 +400,68 @@ broker-derived decision.
 
 This wrapper path is easy to break accidentally, so keep the mental model simple.
 
-A daemon generation is one concrete daemon start identified by the `daemonId` in
-`beam-daemon.json`. Exactly one foreground `lean-beam ensure --hold` process owns that generation.
-It starts the daemon in a dedicated process session, passes the daemon identity, effective
-configuration hash, and a random per-generation capability through piped stdin, and retains the
-pipe's write end. The mode-`0600`, schema-versioned registry publishes `live` or `draining` state.
-Every wrapper request, including cancellation, generation probes, and shutdown, must present the
-capability. Endpoint attachment also requires the canonical root and exact generation identity to
-match. The daemon watches the pipe's read end; EOF atomically closes broker admission, marks admitted
-requests for cancellation, shuts down backend sessions, and stops the listener. There is no wrapper
-heartbeat, lease file, revocation tombstone, or time-based retirement fence.
+A CLI session descriptor is the schema-versioned `beam-daemon.json` selected by the control
+directory. It contains one generation identity, capability, lifecycle, endpoint, and a nonempty
+array of frozen workspace bindings. The public owner command currently creates one binding; the
+shape permits a future explicitly configured static multi-workspace session without changing
+request routing. Exactly one foreground `lean-beam ensure --hold` process owns the generation. It
+starts the daemon in a dedicated process session, passes the identity, effective configuration
+hash, and random capability through piped stdin, and retains the pipe's write end. The mode-`0600`
+descriptor publishes `live` or `draining`. Every wrapper request, including cancellation,
+generation probes, and shutdown, presents the capability. The daemon watches the pipe's read end;
+EOF closes admission, marks admitted requests for cancellation, shuts down backend sessions, and
+stops the listener. There is no heartbeat, lease, or time-based retirement fence.
 
-Ordinary wrapper commands never start a daemon. Under the per-project control lock they require a
-registry whose root and effective configuration match, whose owner is not known dead in the current
-PID domain, and whose endpoint answers for the CLI's private workspace, canonical project root, and
-exact daemon generation identity. Identity probes have a bounded response deadline. An endpoint
-that accepts a connection but stays silent or returns malformed data is unrecognized, so validation
-fails closed. A configuration mismatch reports the old and desired hashes without shutting down or
-unpublishing the live owner. Ordinary lookup is observation-only: absent, legacy, malformed,
-unsupported, stale, draining, or otherwise unsafe registry states are never rewritten by an
-attaching command.
-Endpoint/root validation is authoritative across PID namespaces because numeric PID observations
-from another domain are not safe process identity. Persisted PIDs are conservative liveness
-observations, never signal capabilities. Only the foreground owner may force termination, using its
-retained child handle and dedicated process group.
+Ordinary wrapper commands never start a daemon or recompute its desired toolchain/bundle
+configuration. Under the session control lock they select the canonical root's frozen workspace
+binding and require an endpoint that answers for that workspace, root, and exact generation.
+Identity probes have a bounded response deadline. A silent or malformed endpoint fails closed.
+Ordinary lookup is observation-only: absent, legacy, malformed, unsupported, draining, unreachable,
+or otherwise ambiguous descriptor states are never rewritten by an attaching command. Persisted
+PIDs are diagnostic observations, never signal capabilities or automatic stale-reclamation proof.
+Only the foreground owner may force termination, through its retained child handle and process
+group.
 
-The owner also watches its exact registry generation and daemon child. `lean-beam shutdown` changes
-that exact registry from `live` to `draining` under the project lock before sending the authenticated
-shutdown request. Every holder exit path likewise publishes `draining`, closes its pipe, waits for
-graceful broker/backend teardown, and, after the deadline, terminates the complete owned process
-group. Only after the child has been reaped does it remove the exact draining generation. Thus a
-paused or wedged old process tree remains fenced and a replacement owner cannot create split-brain
-backend sessions. An unexpected nonzero daemon exit is reported by the holder. Killing the holder
-closes the pipe by process lifetime. A paused holder keeps the pipe open, so the session remains
-valid without time-based expiry. If the project root disappears, cleanup uses the already resolved
-control path without recreating the deleted project.
+The owner watches its exact descriptor generation and daemon child. `lean-beam shutdown` changes
+that generation from `live` to `draining` under the control lock before sending authenticated
+shutdown. Normal holder exit likewise publishes `draining`, closes its pipe, waits for graceful
+teardown, and, after the deadline, terminates the owned process group. It removes only the exact
+generation after owned cleanup completes. An unexpected daemon or owner exit deliberately leaves
+the descriptor fenced: startup does not infer complete process-tree exit from persisted PIDs. Once
+the operator establishes that the old session is no longer authoritative,
+`lean-beam --root ROOT recover --generation ID` quarantines that exact descriptor without signalling
+any recorded process. Opaque legacy, unsupported, or malformed state requires `recover --force`.
+A paused holder keeps its pipe open and remains valid without expiry. If the project root
+disappears, cleanup uses the already resolved control path without recreating the project.
 
-This model prevents PID-isolated commands from making contradictory ownership decisions: later
-commands may attach to a validated endpoint, but none can silently become a replacement owner.
-Starting a new session is always an explicit `lean-beam ensure --hold` action. Wrapper commands read
-the private registry and inject its generation capability. A raw `beam-client` request does not gain
-authority merely by finding the loopback port; it must explicitly carry that private capability.
-The wrapper-owned daemon also rejects dynamic `initWorkspace` and `dropWorkspace`, because its one
-bootstrap project is fixed by the owner. A separately launched development daemon has its own
-explicit process owner and is not the wrapper security boundary.
+Human commands may infer the nearest project root. The supported machine stream requires explicit
+`--root` and a nonempty `clientRequestId`; its semantic JSON cannot supply `root`, `workspaceId`,
+capability, or dynamic workspace operations. The wrapper selects the descriptor binding and injects
+session metadata. Raw port-oriented `beam-client` requests are maintainer/debug tooling. A
+wrapper-owned daemon rejects `initWorkspace`, `listWorkspaces`, and `dropWorkspace`; a separately
+launched broker retains the generic multi-workspace surface and has its own explicit owner.
+
+The default control directory is `<root>/.beam`, discoverable to project-scoped agents.
+`--control-dir DIR` is an exact, stateless selection that every participant must repeat.
+`BEAM_CONTROL_ROOT` hashes each canonical root below a writable base for sandboxed/read-only roots.
+Do not hide policy inside automatic fallback between these locations. A future multi-root CLI owner
+should require a stable explicit control directory and freeze all bindings before publication.
 
 Keep these invariants covered:
 
 - only `ensure --hold` may create and publish a wrapper daemon generation
 - a second owner is rejected while the current endpoint/root/generation identity is live
 - ordinary wrapper commands are read-only with respect to registry and process lifecycle, including
-  on configuration mismatch or stale/unsafe state
-- holder teardown retains a generation-specific draining fence until the complete process tree is
-  reaped and cannot remove a replacement
+  in ambiguous or unsafe state; they attach to frozen owner configuration rather than recomputing it
+- normal holder teardown retains a generation-specific draining fence until owned cleanup completes
+  and cannot remove a replacement; abnormal exit leaves the fence for explicit recovery
 - owner EOF, explicit shutdown, and project-root disappearance all close admission before backend
   teardown and complete with bounded child cleanup
-- PID-domain checks gate persisted-PID observations; persisted numeric PIDs are never signalled
+- persisted numeric PIDs are never signalled or used for automatic stale reclamation
 - every wrapper request is bound to its random generation capability, and transport frame, initial
   request, connection, and task counts are bounded
-- request IDs and per-admission tokens retain exact disconnect and explicit cancellation semantics
+- request IDs are unique and cancellation is exact within a workspace; per-admission tokens retain
+  exact disconnect and close semantics
 - the regressions for this path are
   [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh) and
   [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)

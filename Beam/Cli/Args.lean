@@ -17,6 +17,7 @@ open Beam.Broker
 
 structure CliOptions where
   explicitRoot? : Option System.FilePath := none
+  explicitControlDir? : Option System.FilePath := none
   requestedPort? : Option UInt16 := none
   args : List String := []
 
@@ -208,11 +209,23 @@ private def resolveExplicitRootArg (root : String) : IO System.FilePath := do
   catch err =>
     throw <| IO.userError s!"workspace root does not resolve: {err.toString}"
 
+private def resolveControlDirArg (dir : String) : IO System.FilePath := do
+  let path := System.FilePath.mk dir
+  if ← path.pathExists then
+    Beam.resolveExistingPath path
+  else
+    let cwd ← IO.currentDir
+    let absolute := if path.isAbsolute then path else cwd / path
+    pure absolute.normalize
+
 partial def parseCliOptions (opts : CliOptions) : List String → IO CliOptions
   | [] => pure opts
   | "--root" :: root :: rest => do
       let root ← resolveExplicitRootArg root
       parseCliOptions { opts with explicitRoot? := some root } rest
+  | "--control-dir" :: dir :: rest => do
+      let dir ← resolveControlDirArg dir
+      parseCliOptions { opts with explicitControlDir? := some dir } rest
   | "--port" :: port :: rest => do
       let port ← IO.ofExcept <| parsePortText "port" port
       parseCliOptions { opts with requestedPort? := some port } rest

@@ -43,9 +43,12 @@ usage:
   lean-beam [--root PATH] stats
   lean-beam [--root PATH] reset-stats
   lean-beam [--root PATH] shutdown
+  lean-beam [--root PATH] [--control-dir DIR] recover --generation ID | --force
+  lean-beam --root PATH [--control-dir DIR] request-stream <json|->
   lean-beam [--root PATH] cancel <request-id>
 
 notes:
+  - pass --control-dir DIR before the command to select one exact alternate session control directory; repeat it for every participant
   - lean-beam keeps the Lean wrapper surface primary; optional Rocq goal probes are documented in docs/ROCQ.md
   - start a Rocq session with `lean-beam ensure rocq --hold`; plain `ensure rocq` only checks and warms that owned session
   - other common Rocq entry points are `lean-beam doctor rocq`, `lean-beam rocq-goals-after`, and `lean-beam rocq-goals-prev`
@@ -55,6 +58,7 @@ notes:
   - for handle-based commands, use `--handle-file <path>` when you do not want to inline handle json
   - wrapper commands require one live session owner; start `ensure --hold` in a foreground process and keep it running
   - plain `ensure` checks and warms that owned session but never starts one implicitly
+  - abnormal session state remains fenced; after verifying the old generation is gone, use `recover --generation ID`
   - set `BEAM_DEBUG_TEXT=1` to print the exact escaped text and UTF-8 bytes sent for text-carrying Lean probes
   - use `lean-beam --version` for bug reports and installed runtime identity checks
   - validated-toolchains lists exact CI-validated versions; compatible-release-lines lists canonical RC/patch families qualified locally
@@ -130,7 +134,7 @@ prefix=()
 cmd=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --root|--port)
+    --root|--control-dir|--port)
       [ "$#" -ge 2 ] || break
       prefix+=("$1" "$2")
       shift 2

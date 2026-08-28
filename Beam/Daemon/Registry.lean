@@ -18,9 +18,9 @@ inductive RegistryRead where
   | legacy
   | unsupported (schemaVersion : Nat)
   | malformed (detail : String)
-  | current (entry : RegistryEntry)
+  | current (entry : SessionDescriptor)
 
-def RegistryRead.entry? : RegistryRead → Option RegistryEntry
+def RegistryRead.entry? : RegistryRead → Option SessionDescriptor
   | .current entry => some entry
   | .absent | .legacy | .unsupported _ | .malformed _ => none
 
@@ -37,8 +37,39 @@ def RegistryRead.detail? : RegistryRead → Option String
   | .malformed detail => some detail
   | .absent | .current _ => none
 
-def readRegistry (root : System.FilePath) : IO RegistryRead := do
-  let path ← registryPath root
+private def validateWorkspaceBindings (workspaces : Array WorkspaceBinding) : Except String Unit := do
+  if workspaces.isEmpty then
+    throw "session descriptor must contain at least one workspace"
+  let mut ids : Std.TreeSet String compare := {}
+  let mut roots : Std.TreeSet String compare := {}
+  for workspace in workspaces do
+    if workspace.workspaceId.isEmpty then
+      throw "session workspace id must not be empty"
+    if workspace.root.isEmpty then
+      throw s!"session workspace '{workspace.workspaceId}' has an empty root"
+    let rootPath := System.FilePath.mk workspace.root
+    unless rootPath.isAbsolute do
+      throw s!"session workspace '{workspace.workspaceId}' root is not absolute"
+    if workspace.configHash.isEmpty then
+      throw s!"session workspace '{workspace.workspaceId}' has an empty configuration hash"
+    if ids.contains workspace.workspaceId then
+      throw s!"duplicate session workspace id '{workspace.workspaceId}'"
+    let normalizedRoot := rootPath.normalize.toString
+    if roots.contains normalizedRoot then
+      throw s!"duplicate session workspace root '{workspace.root}'"
+    ids := ids.insert workspace.workspaceId
+    roots := roots.insert normalizedRoot
+
+private def validateSessionDescriptor (entry : SessionDescriptor) : Except String Unit := do
+  if entry.daemonId.isEmpty then
+    throw "session descriptor daemonId must not be empty"
+  if entry.capability.isEmpty then
+    throw "session descriptor capability must not be empty"
+  if entry.configHash.isEmpty then
+    throw "session descriptor configuration hash must not be empty"
+  validateWorkspaceBindings entry.workspaces
+
+def readRegistryAt (path : System.FilePath) : IO RegistryRead := do
   unless ← path.pathExists do
     return .absent
   try
@@ -57,9 +88,15 @@ def readRegistry (root : System.FilePath) : IO RegistryRead := do
         unless schemaVersion == registrySchemaVersion do
           return .unsupported schemaVersion
         match fromJson? json with
-        | .ok entry => pure <| .current entry
+        | .ok entry =>
+            match validateSessionDescriptor entry with
+            | .ok () => pure <| .current entry
+            | .error err => pure <| .malformed s!"invalid registry schema: {err}"
         | .error err => pure <| .malformed s!"invalid registry schema: {err}"
   catch err =>
     pure <| .malformed s!"could not read registry: {err}"
+
+def readRegistry (root : System.FilePath) : IO RegistryRead := do
+  readRegistryAt (← registryPath root)
 
 end Beam.Daemon

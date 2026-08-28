@@ -20,11 +20,12 @@ A Lean release line is the canonical `major.minor` family recorded in
 - Runtime bundle metadata schema 2 and install manifest schema 3. Install manifest schema 2 is
   cleanup-only compatibility during the 0.2 release line: identity and `lean-beam prune` may read it,
   but the installer does not reuse it. Remove the schema-2 decoder when 0.3 development opens.
-- Wrapper daemon registry schema 1. The registry is an internal beta coordination boundary:
-  schema-less and unknown-version records are reported and preserved, but are not decoded, deleted,
-  or migrated automatically. A schema-less generation may not have a foreground wrapper owner; use
-  the runtime that wrote its record to stop the corresponding daemon, confirm it is gone, and only
-  then start a schema-1 owner.
+- CLI session descriptor schema 2. It freezes a nonempty array of workspace bindings plus one
+  generation identity, lifecycle, endpoint, and capability. Schema-less, schema-1, and unknown
+  records are reported and remain fenced; normal startup does not decode, delete, or migrate them.
+  After independently stopping the generation that wrote an opaque record, an operator may
+  quarantine it with `lean-beam --root ROOT recover --force`. Current descriptors instead require
+  their exact generation ID. Persisted PIDs are never recovery signal capabilities.
 - MCP `2026-07-28` is the preferred stdio protocol revision. MCP `2025-11-25` remains a named
   transition target for initialization-based clients. Reconsider the legacy path before the 0.3
   release once the clients named by the setup guide can all use per-request metadata.

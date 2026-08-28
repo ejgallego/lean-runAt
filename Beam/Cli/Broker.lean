@@ -14,27 +14,36 @@ namespace Beam.Cli
 
 open Beam.Broker
 
-/--
-Address a request to the private workspace of the CLI's one-project daemon.
-
-Process-wide control operations deliberately remain unscoped. An explicitly supplied workspace is
-preserved so this adapter does not rewrite lower-level test or maintenance requests.
--/
-def inProjectDaemonWorkspace (req : Request) : Request :=
+private def inWorkspace (workspaceId : WorkspaceId) (req : Request) : Request :=
   match req.op.workspaceScope with
   | .none => req
   | .optional | .required =>
       if req.workspaceId?.isSome then req
-      else { req with workspaceId? := some projectDaemonWorkspaceId }
+      else { req with workspaceId? := some workspaceId }
+
+/--
+Address a request to the private workspace of the CLI's one-project daemon.
+
+Process-wide control operations deliberately remain unscoped. Optional operations such as
+cancellation are scoped to the wrapper workspace by default. An explicitly supplied workspace is
+preserved so this adapter does not rewrite lower-level test or maintenance requests.
+-/
+def inProjectDaemonWorkspace (req : Request) : Request :=
+  inWorkspace projectDaemonWorkspaceId req
+
+/-- Address a wrapper request to the workspace selected from its session descriptor. -/
+def inSelectedDaemonWorkspace (client : ProjectDaemonClient) (req : Request) : Request :=
+  inWorkspace client.workspaceId req
 
 private def withBrokerErrorContext
     {α}
     (root : System.FilePath)
+    (client : ProjectDaemonClient)
     (action : IO (Except BrokerClientFailure α)) : IO α := do
   match ← action with
   | .ok value => pure value
   | .error failure =>
-      throw <| IO.userError (← daemonFailureMessage root failure)
+      throw <| IO.userError (← daemonFailureMessage root failure client.controlDir?)
 
 structure BrokerWaitSpec where
   action : String
@@ -119,7 +128,7 @@ private def withWrapperClientRequestId (req : Request) : IO WrapperBrokerRequest
 private def prepareWrapperBrokerRequest
     (client : ProjectDaemonClient)
     (req : Request) : IO WrapperBrokerRequest := do
-  let wrapper ← withWrapperClientRequestId <| inProjectDaemonWorkspace req
+  let wrapper ← withWrapperClientRequestId <| inSelectedDaemonWorkspace client req
   pure { wrapper with request := client.authorize wrapper.request }
 
 def decodeCancelAcknowledged? (resp : Response) : Option Bool := do
@@ -131,6 +140,7 @@ private def sendBrokerCancellation
     (clientRequestId : String) : IO (Option Bool) := do
   let cancelReq : Request := {
     op := .cancel
+    workspaceId? := some client.workspaceId
     cancelRequestId? := some clientRequestId
   }
   try
@@ -208,7 +218,7 @@ private def requestBrokerResponse
     (req : Request) : IO WrapperBrokerResponse := do
   let wrapperReq ← prepareWrapperBrokerRequest client req
   let req := wrapperReq.request
-  let response ← withBrokerErrorContext root do
+  let response ← withBrokerErrorContext root client do
     awaitBrokerResponseWithInterrupts client wrapperReq.clientRequestId
       wrapperReq.visibleClientRequestId? none <|
       sendRequestWithCallbacksResult client.endpoint req
@@ -448,7 +458,7 @@ def callBrokerWithProgress
       IO.eprintln <| annotateRunatMessage visibleClientRequestId? (formatStreamDiagnostic diagnostic)
   }
   let progressSpec? := if showProgress then some spec else none
-  let resp ← withBrokerErrorContext root do
+  let resp ← withBrokerErrorContext root client do
     awaitBrokerResponseWithInterrupts client wrapperReq.clientRequestId
       visibleClientRequestId? progressSpec? <|
       sendRequestWithCallbacksResult client.endpoint req callbacks

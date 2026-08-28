@@ -131,18 +131,22 @@ saved accepted text, the intended future direction is for `lean-beam update` or 
 reuse matching speculative execution rather than replaying it from scratch. Beam would still not
 apply the source edit.
 
-For programmatic local consumers, the preferred machine-readable surface is the JSON stream exposed
-by `beam-client request-stream`; wrapper stderr should be treated as human-facing. A wrapper-managed
-daemon exists only while its foreground `lean-beam ensure --hold` owner is alive. Keep that owner
-active for wrapper and raw-client requests; those requests attach to the session but do not acquire
-daemon ownership. A separately launched standalone daemon has its own explicit process owner. Broker
+For programmatic local consumers of a wrapper session, the supported machine-readable surface is
+`lean-beam --root ROOT [--control-dir DIR] request-stream <json|->`. The request JSON contains the
+operation, its arguments, and a nonempty `clientRequestId`; it cannot select a workspace, root, or
+capability. The wrapper canonicalizes the explicit root, selects its static workspace binding from
+the session descriptor, and injects routing and authentication. Wrapper stderr is human-facing.
+The port-oriented `beam-client request-stream` remains maintainer/debug tooling for separately
+managed brokers. A wrapper daemon exists only while its foreground `lean-beam ensure --hold` owner
+is alive. Attaching requests do not acquire daemon ownership. A separately launched standalone
+daemon has its own explicit process owner. Broker
 responses require an explicit top-level `ok` boolean, giving projection layers an unambiguous
 success/error discriminator. A successful response always includes `result`; response and stream
 envelopes reject undeclared fields, and typed save/close-save results reject incomplete or extended
 artifact shapes. All raw stream variants use the same `kind`, `payload`, and optional outer
 `clientRequestId` fields; the terminal response payload does not duplicate transport correlation.
 Exact event ordering and examples live in
-[SYNC_AND_DIAGNOSTICS.md](SYNC_AND_DIAGNOSTICS.md#raw-broker-stream).
+[SYNC_AND_DIAGNOSTICS.md](SYNC_AND_DIAGNOSTICS.md#machine-broker-stream).
 
 `lean-beam-mcp` is the experimental stdio MCP entry point. User setup lives in
 [SETUP.md](SETUP.md#mcp-setup); implementation, protocol, tool-list, and conformance notes live in
@@ -192,13 +196,26 @@ Exact event ordering and examples live in
   endpoint, root, and generation-identity validation are authoritative when PID identity is not
   locally observable. Each wrapper request carries a random per-generation capability from the
   mode-`0600` registry. A paused owner retains the session; a killed owner closes the pipe; explicit
-  `lean-beam shutdown` changes the registry to `draining`, and that fence remains until the holder
-  has reaped the daemon process tree. Configuration-mismatched and otherwise unsafe ordinary
-  lookups preserve the current owner and registry.
-- After abrupt owner death, a later process in the same PID domain may recognize a registry as stale
-  only when both recorded processes are proven gone. A client in another PID domain cannot make
-  that proof and fails closed with the registry preserved; its external sandbox/process supervisor
-  must establish complete process-tree exit before removing that exact recovery record.
+  `lean-beam shutdown` changes the descriptor to `draining`, and that fence remains until normal
+  owner cleanup has reaped the daemon leader after graceful or process-group teardown.
+  Ordinary lookups use the frozen workspace configuration and preserve unsafe session state. A
+  competing owner computes its proposed configuration but cannot replace a mismatched live owner.
+- Abnormal or ambiguous state is never reclaimed automatically. The descriptor remains as a fence
+  after an unexpected broker/owner exit. Once the operator has established that the matching
+  session is no longer authoritative, `lean-beam --root ROOT recover --generation ID` quarantines
+  that exact descriptor without signalling persisted PIDs. Legacy, unsupported, or malformed
+  descriptor state requires the deliberately broader `recover --force` form.
+- The default authoritative descriptor is `<root>/.beam/beam-daemon.json`, which keeps discovery
+  available inside project-scoped agent sandboxes. `--control-dir DIR` selects one exact alternate
+  control directory; callers must repeat the same selection for every owner, request, diagnostic,
+  shutdown, and recovery command. `BEAM_CONTROL_ROOT` is the sandbox convenience that derives a
+  per-root subdirectory below a writable base. A stable explicit control directory is also the
+  intended future boundary for a statically configured multi-workspace CLI session; dynamic
+  workspace mutation remains unavailable in wrapper mode.
+- Deleting the project tree also deletes its default project-local fence. Workflows that may remove
+  and immediately recreate the same canonical path, and need exclusion to survive that operation,
+  should select a stable external `--control-dir`; this tradeoff keeps the default usable from
+  project-scoped agent sandboxes without assuming access to a host-global runtime directory.
 - Wrapper-owned brokers currently use authenticated loopback TCP. The supported trust boundary is
   one local OS account with private registry-file permissions; another user who can only discover
   the port cannot issue requests without the generation capability. A manually launched standalone
@@ -207,8 +224,7 @@ Exact event ordering and examples live in
 - A startup failure that reports `operation not permitted` through `.beam/beam-daemon-startup.log` is
   usually an environment restriction, not a bundle-resolution mismatch.
 - Typed broker transport, invalid-response, and response-timeout failures include registry/log
-  context and write a JSON incident record under `.beam/daemon-failures/` or the per-root
-  subdirectory of `BEAM_CONTROL_DIR`. Incident kinds are `brokerTransportFailure`,
+  context and write a JSON incident record below the selected control directory. Incident kinds are `brokerTransportFailure`,
   `invalidBrokerResponse`, and `brokerResponseTimeout`; callback/display failures do not create
   daemon incidents. Beam keeps the latest 50 incident records, and `lean-beam doctor` lists recent
   incident paths.

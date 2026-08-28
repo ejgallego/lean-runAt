@@ -58,7 +58,7 @@ private def expectRegistered
 
 private def checkActiveRegistry : IO Unit := do
   let registry ← ActiveRequestRegistry.create
-  let noneResult ← ActiveRequestRegistry.register registry none
+  let noneResult ← ActiveRequestRegistry.register registry none none
   let anonymous ← expectRegistered "register without clientRequestId" noneResult
   require "anonymous admission participates in active request count"
     ((← ActiveRequestRegistry.count registry) == 1)
@@ -75,9 +75,9 @@ private def checkActiveRegistry : IO Unit := do
   require "unregistered anonymous admission leaves no active request"
     ((← ActiveRequestRegistry.count registry) == 0)
 
-  let firstResult ← ActiveRequestRegistry.register registry (some "req-1")
+  let firstResult ← ActiveRequestRegistry.register registry none (some "req-1")
   let first ← expectRegistered "register active request" firstResult
-  match ← ActiveRequestRegistry.register registry (some "req-1") with
+  match ← ActiveRequestRegistry.register registry none (some "req-1") with
   | .ok _ =>
       throw <| IO.userError "duplicate clientRequestId registered successfully"
   | .error failure =>
@@ -85,7 +85,7 @@ private def checkActiveRegistry : IO Unit := do
       require "duplicate active request error names id" (failure.message.contains "req-1")
 
   require "mark active request cancelled"
-    (Option.isSome (← ActiveRequestRegistry.markCancelled registry "req-1"))
+    (Option.isSome (← ActiveRequestRegistry.markCancelled registry none "req-1"))
   match ← ensureRequestNotCancelled (some (ActiveRequest.cancelRef first)) with
   | .ok _ =>
       throw <| IO.userError "ensureRequestNotCancelled reports broker cancellation: expected error"
@@ -97,9 +97,9 @@ private def checkActiveRegistry : IO Unit := do
 
   ActiveRequestRegistry.unregister registry (some first)
   require "unregistered active request is no longer cancellable"
-    (Option.isNone (← ActiveRequestRegistry.markCancelled registry "req-1"))
+    (Option.isNone (← ActiveRequestRegistry.markCancelled registry none "req-1"))
 
-  let replacementResult ← ActiveRequestRegistry.register registry (some "req-1")
+  let replacementResult ← ActiveRequestRegistry.register registry none (some "req-1")
   let replacement ← expectRegistered "register replacement active request" replacementResult
   ActiveRequestRegistry.unregister registry (some first)
   require "stale active handle cannot cancel replacement"
@@ -110,7 +110,7 @@ private def checkActiveRegistry : IO Unit := do
       throw <| IO.userError
         s!"stale active handle cancelled replacement: {(toJson failure.toResponse).compress}"
   require "stale unregister preserves replacement active request"
-    (Option.isSome (← ActiveRequestRegistry.markCancelled registry "req-1"))
+    (Option.isSome (← ActiveRequestRegistry.markCancelled registry none "req-1"))
   match ← ensureRequestNotCancelled (some replacement.cancelRef) with
   | .ok _ =>
       throw <| IO.userError "replacement active request did not observe cancellation"
@@ -121,12 +121,30 @@ private def checkActiveRegistry : IO Unit := do
         failure
   ActiveRequestRegistry.unregister registry (some replacement)
 
+  let workspaceA ← expectRegistered "register workspace A request" <|
+    ← ActiveRequestRegistry.register registry (some "workspace-a") (some "shared-id")
+  let workspaceB ← expectRegistered "register workspace B request" <|
+    ← ActiveRequestRegistry.register registry (some "workspace-b") (some "shared-id")
+  require "workspace-scoped cancellation finds the selected request"
+    (Option.isSome (← ActiveRequestRegistry.markCancelled registry
+      (some "workspace-a") "shared-id"))
+  match ← ensureRequestNotCancelled (some workspaceA.cancelRef) with
+  | .ok _ => throw <| IO.userError "workspace A request did not observe cancellation"
+  | .error _ => pure ()
+  match ← ensureRequestNotCancelled (some workspaceB.cancelRef) with
+  | .ok _ => pure ()
+  | .error _ => throw <| IO.userError "workspace A cancellation leaked into workspace B"
+  require "unscoped cancellation does not alias a workspace-scoped request"
+    (Option.isNone (← ActiveRequestRegistry.markCancelled registry none "shared-id"))
+  ActiveRequestRegistry.unregister registry (some workspaceA)
+  ActiveRequestRegistry.unregister registry (some workspaceB)
+
 private def checkActiveRegistryCloseDrain : IO Unit := do
   let registry ← ActiveRequestRegistry.create
   let named ← expectRegistered "register named request before close" <|
-    ← ActiveRequestRegistry.register registry (some "closing-request")
+    ← ActiveRequestRegistry.register registry none (some "closing-request")
   let anonymous ← expectRegistered "register anonymous request before close" <|
-    ← ActiveRequestRegistry.register registry none
+    ← ActiveRequestRegistry.register registry none none
   ActiveRequestRegistry.closeAdmission registry
   for active in #[named, anonymous] do
     match ← ensureRequestNotCancelled (some active.cancelRef) with
@@ -136,7 +154,7 @@ private def checkActiveRegistryCloseDrain : IO Unit := do
           "admission close cancellation"
           "requestCancelled"
           failure
-  match ← ActiveRequestRegistry.register registry (some "after-close") with
+  match ← ActiveRequestRegistry.register registry none (some "after-close") with
   | .ok _ => throw <| IO.userError "closed admission accepted a new request"
   | .error failure =>
       require "closed admission rejection is typed" (failure.code == .requestCancelled)
@@ -155,10 +173,10 @@ private def checkActiveRegistryCloseDrain : IO Unit := do
 
 private def checkPendingCancellationIdentity : IO Unit := do
   let registry ← ActiveRequestRegistry.create
-  let firstResult ← ActiveRequestRegistry.register registry (some "reused-id")
+  let firstResult ← ActiveRequestRegistry.register registry none (some "reused-id")
   let first ← expectRegistered "register first cancellation identity" firstResult
   ActiveRequestRegistry.unregister registry (some first)
-  let replacementResult ← ActiveRequestRegistry.register registry (some "reused-id")
+  let replacementResult ← ActiveRequestRegistry.register registry none (some "reused-id")
   let replacement ← expectRegistered "register replacement cancellation identity" replacementResult
   let firstPending ← mkPending (cancelRef? := some first.cancelRef)
   let replacementPending ← mkPending (cancelRef? := some replacement.cancelRef)

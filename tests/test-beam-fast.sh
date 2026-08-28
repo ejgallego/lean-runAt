@@ -357,8 +357,8 @@ wrapper_todo_owner_out="$(mktemp /tmp/lean-beam-wrapper-todo-owner-out-XXXXXX)"
 wrapper_todo_owner_err="$(mktemp /tmp/lean-beam-wrapper-todo-owner-err-XXXXXX)"
 wrapper_todo_owner_pid=""
 wrapper_todo_cleanup() {
-  BEAM_CONTROL_DIR="$wrapper_todo_control_dir" \
-    scripts/lean-beam --root tests/save_olean_project shutdown > /dev/null 2>&1 || true
+  scripts/lean-beam --root tests/save_olean_project \
+    --control-dir "$wrapper_todo_control_dir" shutdown > /dev/null 2>&1 || true
   if [ -n "$wrapper_todo_owner_pid" ]; then
     wait "$wrapper_todo_owner_pid" 2>/dev/null || true
   fi
@@ -367,8 +367,8 @@ wrapper_todo_cleanup() {
     "$wrapper_todo_owner_out" "$wrapper_todo_owner_err"
 }
 
-BEAM_CONTROL_DIR="$wrapper_todo_control_dir" \
-  scripts/lean-beam --root tests/save_olean_project ensure --hold \
+scripts/lean-beam --root tests/save_olean_project \
+  --control-dir "$wrapper_todo_control_dir" ensure --hold \
   >"$wrapper_todo_owner_out" 2>"$wrapper_todo_owner_err" &
 wrapper_todo_owner_pid="$!"
 for _ in $(seq 1 600); do
@@ -390,8 +390,8 @@ if ! grep -Fq "owning Beam session" "$wrapper_todo_owner_err"; then
   exit 1
 fi
 
-if ! BEAM_CONTROL_DIR="$wrapper_todo_control_dir" \
-    scripts/lean-beam --root tests/save_olean_project \
+if ! scripts/lean-beam --root tests/save_olean_project \
+      --control-dir "$wrapper_todo_control_dir" \
       update TodoSmoke.lean \
     > "$wrapper_todo_update_out" 2>"$wrapper_todo_update_err"; then
   echo "expected lean-beam update wrapper smoke to succeed before todo" >&2
@@ -421,8 +421,8 @@ PY
   exit 1
 fi
 
-if ! BEAM_CONTROL_DIR="$wrapper_todo_control_dir" \
-    scripts/lean-beam --root tests/save_olean_project \
+if ! scripts/lean-beam --root tests/save_olean_project \
+      --control-dir "$wrapper_todo_control_dir" \
       todo TodoSmoke.lean "$wrapper_todo_version" 13 0 14 0 --kind sorry --suggest none \
     > "$wrapper_todo_out" 2>"$wrapper_todo_err"; then
   echo "expected lean-beam todo wrapper smoke to succeed" >&2

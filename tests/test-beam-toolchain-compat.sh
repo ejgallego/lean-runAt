@@ -165,7 +165,7 @@ PY
 run_bundle_install() {
   local rc=0
   (
-    unset BEAM_HOME BEAM_CONTROL_DIR
+    unset BEAM_HOME BEAM_CONTROL_ROOT
     export HOME="$tmp_env_root/home"
     export CODEX_HOME="$tmp_env_root/codex"
     export CLAUDE_HOME="$tmp_env_root/claude"

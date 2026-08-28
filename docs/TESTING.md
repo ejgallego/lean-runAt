@@ -124,12 +124,13 @@ Current Beam coverage includes:
   a daemon is paused, rejection of attachment or replacement while that generation remains
   published, forced process-group cleanup of the daemon and its backend,
   holder reporting after an unexpected daemon crash, abrupt owner death through inherited-pipe EOF,
-  read-only stale registry lookup, and self-termination after the project worktree disappears without
-  recreating it
+  read-only crash-fence lookup, exact-generation non-signalling recovery, explicit control-directory
+  selection, root-aware machine request routing, and self-termination after the project worktree
+  disappears without recreating it
 - Linux-only PID-isolated sandbox wrapper coverage in [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh),
   including cross-namespace endpoint attachment, duplicate-owner rejection, a paused owner without
   time-based expiry, explicit shutdown, killed-owner EOF cleanup, fail-closed preservation of an
-  unavailable foreign-domain registry before supervised recovery, distinct generation identity,
+  unavailable foreign-domain descriptor before explicit recovery, distinct generation identity,
   and the absence of legacy lease/retirement artifacts
 - zero-build save replay, structured-setup support, batch-only-argument rejection, and stale-save
   race coverage in

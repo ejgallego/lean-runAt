@@ -87,10 +87,14 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 
 - infers the target project root from the current directory or `--root`
 - keeps one Beam daemon per project root and records it in `<root>/.beam/beam-daemon.json`
-  - in sandboxed or read-only project trees, set `BEAM_CONTROL_DIR` to a writable directory
+  - in sandboxed or read-only project trees, set `BEAM_CONTROL_ROOT` to a writable directory
+  - for an exact stable alternate location, pass the same `--control-dir DIR` to the owner and every
+    attaching command; Beam does not search alternate control directories
 - gives daemon startup authority only to `lean-beam ensure rocq --hold`; ordinary commands attach
   to its registry generation and never start a daemon implicitly
 - owns shutdown and registry handling
+- preserves ambiguous crash state until explicit `recover --generation ID`; recovery does not
+  signal persisted PIDs
 - resolves `coq-lsp` from the target project's local `_opam` when available
 - the explicit owner starts a Rocq-capable Beam daemon with startup args instead of relying on
   inherited editor state

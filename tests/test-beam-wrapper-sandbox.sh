@@ -76,7 +76,7 @@ sandbox_beam() {
     --proc /proc \
     --unshare-pid \
     --chdir "$project_root" \
-    -- /usr/bin/env BEAM_CONTROL_DIR="$control_root" \
+    -- /usr/bin/env BEAM_CONTROL_ROOT="$control_root" \
       "$beam_script" --root "$project_root" "$@"
 }
 
@@ -132,7 +132,7 @@ sandbox_owner() {
     --unshare-pid \
     --chdir "$project_root" \
     -- /bin/bash -lc \
-      "export BEAM_CONTROL_DIR='$control_root'; \
+      "export BEAM_CONTROL_ROOT='$control_root'; \
        '$beam_script' --root '$project_root' ensure --hold >'$out' 2>'$err' & \
        wrapper_pid=\$!; \
        (paused=false; \
@@ -281,7 +281,7 @@ fi
 
 # Killing the holder closes the only write end of the inherited owner pipe. The daemon must stop
 # without a heartbeat timeout. A later command in another PID namespace cannot prove that the
-# foreign-domain process identities are gone, so it must preserve the registry for supervised
+# foreign-domain process identities are gone, so it must preserve the descriptor for explicit
 # recovery rather than silently treating endpoint unavailability as replacement authority.
 touch "$owner_kill"
 if ! wait_for_exit "$owner_pid" "killed sandbox owner" 120 0.1; then
@@ -312,13 +312,28 @@ if ! grep -Fq "recorded daemon endpoint is unavailable" "$after_kill_err"; then
   exit 1
 fi
 if ! find "$control_root" -name beam-daemon.json -print -quit | grep -q .; then
-  echo "expected ordinary cross-domain recovery to preserve the unsafe registry" >&2
+  echo "expected ordinary cross-domain lookup to preserve the unsafe descriptor" >&2
   exit 1
 fi
 
 # This test harness supervised the complete bwrap owner namespace and observed its exit, so it can
-# now perform the out-of-band recovery that an unsupervised client must refuse to infer.
-rm -f -- "$registry"
+# now authorize exact-generation recovery that an ordinary client must refuse to infer.
+recovery_json="$(sandbox_beam recover --generation "$daemon_id_2")"
+if [ "$(json_text_field "$recovery_json" recovered)" != "true" ]; then
+  echo "expected exact-generation sandbox recovery to quarantine the descriptor" >&2
+  printf '%s\n' "$recovery_json" >&2
+  exit 1
+fi
+if [ -e "$registry" ]; then
+  echo "expected exact-generation recovery to remove the authoritative fence" >&2
+  exit 1
+fi
+recovery_path="$(json_text_field "$recovery_json" quarantinedPath)"
+if [ ! -f "$recovery_path" ]; then
+  echo "expected sandbox recovery to preserve quarantined evidence" >&2
+  printf '%s\n' "$recovery_json" >&2
+  exit 1
+fi
 
 sandbox_owner owner-3
 if ! wait_for_registry || ! wait_for_nonempty_file "$owner_out" "final sandbox owner response"; then
