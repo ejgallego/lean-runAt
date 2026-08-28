@@ -196,7 +196,8 @@ Exact event ordering and examples live in
   happens without heartbeat timeouts or filesystem leases and works across PID namespaces because
   authority does not depend on observing persisted PIDs. Endpoint, root, and generation-identity
   validation are authoritative. Each wrapper request carries a random per-generation capability
-  from the mode-`0600` registry. A paused owner retains the session; a killed owner closes the pipe; explicit
+  from a mode-`0600` registry inside a mode-`0700` control directory. A paused owner retains the
+  session; a killed owner closes the pipe; explicit
   `lean-beam shutdown` changes the descriptor to `draining`, and that fence remains until normal
   owner cleanup has reaped the daemon leader after graceful or process-group teardown.
   Ordinary lookups take no mutation lock, create no control files, use the frozen workspace
@@ -206,20 +207,24 @@ Exact event ordering and examples live in
   after an unexpected broker/owner exit. Once the operator has established that the matching
   session is no longer authoritative, `lean-beam --root ROOT recover --generation ID` quarantines
   that exact descriptor without signalling persisted PIDs. Legacy, unsupported, or malformed
-  descriptor state requires the deliberately broader `recover --force` form.
+  descriptor state requires the deliberately broader `recover --force` form. Current-descriptor
+  recovery additionally requires a root recorded in that descriptor, so a wrong-root caller using
+  the same control directory cannot quarantine the session.
 - The default authoritative descriptor is `<root>/.beam/beam-daemon.json`, which keeps discovery
   available inside project-scoped agent sandboxes. `--control-dir DIR` selects one exact alternate
   control directory; callers must repeat the same selection for every owner, request, diagnostic,
   shutdown, and recovery command. `BEAM_CONTROL_ROOT` is the sandbox convenience that derives a
-  per-root subdirectory below a writable base. A stable explicit control directory is also the
-  intended future boundary for a statically configured multi-workspace CLI session; dynamic
+  per-root subdirectory below an absolute writable base. Beam makes every selected control
+  directory account-private (`0700`) before creating its lock or capability descriptor. A stable
+  explicit control directory is also the intended future boundary for a statically configured
+  multi-workspace CLI session; dynamic
   workspace mutation remains unavailable in wrapper mode.
 - Deleting the project tree also deletes its default project-local fence. Workflows that may remove
   and immediately recreate the same canonical path, and need exclusion to survive that operation,
   should select a stable external `--control-dir`; this tradeoff keeps the default usable from
   project-scoped agent sandboxes without assuming access to a host-global runtime directory.
 - Wrapper-owned brokers currently use authenticated loopback TCP. The supported trust boundary is
-  one local OS account with private registry-file permissions; another user who can only discover
+  one local OS account with a private control directory and registry-file permissions; another user who can only discover
   the port cannot issue requests without the generation capability. A manually launched standalone
   `beam-daemon` has no wrapper registry capability and is maintainer tooling, not a shared-host
   service. Unix-domain/per-user native IPC remains a possible later transport improvement.

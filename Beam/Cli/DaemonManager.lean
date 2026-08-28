@@ -59,12 +59,24 @@ private def projectControl
   let dir ← controlDirFor root explicitControlDir?
   pure { root, dir, registry := dir / "beam-daemon.json" }
 
+/--
+Create the selected control directory and make it private before creating its lock or any
+capability-bearing descriptor. Wrapper authentication assumes that this directory is shared only
+between processes of the same local account.
+-/
+private def preparePrivateControlDir (dir : System.FilePath) : IO Unit := do
+  IO.FS.createDirAll dir
+  IO.setAccessRights dir {
+    user := { read := true, write := true, execution := true }
+  }
+
 /-- Supply project registry mutation only for the dynamic extent of the project control lock. -/
 private def withProjectControl
     (root : System.FilePath)
     (act : ProjectControl → IO α)
     (explicitControlDir? : Option System.FilePath := none) : IO α := do
   let control ← projectControl root explicitControlDir?
+  preparePrivateControlDir control.dir
   withLockTimeout (control.dir / "lock") (← projectControlLockTimeoutMs) do
     act control
 
@@ -103,14 +115,26 @@ private def computeConfigHash
   acc := mixField acc bundleId
   s!"{acc.toNat}"
 
+private def hexDigit (n : Nat) : Char :=
+  if n < 10 then
+    Char.ofNat ('0'.toNat + n)
+  else
+    Char.ofNat ('a'.toNat + n - 10)
+
+private def byteHex (byte : UInt8) : List Char :=
+  [hexDigit (byte.toNat / 16), hexDigit (byte.toNat % 16)]
+
+private def newRegistryTempPath (control : ProjectControl) : IO System.FilePath := do
+  let nonce := String.ofList <| (← IO.getRandomBytes 16).toList.flatMap byteHex
+  pure <| control.dir / s!"beam-daemon-{nonce}.tmp"
+
 private def writeRegistry (control : ProjectControl) (entry : SessionDescriptor) : IO Unit := do
-  if let some parent := control.registry.parent then
-    IO.FS.createDirAll parent
-  let tmp := control.registry.withExtension "tmp"
+  let tmp ← newRegistryTempPath control
   try
-    IO.FS.withFile tmp .write fun handle => do
-      -- The registry contains the daemon capability. Make the inode private before publishing any
-      -- bytes, rather than relying on a post-write chmod window or the caller's umask.
+    IO.FS.withFile tmp .writeNew fun handle => do
+      -- The private control directory protects the inode from its creation. The exclusive random
+      -- path also refuses pre-existing files and symlinks; mode 0600 remains defense in depth and
+      -- protects the descriptor after publication if directory permissions later change.
       IO.setAccessRights tmp {
         user := { read := true, write := true }
       }
@@ -538,15 +562,6 @@ private def newDaemonGenerationId (configHash : String) : IO String := do
   let nonce := ByteArray.toUInt64LE! (← IO.getRandomBytes 8)
   pure s!"{configHash.take 12}-{startedMonoNanos}-{nonce}"
 
-private def hexDigit (n : Nat) : Char :=
-  if n < 10 then
-    Char.ofNat ('0'.toNat + n)
-  else
-    Char.ofNat ('a'.toNat + n - 10)
-
-private def byteHex (byte : UInt8) : List Char :=
-  [hexDigit (byte.toNat / 16), hexDigit (byte.toNat % 16)]
-
 private def newDaemonCapability : IO String := do
   let bytes ← IO.getRandomBytes 32
   pure <| String.ofList <| bytes.toList.flatMap byteHex
@@ -748,9 +763,16 @@ private def registryRecoveryMessage (root : System.FilePath) (detail : String) :
 private def generationRecoveryMessage
     (root : System.FilePath)
     (entry : SessionDescriptor)
-    (detail : String) : String :=
-  registryRecoveryMessage root detail ++ "; run " ++
-    s!"'lean-beam --root {root} recover --generation {entry.daemonId}' when recovery is safe"
+    (reason : RegistryUnsafeReason) : String :=
+  let message := registryRecoveryMessage root reason.message
+  match reason with
+  | .wrongRegistryRoot recordedRoots =>
+      message ++ "; recovery must select one of the descriptor's recorded workspace roots " ++
+        s!"({recordedRoots}) with the same --control-dir; the selected root {root} cannot recover " ++
+        s!"session {entry.daemonId}"
+  | _ =>
+      message ++ "; run " ++
+        s!"'lean-beam --root {root} recover --generation {entry.daemonId}' when recovery is safe"
 
 private def registryReadRecoveryMessage
     (root : System.FilePath)
@@ -791,7 +813,7 @@ def shutdownRegisteredProjectDaemon
     | .malformed detail =>
         throw <| IO.userError <| registryReadRecoveryMessage root (.malformed detail)
     | .unusable entry reason =>
-        throw <| IO.userError <| generationRecoveryMessage root entry reason.message
+        throw <| IO.userError <| generationRecoveryMessage root entry reason
   match plan with
   | ShutdownPlan.none => pure <| .ok none
   | ShutdownPlan.request entry =>
@@ -814,9 +836,8 @@ private def quarantineRegistry (control : ProjectControl) : IO System.FilePath :
 
 private def registeredGenerationResponds
     (root : System.FilePath)
+    (workspace : WorkspaceBinding)
     (entry : SessionDescriptor) : IO Bool := do
-  let some workspace ← sessionWorkspaceForRoot? entry root
-    | pure false
   let some endpoint := registryEndpoint? entry
     | pure false
   match ← daemonGenerationStatus endpoint workspace.workspaceId root entry.identity entry.capability with
@@ -843,7 +864,11 @@ def recoverProjectDaemon
         unless generation == entry.daemonId do
           throw <| IO.userError <|
             s!"recovery generation '{generation}' does not match recorded generation '{entry.daemonId}'"
-        if ← registeredGenerationResponds root entry then
+        let some workspace ← sessionWorkspaceForRoot? entry root
+          | throw <| IO.userError <|
+              s!"selected root {root} is not a workspace in session {entry.daemonId}; " ++
+              s!"recorded workspace roots: {entry.rootSummary}"
+        if ← registeredGenerationResponds root workspace entry then
           throw <| IO.userError <|
             s!"Beam session {entry.daemonId} still responds; stop its foreground owner or use authenticated shutdown"
         let quarantine ← quarantineRegistry control
@@ -926,7 +951,7 @@ private def startOwnedProjectDaemon
   | .malformed detail =>
       throw <| IO.userError <| registryReadRecoveryMessage desired.root (.malformed detail)
   | .unusable entry reason =>
-      throw <| IO.userError <| generationRecoveryMessage desired.root entry reason.message
+      throw <| IO.userError <| generationRecoveryMessage desired.root entry reason
   let (endpoint, entry, child) ← startDaemonEntry desired opts control.dir
   try
     writeRegistry control entry
@@ -1071,7 +1096,7 @@ private def lookupProjectDaemon
   | .malformed detail =>
       throw <| IO.userError <| registryReadRecoveryMessage root (.malformed detail)
   | .unusable entry reason =>
-      throw <| IO.userError <| generationRecoveryMessage root entry reason.message
+      throw <| IO.userError <| generationRecoveryMessage root entry reason
 
 def withProjectDaemon
     (root : System.FilePath)

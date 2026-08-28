@@ -26,7 +26,11 @@ def controlDirFor
   | none =>
       match ← IO.getEnv "BEAM_CONTROL_ROOT" with
       | some base =>
-          pure (System.FilePath.mk base / controlRootTag root)
+          let base := System.FilePath.mk base
+          unless base.isAbsolute do
+            throw <| IO.userError
+              s!"BEAM_CONTROL_ROOT must be an absolute path, got '{base}'"
+          pure (base / controlRootTag root)
       | none =>
           pure (beamStateDir root)
 

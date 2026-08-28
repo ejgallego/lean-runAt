@@ -406,9 +406,11 @@ array of frozen workspace bindings. The public owner command currently creates o
 shape permits a future explicitly configured static multi-workspace session without changing
 request routing. Exactly one foreground `lean-beam ensure --hold` process owns the generation. It
 starts the daemon in a dedicated process session, passes the identity, effective configuration
-hash, and random capability through piped stdin, and retains the pipe's write end. The mode-`0600`
-descriptor publishes `live` or `draining`. Every wrapper request, including cancellation,
-generation probes, and shutdown, presents the capability. The daemon watches the pipe's read end;
+hash, and random capability through piped stdin, and retains the pipe's write end. Before creating
+the lock or descriptor, Beam makes the selected control directory `0700`; the mode-`0600`
+descriptor is written through an exclusive random temporary path and publishes `live` or
+`draining`. Every wrapper request, including cancellation, generation probes, and shutdown,
+presents the capability. The daemon watches the pipe's read end;
 EOF closes admission, marks admitted requests for cancellation, shuts down backend sessions, and
 stops the listener. There is no heartbeat, lease, or time-based retirement fence.
 
@@ -447,7 +449,10 @@ generic multi-workspace surface and has its own explicit owner. Broker runtime o
 
 The default control directory is `<root>/.beam`, discoverable to project-scoped agents.
 `--control-dir DIR` is an exact, stateless selection that every participant must repeat.
-`BEAM_CONTROL_ROOT` hashes each canonical root below a writable base for sandboxed/read-only roots.
+`BEAM_CONTROL_ROOT` must be absolute and hashes each canonical root below a writable base for
+sandboxed/read-only roots. The selected directory is private to one local account; coordination is
+supported between that account's processes, not across a group-shared control directory.
+
 Do not hide policy inside automatic fallback between these locations. A future multi-root CLI owner
 should require a stable explicit control directory and freeze all bindings before publication.
 
@@ -459,6 +464,8 @@ Keep these invariants covered:
   in ambiguous or unsafe state; they attach to frozen owner configuration rather than recomputing it
 - normal holder teardown retains a generation-specific draining fence until owned cleanup completes
   and cannot remove a replacement; abnormal exit leaves the fence for explicit recovery
+- recovery of a current descriptor requires both its exact generation and one of its recorded
+  workspace roots; a wrong-root caller cannot quarantine another session
 - owner EOF, explicit shutdown, and project-root disappearance all close admission before backend
   teardown and complete with bounded child cleanup
 - persisted numeric PIDs are never signalled or used for automatic stale reclamation

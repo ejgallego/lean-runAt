@@ -319,11 +319,47 @@ if workspace.get("workspaceId") != "beam-cli-project":
 PY
 
 case "$(uname -s)" in
-  Darwin) registry_mode="$(stat -f '%Lp' "$registry")" ;;
-  *) registry_mode="$(stat -c '%a' "$registry")" ;;
+  Darwin)
+    control_dir_mode="$(stat -f '%Lp' "$tmp1/.beam")"
+    registry_mode="$(stat -f '%Lp' "$registry")"
+    ;;
+  *)
+    control_dir_mode="$(stat -c '%a' "$tmp1/.beam")"
+    registry_mode="$(stat -c '%a' "$registry")"
+    ;;
 esac
+if [ "$control_dir_mode" != "700" ]; then
+  echo "expected the capability control directory to use mode 700, got $control_dir_mode" >&2
+  exit 1
+fi
 if [ "$registry_mode" != "600" ]; then
   echo "expected the capability-bearing registry to use mode 600, got $registry_mode" >&2
+  exit 1
+fi
+
+cross_root_descriptor="$tmp2/cross-root-recovery.before"
+cp -- "$registry" "$cross_root_descriptor"
+if "$beam_script" --root "$tmp2" --control-dir "$tmp1/.beam" \
+    recover --generation "$daemon1_id" \
+    > "$tmp2/cross-root-recovery.out" 2> "$tmp2/cross-root-recovery.err"; then
+  echo "expected recovery through a non-member root to fail closed" >&2
+  exit 1
+fi
+if ! grep -Fq "is not a workspace in session $daemon1_id" \
+    "$tmp2/cross-root-recovery.err" || \
+    ! grep -Fq "$tmp1" "$tmp2/cross-root-recovery.err"; then
+  echo "expected cross-root recovery rejection to name the session and its recorded root" >&2
+  cat "$tmp2/cross-root-recovery.err" >&2
+  exit 1
+fi
+if ! cmp -s -- "$cross_root_descriptor" "$registry"; then
+  echo "cross-root recovery must preserve the descriptor byte-for-byte" >&2
+  exit 1
+fi
+cross_root_stats_json="$("$beam_script" --root "$tmp1" stats)"
+assert_json_field_equals "stats after rejected cross-root recovery" "$cross_root_stats_json" ok true
+if ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; then
+  echo "cross-root recovery rejection must preserve the live owner and daemon" >&2
   exit 1
 fi
 
@@ -340,6 +376,19 @@ fi
 if [ "$(read_json_field "$registry" daemonId)" != "$daemon1_id" ] || \
     ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; then
   echo "live-generation recovery refusal must preserve the owner and descriptor" >&2
+  exit 1
+fi
+
+if BEAM_CONTROL_ROOT=relative-control-root \
+    "$beam_script" --root "$tmp1" stats \
+    > "$tmp1/relative-control-root.out" 2> "$tmp1/relative-control-root.err"; then
+  echo "expected relative BEAM_CONTROL_ROOT to be rejected" >&2
+  exit 1
+fi
+if ! grep -Fq "BEAM_CONTROL_ROOT must be an absolute path" \
+    "$tmp1/relative-control-root.err"; then
+  echo "expected relative BEAM_CONTROL_ROOT rejection to explain the stable-path requirement" >&2
+  cat "$tmp1/relative-control-root.err" >&2
   exit 1
 fi
 
