@@ -129,11 +129,11 @@ private def writeExistingRegistry (control : ProjectControl) (entry : SessionDes
   -- Teardown must not create a path while the project tree is being removed. Rewrite through an
   -- already existing file handle; if the registry was concurrently unlinked, this updates only the
   -- unlinked inode and cannot recreate the project or control directory.
-  let handle ← IO.FS.Handle.mk control.registry .readWrite
-  handle.rewind
-  handle.putStr ((toJson entry).pretty ++ "\n")
-  handle.flush
-  handle.truncate
+  IO.FS.withFile control.registry .readWrite fun handle => do
+    handle.rewind
+    handle.putStr ((toJson entry).pretty ++ "\n")
+    handle.flush
+    handle.truncate
 
 private def removeRegistry (control : ProjectControl) : IO Unit := do
   if ← control.registry.pathExists then
@@ -302,7 +302,6 @@ private structure DaemonFailureIncident where
   controlDir : String
   registryPath : String
   registry : Option Json := none
-  registryPidStatus : Option String := none
   registryEndpoint : Option String := none
   startupLogPath : Option String := none
   startupLogTail : Option String := none
@@ -341,10 +340,6 @@ private def writeDaemonFailureIncident?
     let registryFile ← registryPathFor root explicitControlDir?
     let registryRead ← readRegistryAt registryFile
     let registry := registryRead.entry?
-    let pidStatus ←
-      match registry with
-      | none => pure none
-      | some entry => some <$> registryPidStatus entry
     let endpoint := registry.map registryEndpointSummary
     let control ← controlDirFor root explicitControlDir?
     let observedAt ← Beam.utcTimestamp
@@ -358,7 +353,6 @@ private def writeDaemonFailureIncident?
       registryPath := registryFile.toString
       registry := registry.map fun entry =>
         entry.redactedJson
-      registryPidStatus := pidStatus
       registryEndpoint := endpoint
       startupLogPath := logTail?.map (fun (path, _) => path.toString)
       startupLogTail := logTail?.map (fun (_, tail) => tail)
@@ -567,7 +561,6 @@ private def registryEntryFor
   let port? :=
     match endpoint with
     | .tcp port => some port.toNat
-  let pidDomain? ← Beam.currentPidDomain?
   let ownerPid ← IO.Process.getPID
   pure {
     schemaVersion := registrySchemaVersion
@@ -575,9 +568,7 @@ private def registryEntryFor
     daemonId
     capability
     pid
-    pidDomain?
     ownerPid := ownerPid.toNat
-    ownerPidDomain? := pidDomain?
     port?
     workspaces := #[{
       workspaceId := projectDaemonWorkspaceId
@@ -683,8 +674,8 @@ def desiredConfig (home root : System.FilePath) (required : Backend) : IO Desire
 structure ProjectDaemonClient where
   endpoint : Transport.Endpoint
   capability : String
-  workspaceId : WorkspaceId := projectDaemonWorkspaceId
-  controlDir? : Option System.FilePath := none
+  workspaceId : WorkspaceId
+  controlDir : System.FilePath
 
 def ProjectDaemonClient.authorize
     (client : ProjectDaemonClient)
@@ -699,7 +690,7 @@ private def projectDaemonClient
     endpoint := ← Beam.Daemon.endpointFromEntry entry
     capability := entry.capability
     workspaceId := workspace.workspaceId
-    controlDir? := some controlDir
+    controlDir
   }
 
 private def workspaceSupportsBackend (workspace : WorkspaceBinding) : Backend → Bool
@@ -946,7 +937,8 @@ private def startOwnedProjectDaemon
     client := {
       endpoint
       capability := entry.capability
-      controlDir? := some control.dir
+      workspaceId := projectDaemonWorkspaceId
+      controlDir := control.dir
     }
     entry
     child
@@ -1064,25 +1056,25 @@ private def lookupProjectDaemon
     (root : System.FilePath)
     (backend? : Option Backend := none)
     (explicitControlDir? : Option System.FilePath := none) : IO SelectedProjectDaemon := do
-  withProjectControl root (explicitControlDir? := explicitControlDir?) fun control => do
-    match ← observeProjectRegistryAt root control.registry with
-    | .live entry =>
-        let workspace ← selectWorkspaceBackend root entry backend?
-        pure { client := ← projectDaemonClient entry workspace control.dir, workspace }
-    | .absent =>
-        throw <| IO.userError (missingOwnerMessage root backend?)
-    | .draining entry => throw <| IO.userError (drainingOwnerMessage root entry)
-    | .legacy =>
-        throw <| IO.userError <| registryReadRecoveryMessage root .legacy
-    | .unsupported schemaVersion =>
-        throw <| IO.userError <| registryReadRecoveryMessage root (.unsupported schemaVersion)
-    | .malformed detail =>
-        throw <| IO.userError <| registryReadRecoveryMessage root (.malformed detail)
-    | .unusable entry reason =>
-        throw <| IO.userError <| generationRecoveryMessage root entry reason.message
+  let control ← projectControl root explicitControlDir?
+  match ← observeProjectRegistryAt root control.registry with
+  | .live entry =>
+      let workspace ← selectWorkspaceBackend root entry backend?
+      pure { client := ← projectDaemonClient entry workspace control.dir, workspace }
+  | .absent =>
+      throw <| IO.userError (missingOwnerMessage root backend?)
+  | .draining entry => throw <| IO.userError (drainingOwnerMessage root entry)
+  | .legacy =>
+      throw <| IO.userError <| registryReadRecoveryMessage root .legacy
+  | .unsupported schemaVersion =>
+      throw <| IO.userError <| registryReadRecoveryMessage root (.unsupported schemaVersion)
+  | .malformed detail =>
+      throw <| IO.userError <| registryReadRecoveryMessage root (.malformed detail)
+  | .unusable entry reason =>
+      throw <| IO.userError <| generationRecoveryMessage root entry reason.message
 
 def withProjectDaemon
-    (_home root : System.FilePath)
+    (root : System.FilePath)
     (backend : Backend)
     (act : ProjectDaemonClient → IO α)
     (explicitControlDir? : Option System.FilePath := none) : IO α := do

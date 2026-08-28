@@ -731,9 +731,8 @@ private def handleBeamFeedback
     else do
       let identity ← serverIdentity opts (some root) (some runtime?.isSome)
       let daemon ← Beam.Daemon.daemonDebugContextJson root
-      let warnings := Beam.Daemon.daemonDebugWarnings daemon
       let (stats, openDocs, warnings') ←
-        collectFeedbackRuntimePayload runtime? workspaceId root warnings
+        collectFeedbackRuntimePayload runtime? workspaceId root #[]
       pure {
         generatedAt
         activeRoot? := some root.toString

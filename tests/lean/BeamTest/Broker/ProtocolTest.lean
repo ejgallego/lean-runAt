@@ -819,12 +819,12 @@ private def checkProjectRequestBoundary : IO Unit := do
     match fromJson? (α := ProjectRequest) (semanticJson.setObjVal! field (toJson "forbidden")) with
     | .ok _ => throw <| IO.userError s!"project request unexpectedly accepted session field '{field}'"
     | .error _ => pure ()
-  for op in [Op.initWorkspace, .listWorkspaces, .dropWorkspace] do
+  for op in [Op.initWorkspace, .listWorkspaces, .dropWorkspace, .resetStats, .shutdown] do
     match fromJson? (α := ProjectRequest) <| Json.mkObj [
       ("op", toJson op),
-      ("clientRequestId", toJson "admin-request")
+      ("clientRequestId", toJson "control-request")
     ] with
-    | .ok _ => throw <| IO.userError s!"project request unexpectedly accepted admin op '{op.key}'"
+    | .ok _ => throw <| IO.userError s!"project request unexpectedly accepted control op '{op.key}'"
     | .error _ => pure ()
 
 private def checkWorkspaceLifecycleProtocol : IO Unit := do
@@ -1122,8 +1122,7 @@ private def checkWrapperDaemonAuthorization : IO Unit := do
   let capability := "generation-secret"
   let runtime ← Beam.Broker.ServerRuntime.create
     ({ root } : Beam.Broker.BrokerConfig) "fixture"
-    (some { daemonId := "generation-a", configHash := "config-a" })
-    (some capability)
+    (.wrapper { daemonId := "generation-a", configHash := "config-a" } capability)
   try
     for (label, capability?) in [
         ("missing", none),

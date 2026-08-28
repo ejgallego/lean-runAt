@@ -21,16 +21,6 @@ private def inWorkspace (workspaceId : WorkspaceId) (req : Request) : Request :=
       if req.workspaceId?.isSome then req
       else { req with workspaceId? := some workspaceId }
 
-/--
-Address a request to the private workspace of the CLI's one-project daemon.
-
-Process-wide control operations deliberately remain unscoped. Optional operations such as
-cancellation are scoped to the wrapper workspace by default. An explicitly supplied workspace is
-preserved so this adapter does not rewrite lower-level test or maintenance requests.
--/
-def inProjectDaemonWorkspace (req : Request) : Request :=
-  inWorkspace projectDaemonWorkspaceId req
-
 /-- Address a wrapper request to the workspace selected from its session descriptor. -/
 def inSelectedDaemonWorkspace (client : ProjectDaemonClient) (req : Request) : Request :=
   inWorkspace client.workspaceId req
@@ -43,7 +33,7 @@ private def withBrokerErrorContext
   match ← action with
   | .ok value => pure value
   | .error failure =>
-      throw <| IO.userError (← daemonFailureMessage root failure client.controlDir?)
+      throw <| IO.userError (← daemonFailureMessage root failure (some client.controlDir))
 
 structure BrokerWaitSpec where
   action : String

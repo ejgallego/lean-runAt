@@ -56,21 +56,10 @@ write_runtime_manifest() {
   "$beam_cli" install-manifest "$payload" - fixture-toolchain >"$path"
 }
 
-case "$(uname -s)" in
-  Linux) test_pid_domain="$(readlink /proc/self/ns/pid 2>/dev/null || true)" ;;
-  Darwin) test_pid_domain="host:Darwin" ;;
-  *) test_pid_domain="" ;;
-esac
-if [ -z "$test_pid_domain" ]; then
-  echo "prune lock tests require a known PID domain" >&2
-  exit 1
-fi
-
 write_lock_owner() {
   local lock_dir="$1"
   local pid="$2"
   printf '%s\n' "$pid" >"$lock_dir/pid"
-  printf '%s\n' "$test_pid_domain" >"$lock_dir/pid-domain"
 }
 
 assert_lock_timeout() {
@@ -241,7 +230,7 @@ race_err="$tmp_root/race.err"
   while [ ! -e "$race_lock_release" ]; do
     sleep 0.05
   done
-  rm -f "$race_lock/pid" "$race_lock/pid-domain"
+  rm -f "$race_lock/pid"
   rmdir "$race_lock"
 ) &
 lock_writer_pid="$!"
@@ -277,7 +266,7 @@ if "$install_root/current/bin/lean-beam" prune --apply > /dev/null 2>"$install_l
   exit 1
 fi
 assert_lock_timeout "$install_lock_err"
-rm -f "$install_root/.install-lock/pid" "$install_root/.install-lock/pid-domain"
+rm -f "$install_root/.install-lock/pid"
 rmdir "$install_root/.install-lock"
 assert_file "$old_runtime/manifest.json"
 

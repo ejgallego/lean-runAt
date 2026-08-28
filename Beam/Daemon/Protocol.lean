@@ -59,9 +59,7 @@ structure SessionDescriptor where
   daemonId : String
   capability : String
   pid : Nat
-  pidDomain? : Option String := none
   ownerPid : Nat
-  ownerPidDomain? : Option String := none
   port? : Option Nat := none
   workspaces : Array WorkspaceBinding
   /-- Hash of the complete frozen session configuration. -/

@@ -111,7 +111,6 @@ private def sampleCollection (home : String) : Beam.Feedback.Collection := {
     ("stats", Json.mkObj [("requests", toJson (3 : Nat))]),
     ("openFiles", Json.arr #[Json.mkObj [("path", toJson s!"{home}/project/Demo.lean")]]),
     ("daemon", Json.mkObj [
-      ("registryPidStatus", toJson "alive"),
       ("registryEndpoint", toJson "127.0.0.1:1234"),
       ("recentDaemonIncidents", Json.arr #[])
     ])

@@ -54,8 +54,6 @@ private partial def acquireInstallLockUntil
   if acquired then
     let selfPid ← IO.Process.getPID
     IO.FS.writeFile (lockDir / "pid") s!"{selfPid}\n"
-    if let some pidDomain := ← Beam.currentPidDomain? then
-      IO.FS.writeFile (lockDir / "pid-domain") s!"{pidDomain}\n"
     return
   let now ← IO.monoNanosNow
   if now >= deadlineNanos then
@@ -66,10 +64,9 @@ private partial def acquireInstallLockUntil
   acquireInstallLockUntil lockDir startedNanos deadlineNanos timeoutMs
 
 private def releaseInstallLock (lockDir : System.FilePath) : IO Unit := do
-  for name in #["pid", "pid-domain"] do
-    let path := lockDir / name
-    if ← path.pathExists then
-      IO.FS.removeFile path
+  let pidPath := lockDir / "pid"
+  if ← pidPath.pathExists then
+    IO.FS.removeFile pidPath
   IO.FS.removeDir lockDir
 
 private def withInstallLockTimeout

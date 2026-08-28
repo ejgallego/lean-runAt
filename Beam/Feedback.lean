@@ -460,7 +460,6 @@ private def runtimeSummarySection (collection : Collection) : String :=
     optionalLine "runtime current" ((jsonBoolField? identity "runtime_current").map boolText) ++
     optionalLine "runtime error" (jsonStringField? identity "runtime_error") ++
     optionalLine "source" source? ++
-    optionalLine "daemon registry pid" (jsonStringField? daemon "registryPidStatus") ++
     optionalLine "daemon endpoint" (jsonStringField? daemon "registryEndpoint") ++
     warningLines
   mdSection "Beam Runtime" (String.intercalate "\n" lines)

@@ -26,20 +26,22 @@ private def lockTimeoutMessage
   s!"timed out after {waitedMs} ms waiting for Beam lock {lockPath}; " ++
     s!"timeout: {timeoutMs} ms"
 
-/--
-Open the stable file whose kernel lock protects one Beam critical section.
-
-The file is deliberately retained after unlock. Removing a lock file would let a later contender
-lock a new inode while an earlier waiter still holds or waits on the old one.
--/
-private def openLockHandle (lockPath : System.FilePath) : IO IO.FS.Handle := do
+/-- Ensure the stable lock file can be opened without replacing its inode. -/
+private def ensureLockParent (lockPath : System.FilePath) : IO Unit := do
   if let some parent := lockPath.parent then
     IO.FS.createDirAll parent
-  IO.FS.Handle.mk lockPath .append
 
-/-- Open a lock without creating a missing parent directory during teardown. -/
-private def openExistingLockHandle (lockPath : System.FilePath) : IO IO.FS.Handle := do
-  IO.FS.Handle.mk lockPath .readWrite
+private def withAcquiredLock
+    (lockPath : System.FilePath)
+    (mode : IO.FS.Mode)
+    (acquire : IO.FS.Handle → IO Unit)
+    (act : IO α) : IO α := do
+  IO.FS.withFile lockPath mode fun handle => do
+    acquire handle
+    try
+      act
+    finally
+      handle.unlock
 
 private partial def acquireLockUntil
     (handle : IO.FS.Handle)
@@ -57,26 +59,19 @@ private partial def acquireLockUntil
 
 /-- Run `act` while holding an unbounded kernel-backed file lock. -/
 def withLock (lockPath : System.FilePath) (act : IO α) : IO α := do
-  let handle ← openLockHandle lockPath
-  handle.lock
-  try
-    act
-  finally
-    handle.unlock
+  ensureLockParent lockPath
+  withAcquiredLock lockPath .append (·.lock) act
 
 /-- Run `act` while holding a kernel-backed file lock until an absolute monotonic deadline. -/
 def withLockTimeout (lockPath : System.FilePath) (timeoutMs : Nat) (act : IO α) : IO α := do
-  let handle ← openLockHandle lockPath
+  ensureLockParent lockPath
   let startedNanos ← IO.monoNanosNow
-  acquireLockUntil handle lockPath {
+  let deadline := {
     timeoutMs
     startedNanos
     deadlineNanos := startedNanos + timeoutMs * 1000000
   }
-  try
-    act
-  finally
-    handle.unlock
+  withAcquiredLock lockPath .append (fun handle => acquireLockUntil handle lockPath deadline) act
 
 /--
 Run `act` under a kernel-backed lock without creating the lock's parent directory.
@@ -87,16 +82,12 @@ def withExistingLockTimeout
     (lockPath : System.FilePath)
     (timeoutMs : Nat)
     (act : IO α) : IO α := do
-  let handle ← openExistingLockHandle lockPath
   let startedNanos ← IO.monoNanosNow
-  acquireLockUntil handle lockPath {
+  let deadline := {
     timeoutMs
     startedNanos
     deadlineNanos := startedNanos + timeoutMs * 1000000
   }
-  try
-    act
-  finally
-    handle.unlock
+  withAcquiredLock lockPath .readWrite (fun handle => acquireLockUntil handle lockPath deadline) act
 
 end Beam.Cli

@@ -72,18 +72,6 @@ def registryEndpointSummary (entry : SessionDescriptor) : String :=
   | some endpoint => endpointSummary endpoint
   | none => "invalid"
 
-def registryPidStatus (entry : SessionDescriptor) : IO String := do
-  let recorded : Beam.RecordedPid := { pid := entry.pid, domain? := entry.pidDomain? }
-  try
-    match ← recorded.observe with
-    | .invalid => pure "unknown"
-    | .local true => pure "alive"
-    | .local false => pure "not alive"
-    | .differentDomain => pure "different PID domain"
-    | .unknownDomain => pure "unavailable"
-  catch _ =>
-    pure "unavailable"
-
 def startupLogTail?
     (root : System.FilePath)
     (explicitControlDir? : Option System.FilePath := none) :
@@ -100,38 +88,6 @@ def startupLogTail?
       pure none
   catch _ =>
     pure none
-
-private def jsonStringField? (json : Json) (field : String) : Option String :=
-  match json.getObjValAs? String field with
-  | .ok value => some value
-  | .error _ => none
-
-private def jsonNonNullField (json : Json) (field : String) : Bool :=
-  match json.getObjVal? field with
-  | .ok Json.null => false
-  | .ok _ => true
-  | .error _ => false
-
-def daemonDebugWarnings (debug : Json) : Array String := Id.run do
-  let mut warnings := #[]
-  let pidHint :=
-    "Persisted PIDs are diagnostic only; do not reclaim or replace the session from PID status alone."
-  if jsonNonNullField debug "registry" then
-    match jsonStringField? debug "registryPidStatus" with
-    | some "not alive" =>
-        let detail :=
-          if jsonNonNullField debug "registryEndpoint" then
-            " while a registry endpoint is recorded"
-          else
-            ""
-        warnings := warnings.push
-          s!"Beam daemon registry pid is not alive{detail}; stats/open-files may come from a live endpoint with stale registry metadata. {pidHint}"
-    | some "unavailable" =>
-        warnings := warnings.push
-          s!"Beam could not verify the daemon registry pid; stats/open-files may reflect a daemon whose registry metadata cannot be trusted. {pidHint}"
-    | _ =>
-        pure ()
-  warnings
 
 private def optionLine (label : String) : Option String → Option String
   | none => none
@@ -152,7 +108,6 @@ def daemonRegistryContext?
     | .malformed detail =>
         pure <| some s!"Beam daemon registry ({path}):\n  status: malformed\n  detail: {detail}"
     | .current entry =>
-        let pidStatus ← registryPidStatus entry
         let workspaceLines := entry.workspaces.toList.flatMap fun workspace =>
           ([
             s!"  workspace: {workspace.workspaceId}",
@@ -166,13 +121,11 @@ def daemonRegistryContext?
           s!"  schemaVersion: {entry.schemaVersion}",
           s!"  lifecycle: {repr entry.lifecycle}",
           s!"  daemonId: {entry.daemonId}",
-          s!"  pid: {entry.pid} ({pidStatus})",
+          s!"  pid: {entry.pid} (diagnostic only)",
           s!"  endpoint: {registryEndpointSummary entry}",
           s!"  startedAt: {entry.startedAt}",
           s!"  configHash: {entry.configHash}"
-        ] ++
-          workspaceLines ++
-          (optionLine "pidDomain" entry.pidDomain?).toList)
+        ] ++ workspaceLines)
         pure <| some <| String.intercalate "\n" lines
   catch _ =>
     pure none
@@ -183,10 +136,6 @@ def daemonDebugContextJson
   let registryFile ← registryPathFor root explicitControlDir?
   let registryRead ← readRegistryAt registryFile
   let registry := registryRead.entry?
-  let registryPidStatus ←
-    match registry with
-    | some entry => some <$> registryPidStatus entry
-    | none => pure none
   let startupLogTail ← startupLogTail? root explicitControlDir?
   let incidents ← recentDaemonFailureIncidentJson root 5 explicitControlDir?
   pure <| Json.mkObj <|
@@ -199,7 +148,6 @@ def daemonDebugContextJson
       ("registry", match registry with
         | some entry => entry.redactedJson
         | none => Json.null),
-      ("registryPidStatus", match registryPidStatus with | some status => toJson status | none => Json.null),
       ("registryEndpoint", match registry.map registryEndpointSummary with | some endpoint => toJson endpoint | none => Json.null),
       ("recentDaemonIncidents", toJson incidents)
     ] ++

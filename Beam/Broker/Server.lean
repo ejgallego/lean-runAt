@@ -934,10 +934,30 @@ private def modifyCurrentSessionIfMatching
   | none =>
       pure ()
 
+inductive ServerMode where
+  /-- A separately managed broker, optionally carrying a public generation identity. -/
+  | standalone (identity? : Option DaemonIdentity)
+  /-- A wrapper-owned broker whose identity and request capability are inseparable. -/
+  | wrapper (identity : DaemonIdentity) (capability : String)
+
+def ServerMode.identity? : ServerMode → Option DaemonIdentity
+  | .standalone identity? => identity?
+  | .wrapper identity _ => some identity
+
+private def ServerMode.validate : ServerMode → Except String Unit
+  | .standalone none => pure ()
+  | .standalone (some identity) => do
+      unless !identity.daemonId.isEmpty && !identity.configHash.isEmpty do
+        throw "daemon identity values must be non-empty"
+  | .wrapper identity capability => do
+      unless !identity.daemonId.isEmpty && !identity.configHash.isEmpty do
+        throw "wrapper-owned daemon identity values must be non-empty"
+      unless !capability.isEmpty do
+        throw "wrapper-owned daemon capability must be non-empty"
+
 structure ServerRuntime where
   state : Std.Mutex State
-  daemonIdentity? : Option DaemonIdentity
-  private daemonCapability? : Option String
+  private mode : ServerMode
   activeRequests : ActiveRequestRegistry
   private closeMutex : Std.Mutex Bool
   private closeDone : IO.Promise (Except IO.Error Unit)
@@ -971,7 +991,7 @@ private def ServerRuntime.statsResponse
     (workspaceId? : Option WorkspaceId := none) : IO Response := do
   let payload ← server.withState <| statsPayload workspaceId?
   let payload :=
-    match server.daemonIdentity? with
+    match server.mode.identity? with
     | some identity => payload.setObjVal! "daemonIdentity" (toJson identity)
     | none => payload
   pure <| Response.success payload
@@ -979,16 +999,17 @@ private def ServerRuntime.statsResponse
 def ServerRuntime.create
     (config : BrokerConfig)
     (workspaceId : WorkspaceId)
-    (daemonIdentity? : Option DaemonIdentity := none)
-    (daemonCapability? : Option String := none) : IO ServerRuntime := do
+    (mode : ServerMode := .standalone none) : IO ServerRuntime := do
   unless validWorkspaceId workspaceId do
     throw <| IO.userError "workspace id must be non-empty"
+  match mode.validate with
+  | .ok () => pure ()
+  | .error err => throw <| IO.userError err
   let startMonoNanos ← IO.monoNanosNow
   let state := mkInitialState config workspaceId startMonoNanos
   pure {
     state := ← Std.Mutex.new state
-    daemonIdentity?
-    daemonCapability?
+    mode
     activeRequests := ← ActiveRequestRegistry.create
     closeMutex := ← Std.Mutex.new false
     closeDone := ← IO.Promise.new
@@ -2479,16 +2500,18 @@ private def ServerRuntime.withRequestAdmission
   let startedAt ← IO.monoNanosNow
   traceBroker
     s!"dispatch start op={req.op.key} clientRequestId={optionLabel req.clientRequestId?}"
-  if let some expected := server.daemonCapability? then
-    unless req.daemonCapability? == some expected do
-      let resp := errorResponseFor .invalidParams "invalid Beam daemon capability"
-      recordDispatchMetrics server req resp startedAt
-      return resp
-    if req.op == .initWorkspace || req.op == .listWorkspaces || req.op == .dropWorkspace then
-      let resp := errorResponseFor .invalidParams
-        s!"broker op '{req.op.key}' is unavailable in wrapper-owned daemon mode"
-      recordDispatchMetrics server req resp startedAt
-      return resp
+  match server.mode with
+  | .standalone _ => pure ()
+  | .wrapper _ expected =>
+      unless req.daemonCapability? == some expected do
+        let resp := errorResponseFor .invalidParams "invalid Beam daemon capability"
+        recordDispatchMetrics server req resp startedAt
+        return resp
+      if req.op == .initWorkspace || req.op == .listWorkspaces || req.op == .dropWorkspace then
+        let resp := errorResponseFor .invalidParams
+          s!"broker op '{req.op.key}' is unavailable in wrapper-owned daemon mode"
+        recordDispatchMetrics server req resp startedAt
+        return resp
   match req.validateFields with
   | .error err =>
       let resp := errorResponseFor .invalidParams err
@@ -2793,10 +2816,9 @@ private def acquireDaemonResources
     (opts : CliOptions)
     (config : BrokerConfig)
     (workspaceId : WorkspaceId)
-    (daemonIdentity? : Option DaemonIdentity)
-    (daemonCapability? : Option String)
+    (mode : ServerMode)
     (root : System.FilePath) : IO DaemonResources := do
-  let runtime ← ServerRuntime.create config workspaceId daemonIdentity? daemonCapability?
+  let runtime ← ServerRuntime.create config workspaceId mode
   let transport ←
     try
       DaemonTransport.create opts.endpoint
@@ -2809,11 +2831,11 @@ private def acquireDaemonResources
       throwAfterBestEffortCleanup err <| closeDaemonParts runtime transport none none
   let ownerWatcher? ←
     try
-      if opts.sessionOwnerStdin then
-        some <$> IO.asTask (prio := Task.Priority.dedicated)
-          (watchSessionOwnerStdin runtime transport)
-      else
-        pure none
+      match mode with
+      | .wrapper _ _ =>
+          some <$> IO.asTask (prio := Task.Priority.dedicated)
+            (watchSessionOwnerStdin runtime transport)
+      | .standalone _ => pure none
     catch err =>
       throwAfterBestEffortCleanup err <|
         closeDaemonParts runtime transport (some rootWatcher) none
@@ -2824,11 +2846,10 @@ private def withDaemonResources
     (opts : CliOptions)
     (config : BrokerConfig)
     (workspaceId : WorkspaceId)
-    (daemonIdentity? : Option DaemonIdentity)
-    (daemonCapability? : Option String)
+    (mode : ServerMode)
     (root : System.FilePath)
     (act : DaemonResources → IO α) : IO α := do
-  let resources ← acquireDaemonResources opts config workspaceId daemonIdentity? daemonCapability? root
+  let resources ← acquireDaemonResources opts config workspaceId mode root
   try
     act resources
   finally
@@ -2853,17 +2874,17 @@ def main (args : List String) : IO Unit := do
         throw <| IO.userError "--daemon-id requires --config-hash"
     | none, some _ =>
         throw <| IO.userError "--config-hash requires --daemon-id"
-  let daemonCapability? ←
+  let mode : ServerMode ←
     if opts.sessionOwnerStdin then
+      let some identity := daemonIdentity?
+        | throw <| IO.userError
+            "wrapper-owned Beam daemon identity and stdin capability must be supplied together"
       let capability := (← (← IO.getStdin).getLine).trimAscii.toString
       if capability.isEmpty then
         throw <| IO.userError "wrapper-owned Beam daemon received an empty capability"
-      pure <| some capability
+      pure <| .wrapper identity capability
     else
-      pure none
-  if opts.sessionOwnerStdin && daemonIdentity?.isNone then
-    throw <| IO.userError
-      "wrapper-owned Beam daemon identity and stdin capability must be supplied together"
+      pure <| .standalone daemonIdentity?
   let root ← Beam.resolveExistingPath <| System.FilePath.mk root
   let leanPlugin? ← opts.leanPlugin?.mapM (fun path => Beam.resolveExistingPath <| System.FilePath.mk path)
   let config : BrokerConfig := {
@@ -2872,7 +2893,7 @@ def main (args : List String) : IO Unit := do
     leanPlugin? := leanPlugin?
     rocqCmd? := opts.rocqCmd?
   }
-  withDaemonResources opts config workspaceId daemonIdentity? daemonCapability? root fun resources =>
+  withDaemonResources opts config workspaceId mode root fun resources =>
     acceptLoop resources.runtime resources.transport
 
 end Beam.Broker

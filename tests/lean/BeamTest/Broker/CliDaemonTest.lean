@@ -26,26 +26,13 @@ private def require (label : String) (cond : Bool) : IO Unit := do
     throw <| IO.userError label
 
 private def projectDaemonClientForTest
-    (endpoint : Beam.Broker.Transport.Endpoint) : Beam.Cli.ProjectDaemonClient := {
+    (endpoint : Beam.Broker.Transport.Endpoint)
+    (controlDir : System.FilePath) : Beam.Cli.ProjectDaemonClient := {
   endpoint
   capability := "test-capability"
+  workspaceId := Beam.Cli.projectDaemonWorkspaceId
+  controlDir
 }
-
-private def checkDaemonDebugWarnings : IO Unit := do
-  let debug := Json.mkObj [
-    ("registry", Json.mkObj [
-      ("daemonId", toJson "fixture-daemon"),
-      ("pid", toJson (424242 : Nat))
-    ]),
-    ("registryPidStatus", toJson "not alive"),
-    ("registryEndpoint", toJson "tcp://127.0.0.1:42424")
-  ]
-  let warnings := Beam.Daemon.daemonDebugWarnings debug
-  require "dead registry pid should produce a feedback warning"
-    (warnings.any (fun warning => warning.contains "registry pid is not alive"))
-  require "dead registry pid warning should reject PID-based reclamation"
-    (warnings.any (fun warning =>
-      warning.contains "diagnostic only" && warning.contains "do not reclaim"))
 
 private def expectIoErrorMessage (label : String) (act : IO α) : IO String := do
   let result ←
@@ -249,7 +236,7 @@ private def checkPlainBrokerTaskCancellation : IO Unit := do
       serveCancelablePlainRequest listener requestObserved
     let requestTask ← IO.asTask (prio := Task.Priority.dedicated) <|
       Beam.Cli.requestBroker (System.FilePath.mk "/tmp")
-        (projectDaemonClientForTest endpoint) { op := .stats }
+        (projectDaemonClientForTest endpoint (System.FilePath.mk "/tmp")) { op := .stats }
     let some _ ← IO.wait requestObserved.result?
       | throw <| IO.userError "plain wrapper request observation promise dropped"
     IO.cancel requestTask
@@ -280,24 +267,11 @@ private def sampleBrokerHandle : Beam.Broker.Handle := {
 }
 
 private def checkProjectDaemonWorkspaceRouting : IO Unit := do
-  let ensureReq := Beam.Cli.inProjectDaemonWorkspace ({ op := .ensure } : Beam.Broker.Request)
-  require "CLI workspace-bound requests should select the project daemon workspace"
-    (ensureReq.workspaceId? == some Beam.Cli.projectDaemonWorkspaceId)
-  let statsReq := Beam.Cli.inProjectDaemonWorkspace ({ op := .stats } : Beam.Broker.Request)
-  require "CLI stats should be scoped to the project daemon workspace"
-    (statsReq.workspaceId? == some Beam.Cli.projectDaemonWorkspaceId)
-  let shutdownReq := Beam.Cli.inProjectDaemonWorkspace ({ op := .shutdown } : Beam.Broker.Request)
-  require "process-wide CLI shutdown should remain unscoped" shutdownReq.workspaceId?.isNone
-  let explicitReq := Beam.Cli.inProjectDaemonWorkspace ({
-    op := .ensure
-    workspaceId? := some "maintenance-fixture"
-  } : Beam.Broker.Request)
-  require "CLI routing should preserve an explicitly selected workspace"
-    (explicitReq.workspaceId? == some "maintenance-fixture")
   let selectedClient : Beam.Cli.ProjectDaemonClient := {
     endpoint := .tcp 42424
     capability := "test-capability"
     workspaceId := "selected-workspace"
+    controlDir := System.FilePath.mk "/tmp/beam-selected-control"
   }
   let selectedCancel := Beam.Cli.inSelectedDaemonWorkspace selectedClient {
     op := .cancel
@@ -615,16 +589,13 @@ private def checkDaemonFailureContext : IO Unit := do
     let registryPath ← Beam.Daemon.registryPath root
     if let some parent := registryPath.parent then
       IO.FS.createDirAll parent
-    let pidDomain? ← Beam.currentPidDomain?
     let entry : Beam.Daemon.SessionDescriptor := {
       schemaVersion := Beam.Daemon.registrySchemaVersion
       lifecycle := .live
       daemonId := "daemon-test"
       capability := "test-capability"
       pid := 999999999
-      pidDomain?
       ownerPid := 999999999
-      ownerPidDomain? := pidDomain?
       port? := some 42424
       workspaces := #[{
         workspaceId := Beam.Cli.projectDaemonWorkspaceId
@@ -644,7 +615,8 @@ private def checkDaemonFailureContext : IO Unit := do
     let msg ← Beam.Cli.daemonFailureMessage root failure
     requireSubstring "daemon failure context should include registry path" "Beam daemon registry" msg
     requireSubstring "daemon failure context should include daemon id" "daemonId: daemon-test" msg
-    requireSubstring "daemon failure context should include dead pid status" "pid: 999999999 (not alive)" msg
+    requireSubstring "daemon failure context should mark persisted pids as diagnostic"
+      "pid: 999999999 (diagnostic only)" msg
     requireSubstring "daemon failure context should include endpoint" "endpoint: tcp://127.0.0.1:42424" msg
     requireSubstring "daemon failure context should include toolchain" "toolchain: leanprover/lean4:test" msg
     requireSubstring "daemon failure context should include bundle id" "bundleId: bundle-test" msg
@@ -668,8 +640,6 @@ private def checkDaemonFailureContext : IO Unit := do
       (incidentRegistry.daemonId == "daemon-test")
     require "daemon failure incident must redact the per-generation capability"
       (incidentRegistry.capability == "<redacted>")
-    requireJsonString "daemon failure incident should include registry pid status"
-      "registryPidStatus" "not alive" incidentJson
     requireJsonString "daemon failure incident should include endpoint summary"
       "registryEndpoint" "tcp://127.0.0.1:42424" incidentJson
     requireJsonString "daemon failure incident should include startup log path"
@@ -864,8 +834,9 @@ private def checkBrokerConnectionClosedIncident : IO Unit := do
         match endpoint with
         | .tcp port => some port.toNat
       writeTestRegistryEntry root port?
+      let controlDir ← Beam.Daemon.controlDir root
       let msg ← expectIoErrorMessage "broker connection close should surface daemon failure" <|
-        Beam.Cli.callBrokerQuiet root (projectDaemonClientForTest endpoint) { op := .stats }
+        Beam.Cli.callBrokerQuiet root (projectDaemonClientForTest endpoint controlDir) { op := .stats }
       requireSubstring "broker connection close should preserve transport failure"
         "Beam daemon receive failed:" msg
       requireSubstring "broker connection close should include incident path"
@@ -1027,34 +998,6 @@ private def createSymlink
   }
   if out.exitCode != 0 then
     throw <| IO.userError s!"failed to create {label} symlink\n{out.stderr}"
-
-private def checkCurrentPidDomain : IO Unit := do
-  let selfPid := (← IO.Process.getPID).toNat
-  let domain? ← Beam.currentPidDomain?
-  match domain? with
-  | some domain =>
-      require "a known PID domain should not be empty" (!domain.isEmpty)
-      let recordedLocal : Beam.RecordedPid := { pid := selfPid, domain? := some domain }
-      require "a matching PID domain should permit a local liveness observation"
-        ((← recordedLocal.observe) == .local true)
-      let different : Beam.RecordedPid := {
-        pid := selfPid
-        domain? := some (domain ++ "-other")
-      }
-      require "a different PID domain should prevent a local liveness observation"
-        ((← different.observe) == .differentDomain)
-  | none =>
-      pure ()
-  let unknown : Beam.RecordedPid := { pid := selfPid, domain? := none }
-  require "an unknown recorded PID domain must fail closed"
-    ((← unknown.observe) == .unknownDomain)
-  let invalid : Beam.RecordedPid := { pid := 0, domain? }
-  require "PID zero should be classified before domain observation"
-    ((← invalid.observe) == .invalid)
-  let system ← Beam.readCmdTrim "uname" #["-s"]
-  if system == "Darwin" then
-    require "Darwin processes should share the explicit host PID domain"
-      (domain? == some "host:Darwin")
 
 private def checkPathCanonicalization : IO Unit := do
   let stamp ← IO.monoNanosNow
@@ -1387,7 +1330,6 @@ def main : IO Unit := do
   checkLeanOperationRequests
   checkDiagnosticScopeArgs
   checkStartupRetryPolicy
-  checkDaemonDebugWarnings
   checkDaemonFailureContext
   checkDaemonFailureUnreadableStartupLog
   checkTypedDaemonFailureClassification
@@ -1400,7 +1342,6 @@ def main : IO Unit := do
   checkDoctorDaemonFailureIncidentLines
   checkPathRelativeToRoot
   checkLeanModuleNamePathHelpers
-  checkCurrentPidDomain
   checkPathCanonicalization
   checkLockLifecycle
   checkLeanToolchainPolicyParsing

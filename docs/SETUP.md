@@ -245,7 +245,9 @@ control directories. `BEAM_CONTROL_ROOT=/writable/base` is the sandbox convenien
 derives a separate hashed directory for each canonical root below that base. An explicit control
 directory is also the intended future location for a statically configured multi-workspace CLI
 session. The current public owner command still publishes one frozen workspace, and wrapper mode
-does not allow runtime `init_workspace`, `list_workspaces`, or `drop_workspace` requests.
+does not allow runtime `init_workspace`, `list_workspaces`, or `drop_workspace` requests. The
+supported semantic `request-stream` also excludes process-wide `shutdown` and `reset_stats`; use
+the dedicated `lean-beam shutdown` command for lifecycle control.
 Use a stable external control directory when ownership must remain fenced while the project path is
 deleted and recreated; deleting a project-local `.beam` necessarily deletes its default fence.
 

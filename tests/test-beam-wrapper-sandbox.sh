@@ -191,13 +191,6 @@ fi
 
 daemon_id_1="$(read_json_field "$registry" daemonId)"
 port_1="$(read_json_field "$registry" port)"
-pid_domain_1="$(read_json_field "$registry" pidDomain 2>/dev/null || true)"
-owner_pid_domain_1="$(read_json_field "$registry" ownerPidDomain 2>/dev/null || true)"
-if [ -z "$pid_domain_1" ] || [ -z "$owner_pid_domain_1" ]; then
-  echo "expected the registry to record daemon and owner PID domains" >&2
-  sed -n '1,160p' "$registry" >&2
-  exit 1
-fi
 
 doctor_out="$(sandbox_beam doctor)"
 if ! printf '%s\n' "$doctor_out" | grep -q 'daemon status: live'; then

@@ -134,8 +134,9 @@ apply the source edit.
 For programmatic local consumers of a wrapper session, the supported machine-readable surface is
 `lean-beam --root ROOT [--control-dir DIR] request-stream <json|->`. The request JSON contains the
 operation, its arguments, and a nonempty `clientRequestId`; it cannot select a workspace, root, or
-capability. The wrapper canonicalizes the explicit root, selects its static workspace binding from
-the session descriptor, and injects routing and authentication. Wrapper stderr is human-facing.
+capability, and it cannot issue workspace-administration or process-wide control operations. The
+wrapper canonicalizes the explicit root, selects its static workspace binding from the session
+descriptor, and injects routing and authentication. Wrapper stderr is human-facing.
 The port-oriented `beam-client request-stream` remains maintainer/debug tooling for separately
 managed brokers. A wrapper daemon exists only while its foreground `lean-beam ensure --hold` owner
 is alive. Attaching requests do not acquire daemon ownership. A separately launched standalone
@@ -193,13 +194,14 @@ Exact event ordering and examples live in
   marks admitted requests for cancellation, and closes backend sessions and the daemon after those
   requests drain; a backend success that completed before cancellation remains successful. This
   happens without heartbeat timeouts or filesystem leases and works across PID namespaces because
-  endpoint, root, and generation-identity validation are authoritative when PID identity is not
-  locally observable. Each wrapper request carries a random per-generation capability from the
-  mode-`0600` registry. A paused owner retains the session; a killed owner closes the pipe; explicit
+  authority does not depend on observing persisted PIDs. Endpoint, root, and generation-identity
+  validation are authoritative. Each wrapper request carries a random per-generation capability
+  from the mode-`0600` registry. A paused owner retains the session; a killed owner closes the pipe; explicit
   `lean-beam shutdown` changes the descriptor to `draining`, and that fence remains until normal
   owner cleanup has reaped the daemon leader after graceful or process-group teardown.
-  Ordinary lookups use the frozen workspace configuration and preserve unsafe session state. A
-  competing owner computes its proposed configuration but cannot replace a mismatched live owner.
+  Ordinary lookups take no mutation lock, create no control files, use the frozen workspace
+  configuration, and preserve unsafe session state. A competing owner computes its proposed
+  configuration but cannot replace a mismatched live owner.
 - Abnormal or ambiguous state is never reclaimed automatically. The descriptor remains as a fence
   after an unexpected broker/owner exit. Once the operator has established that the matching
   session is no longer authoritative, `lean-beam --root ROOT recover --generation ID` quarantines

@@ -171,6 +171,9 @@ if ! grep -Fq "expected backend 'lean' or 'rocq'" "$invalid_backend_err"; then
   exit 1
 fi
 
+# An attaching command observes descriptor state but does not acquire the mutation lock or create
+# control-plane files when no owner exists.
+remove_tmp_tree_within "$tmp1/.beam" "$tmp1"
 missing_owner_out="$tmp1/missing-owner.out"
 missing_owner_err="$tmp1/missing-owner.err"
 if "$beam_script" --root "$tmp1" ensure > "$missing_owner_out" 2> "$missing_owner_err"; then
@@ -181,6 +184,11 @@ fi
 if ! grep -Fq "lean-beam ensure --hold" "$missing_owner_err"; then
   echo "expected missing-owner error to name the recovery command" >&2
   cat "$missing_owner_err" >&2
+  exit 1
+fi
+if [ -e "$tmp1/.beam" ]; then
+  echo "expected missing-owner attachment not to create the project control directory" >&2
+  find "$tmp1/.beam" -maxdepth 2 -print >&2 || true
   exit 1
 fi
 
@@ -224,7 +232,6 @@ owner1_pid="$hold_pid"
 daemon1_pid="$(read_json_field "$registry" pid)"
 daemon1_id="$(read_json_field "$registry" daemonId)"
 recorded_owner_pid="$(read_json_field "$registry" ownerPid)"
-owner_domain="$(read_json_field "$registry" ownerPidDomain)"
 case "$recorded_owner_pid" in
   ''|*[!0-9]*|0)
     echo "expected registry to record a positive session-owner PID" >&2
@@ -232,11 +239,6 @@ case "$recorded_owner_pid" in
     exit 1
     ;;
 esac
-if [ -z "$owner_domain" ]; then
-  echo "expected registry to record the session owner's PID domain" >&2
-  cat "$registry" >&2
-  exit 1
-fi
 if ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; then
   echo "expected both the wrapper owner and daemon to remain alive" >&2
   exit 1
@@ -273,6 +275,26 @@ fi
 if ! grep -Fq "session-owned fields: workspaceId" "$tmp1/machine-route.err"; then
   echo "expected machine routing rejection to name the forbidden field" >&2
   cat "$tmp1/machine-route.err" >&2
+  exit 1
+fi
+if "$beam_script" --root "$tmp1" request-stream \
+    '{"op":"shutdown","clientRequestId":"machine-shutdown"}' \
+    > "$tmp1/machine-shutdown.out" 2> "$tmp1/machine-shutdown.err"; then
+  echo "expected semantic machine requests not to expose process-wide shutdown" >&2
+  exit 1
+fi
+if ! grep -Fq "not available through a project session" "$tmp1/machine-shutdown.err"; then
+  echo "expected machine shutdown rejection to explain the project-session boundary" >&2
+  cat "$tmp1/machine-shutdown.err" >&2
+  exit 1
+fi
+machine_after_shutdown_json="$("$beam_script" --root "$tmp1" request-stream \
+  '{"op":"stats","clientRequestId":"machine-after-shutdown"}')"
+assert_json_field_equals \
+  "rejected machine shutdown leaves daemon live" "$machine_after_shutdown_json" payload.ok true
+if ! kill -0 "$daemon1_pid" 2>/dev/null || \
+    [ "$(read_json_field "$registry" daemonId)" != "$daemon1_id" ]; then
+  echo "expected rejected machine shutdown to preserve the selected generation" >&2
   exit 1
 fi
 

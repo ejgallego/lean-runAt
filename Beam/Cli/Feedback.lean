@@ -104,11 +104,12 @@ private def collectDaemonPayload
           let some workspace ← Beam.Cli.sessionWorkspaceForRoot? entry root
             | return (Json.null, Json.null,
                 warnings.push "the Beam session does not contain the selected project root")
+          let controlDir ← Beam.Daemon.controlDirFor root explicitControlDir?
           let client : ProjectDaemonClient := {
             endpoint
             capability := entry.capability
             workspaceId := workspace.workspaceId
-            controlDir? := explicitControlDir?
+            controlDir
           }
           let statsResp ← sendRequest endpoint <| client.authorize {
             op := .stats
@@ -150,7 +151,6 @@ private def collectNonConfidential
           warnings.push "could not infer project root; daemon debug context was not collected")
     | some root => do
         let daemon ← Beam.Daemon.daemonDebugContextJson root explicitControlDir?
-        let warnings := warnings ++ Beam.Daemon.daemonDebugWarnings daemon
         let (stats, openDocs, warnings) ← collectDaemonPayload root explicitControlDir? warnings
         pure (stats, openDocs, daemon, warnings)
   pure {

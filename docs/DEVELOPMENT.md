@@ -413,14 +413,15 @@ EOF closes admission, marks admitted requests for cancellation, shuts down backe
 stops the listener. There is no heartbeat, lease, or time-based retirement fence.
 
 Ordinary wrapper commands never start a daemon or recompute its desired toolchain/bundle
-configuration. Under the session control lock they select the canonical root's frozen workspace
-binding and require an endpoint that answers for that workspace, root, and exact generation.
-Identity probes have a bounded response deadline. A silent or malformed endpoint fails closed.
-Ordinary lookup is observation-only: absent, legacy, malformed, unsupported, draining, unreachable,
-or otherwise ambiguous descriptor states are never rewritten by an attaching command. Persisted
-PIDs are diagnostic observations, never signal capabilities or automatic stale-reclamation proof.
-Only the foreground owner may force termination, through its retained child handle and process
-group.
+configuration. Without taking the session mutation lock or creating control files, they select the
+canonical root's frozen workspace binding and require an endpoint that answers for that workspace,
+root, and exact generation. Atomic descriptor publication plus endpoint authentication makes a
+concurrent lifecycle change fail closed. Identity probes have a bounded response deadline. A silent
+or malformed endpoint fails closed. Ordinary lookup is observation-only: absent, legacy, malformed,
+unsupported, draining, unreachable, or otherwise ambiguous descriptor states are never rewritten
+by an attaching command. Persisted PIDs are display-only diagnostics, never probed, signalled, or
+used as automatic stale-reclamation proof. Only the foreground owner may force termination, through
+its retained child handle and process group.
 
 The owner watches its exact descriptor generation and daemon child. `lean-beam shutdown` changes
 that generation from `live` to `draining` under the control lock before sending authenticated
@@ -436,10 +437,13 @@ disappears, cleanup uses the already resolved control path without recreating th
 
 Human commands may infer the nearest project root. The supported machine stream requires explicit
 `--root` and a nonempty `clientRequestId`; its semantic JSON cannot supply `root`, `workspaceId`,
-capability, or dynamic workspace operations. The wrapper selects the descriptor binding and injects
-session metadata. Raw port-oriented `beam-client` requests are maintainer/debug tooling. A
-wrapper-owned daemon rejects `initWorkspace`, `listWorkspaces`, and `dropWorkspace`; a separately
-launched broker retains the generic multi-workspace surface and has its own explicit owner.
+capability, dynamic workspace operations, or process-wide control operations such as `shutdown` and
+`resetStats`. The wrapper selects the descriptor binding and injects session metadata. Lifecycle
+shutdown remains the dedicated `lean-beam shutdown` command so it can publish `draining` first. Raw
+port-oriented `beam-client` requests are maintainer/debug tooling. A wrapper-owned daemon rejects
+`initWorkspace`, `listWorkspaces`, and `dropWorkspace`; a separately launched broker retains the
+generic multi-workspace surface and has its own explicit owner. Broker runtime ownership is a typed
+`ServerMode`: wrapper identity and capability cannot be constructed independently.
 
 The default control directory is `<root>/.beam`, discoverable to project-scoped agents.
 `--control-dir DIR` is an exact, stateless selection that every participant must repeat.
@@ -466,13 +470,12 @@ Keep these invariants covered:
   [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh) and
   [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)
 
-Generic process helpers and the typed `RecordedPid.observe` boundary live in
-[Beam/System.lean](../Beam/System.lean). Persisted registry PIDs pass through that boundary only for
-conservative liveness reporting. Kernel-backed stable file locks live in
+Generic process helpers live in [Beam/System.lean](../Beam/System.lean). Kernel-backed stable file locks live in
 [Beam/Cli/Lock.lean](../Beam/Cli/Lock.lean); lock files remain after release so contenders always
 coordinate on the same inode, while the kernel releases ownership when a process exits. Project
-daemon control locks use a bounded wait so a live but stuck wrapper process produces owner
-diagnostics instead of making later clients wait silently;
+daemon control mutations use a bounded wait so a live but stuck wrapper process produces owner
+diagnostics instead of making another mutation wait silently; ordinary attachment does not take
+this lock.
 `BEAM_CONTROL_LOCK_TIMEOUT_MS` can shorten or lengthen that wait for local debugging. Bundle build
 locks intentionally keep the lower-level unbounded helper because another process may legitimately
 be compiling a helper bundle. The shell installer's `.install-lock` remains an atomic directory
@@ -504,7 +507,7 @@ normal-priority work on low-core runners. The cheap regression guard is
 
 Shared registry, startup-log, and incident paths live in
 [Beam/Daemon/Paths.lean](../Beam/Daemon/Paths.lean). Daemon registry management, explicit owner
-lifetime, endpoint selection, and typed PID-domain cleanup live in
+lifetime, endpoint selection, and explicit non-signalling recovery live in
 [Beam/Cli/DaemonManager.lean](../Beam/Cli/DaemonManager.lean). Broker request plumbing,
 progress messages, cancellation-on-interrupt, and response failure notes live in
 [Beam/Cli/Broker.lean](../Beam/Cli/Broker.lean). User-facing stdout/stderr formatting helpers live
