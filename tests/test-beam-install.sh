@@ -307,7 +307,7 @@ assert_install_rejects_marker() {
   remove_tmp_file "$marker_err"
 }
 
-rsync -a --exclude='.git' ./ "$source_checkout"/
+rsync -a --exclude='.git' --exclude='.beam/' ./ "$source_checkout"/
 path_no_elan="$(path_without_elan)"
 if PATH="$path_no_elan" command -v elan >/dev/null 2>&1; then
   echo "failed to construct a PATH without elan for the negative install test" >&2
@@ -1580,6 +1580,13 @@ if ! printf '%s\n' "$mcp_self_check_out" | grep -q 'workspace: explicit root des
   echo "expected installed MCP self-check to exercise an explicit workspace descriptor" >&2
   printf '%s\n' "$mcp_self_check_out" >&2
   exit 1
+fi
+if [ -d "$project_root/.beam" ]; then
+  project_beam_mode="$(python3 -c 'import os, stat, sys; print(format(stat.S_IMODE(os.lstat(sys.argv[1]).st_mode), "o"))' "$project_root/.beam")"
+  if [ "$project_beam_mode" != "700" ]; then
+    echo "expected Beam-created project state to be private, got mode $project_beam_mode" >&2
+    exit 1
+  fi
 fi
 
 unsupported_project_root="$tmp_root/external-project-unsupported"

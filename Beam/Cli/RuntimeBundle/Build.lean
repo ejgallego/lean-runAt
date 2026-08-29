@@ -270,7 +270,7 @@ def ensureToolchainBundle (root home : System.FilePath) (toolchain : String) : I
   match ← existingToolchainBundleInAnyForFingerprint? (← installBundleCacheRoots) home toolchain fingerprint with
   | some bundle => pure bundle
   | none =>
-      let cacheRoot ← runtimeBundleCacheRoot root
+      let cacheRoot ← runtimeBundleCacheRootForWrite root
       ensureToolchainBundleInForFingerprint cacheRoot home toolchain fingerprint
 
 def ensureDefaultDaemonHelpers (home : System.FilePath) : IO BundlePaths := do

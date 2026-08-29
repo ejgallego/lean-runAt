@@ -103,6 +103,37 @@ def runtimeBundleCacheRoot (root : System.FilePath) : IO System.FilePath := do
   | some path => pure (System.FilePath.mk path)
   | none => pure (beamStateDir root / runtimeBundlesDirName)
 
+private def privateBeamStateDirRights : IO.FileRight := {
+  user := { read := true, write := true, execution := true }
+}
+
+/--
+Create the project-local Beam state leaf privately when runtime bundle construction is the first
+Beam operation for a project. Existing state directories are never chmodded: wrapper ownership
+applies its stricter control-directory validation separately.
+-/
+def runtimeBundleCacheRootForWrite (root : System.FilePath) : IO System.FilePath := do
+  match ← IO.getEnv "BEAM_BUNDLE_DIR" with
+  | some path => pure (System.FilePath.mk path)
+  | none =>
+      let stateDir := beamStateDir root
+      unless ← stateDir.pathExists do
+        try
+          IO.FS.createDir stateDir
+        catch
+        | .alreadyExists .. =>
+            return stateDir / runtimeBundlesDirName
+        | err => throw err
+        try
+          IO.setAccessRights stateDir privateBeamStateDirRights
+        catch err =>
+          try
+            IO.FS.removeDir stateDir
+          catch _ =>
+            pure ()
+          throw err
+      pure (stateDir / runtimeBundlesDirName)
+
 def validatedLeanToolchainsPath (home : System.FilePath) : System.FilePath :=
   home / "validated-lean-toolchains"
 
