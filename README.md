@@ -104,7 +104,7 @@ including structured Lake options, dynamic libraries, and plugins already applie
 worker. Modules with batch-only `moreLeanArgs` fail with `saveUnsupportedSetup`: move shared `-D`
 settings to `leanOptions`, or use `lake build` when the arguments are intentionally batch-only. A
 running Lean server is not guaranteed to pick up Lake workspace configuration changes; after such a
-change, run `lean-beam shutdown`, then start a new foreground `lean-beam ensure --hold` wrapper
+change, run `lean-beam --root ROOT stop`, then start a new foreground `lean-beam serve` wrapper
 session before the next wrapper command that uses the Lean server. A successful
 checkpoint is normally sufficient while working; do not add an expensive clean build to every Beam
 loop. Final project validation should come from CI running `lake build` from clean Lake artifacts.

@@ -72,16 +72,32 @@ def projectRoot (opts : CliOptions) (backend : Backend) : IO System.FilePath := 
           let backendName := match backend with | .lean => "lean" | .rocq => "rocq"
           throw <| IO.userError s!"could not infer {backendName} project root; use --root PATH"
 
+def inferProjectRootAny (start : System.FilePath) : IO System.FilePath := do
+  let leanRoot? ← findRootUpwards start .lean
+  let rocqRoot? ← findRootUpwards start .rocq
+  match leanRoot?, rocqRoot? with
+  | none, none =>
+      throw <| IO.userError "could not infer project root; use --root PATH"
+  | some root, none | none, some root =>
+      pure root
+  | some leanRoot, some rocqRoot =>
+      if ← Beam.sameFilePath leanRoot rocqRoot then
+        pure leanRoot
+      else
+        throw <| IO.userError <|
+          "project root is ambiguous; found both " ++
+          s!"Lean root {leanRoot} and Rocq root {rocqRoot}; use --root PATH"
+
 def projectRootAny (opts : CliOptions) : IO System.FilePath := do
   match opts.explicitRoot? with
   | some root => pure root
+  | none => inferProjectRootAny (System.FilePath.mk ".")
+
+def explicitProjectRoot (opts : CliOptions) (action : String) : IO System.FilePath := do
+  match opts.explicitRoot? with
+  | some root => pure root
   | none =>
-      if let some root ← findRootUpwards (System.FilePath.mk ".") .lean then
-        pure root
-      else if let some root ← findRootUpwards (System.FilePath.mk ".") .rocq then
-        pure root
-      else
-        throw <| IO.userError "could not infer project root; use --root PATH"
+      throw <| IO.userError s!"{action} requires an explicit --root PATH"
 
 def leanToolchain (root : System.FilePath) : IO String := do
   let path := root / "lean-toolchain"

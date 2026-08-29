@@ -819,7 +819,7 @@ private def checkProjectRequestBoundary : IO Unit := do
     match fromJson? (α := ProjectRequest) (semanticJson.setObjVal! field (toJson "forbidden")) with
     | .ok _ => throw <| IO.userError s!"project request unexpectedly accepted session field '{field}'"
     | .error _ => pure ()
-  for op in [Op.initWorkspace, .listWorkspaces, .dropWorkspace, .resetStats, .shutdown] do
+  for op in [Op.ensure, .initWorkspace, .listWorkspaces, .dropWorkspace, .resetStats, .shutdown] do
     match fromJson? (α := ProjectRequest) <| Json.mkObj [
       ("op", toJson op),
       ("clientRequestId", toJson "control-request")

@@ -39,9 +39,9 @@ remove_owned_tmp_tree() {
 cleanup() {
   if [ -d "$tmp_repo/tests/rocq/Minimal" ]; then
     if [ -n "$rocq_cmd" ]; then
-      BEAM_ROCQ_CMD="$rocq_cmd" "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" shutdown > /dev/null 2>&1 || true
+      BEAM_ROCQ_CMD="$rocq_cmd" "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" stop > /dev/null 2>&1 || true
     else
-      "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" shutdown > /dev/null 2>&1 || true
+      "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" stop > /dev/null 2>&1 || true
     fi
   fi
   remove_owned_tmp_tree "$tmp_repo"
@@ -73,14 +73,14 @@ rsync -a \
   fi
   rocq_owner_err="$tmp_repo/rocq-owner.err"
   if [ -n "$rocq_cmd" ]; then
-    BEAM_ROCQ_CMD="$rocq_cmd" "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" ensure rocq --hold \
+    BEAM_ROCQ_CMD="$rocq_cmd" "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" serve rocq \
       > /dev/null 2>"$rocq_owner_err" &
   else
-    "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" ensure rocq --hold \
+    "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" serve rocq \
       > /dev/null 2>"$rocq_owner_err" &
   fi
   rocq_owner_pid="$!"
-  if ! wait_for_file_text "$rocq_owner_err" "owning Beam session" "Rocq session owner" 600 0.1; then
+  if ! wait_for_file_text "$rocq_owner_err" "serving Beam session" "Rocq session owner" 600 0.1; then
     exit 1
   fi
   if [ ! -x ".lake/build/bin/beam-daemon" ] || [ ! -x ".lake/build/bin/beam-client" ]; then
@@ -88,26 +88,26 @@ rsync -a \
     exit 1
   fi
   if [ -n "$rocq_cmd" ]; then
-    BEAM_ROCQ_CMD="$rocq_cmd" "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" shutdown > /dev/null
+    BEAM_ROCQ_CMD="$rocq_cmd" "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" stop > /dev/null
   else
-    "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" shutdown > /dev/null
+    "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" stop > /dev/null
   fi
   wait_for_exit "$rocq_owner_pid" "Rocq session owner" 120 0.1
   wait "$rocq_owner_pid"
   rocq_missing_out="$tmp_repo/rocq-missing-owner.out"
   rocq_missing_err="$tmp_repo/rocq-missing-owner.err"
   if [ -n "$rocq_cmd" ]; then
-    if BEAM_ROCQ_CMD="$rocq_cmd" "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" ensure rocq \
+    if BEAM_ROCQ_CMD="$rocq_cmd" "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" rocq-goals-after Demo.v 0 0 \
         >"$rocq_missing_out" 2>"$rocq_missing_err"; then
       echo "expected an ordinary Rocq command to require a session owner" >&2
       exit 1
     fi
-  elif "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" ensure rocq \
+  elif "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" rocq-goals-after Demo.v 0 0 \
       >"$rocq_missing_out" 2>"$rocq_missing_err"; then
     echo "expected an ordinary Rocq command to require a session owner" >&2
     exit 1
   fi
-  if ! grep -Fq "lean-beam ensure rocq --hold" "$rocq_missing_err"; then
+  if ! grep -Fq "lean-beam serve rocq" "$rocq_missing_err"; then
     echo "expected Rocq missing-owner recovery to name the Rocq ownership command" >&2
     cat "$rocq_missing_err" >&2
     exit 1

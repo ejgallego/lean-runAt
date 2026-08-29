@@ -32,7 +32,7 @@ cleanup() {
   local owner_pid owner_root
   if [ -x "${installed_lean_beam:-}" ]; then
     for owner_root in ${installed_owner_roots[@]+"${installed_owner_roots[@]}"}; do
-      "$installed_lean_beam" --root "$owner_root" shutdown > /dev/null 2>&1 || true
+      "$installed_lean_beam" --root "$owner_root" stop > /dev/null 2>&1 || true
     done
   fi
   for owner_pid in ${installed_owner_pids[@]+"${installed_owner_pids[@]}"}; do
@@ -736,11 +736,11 @@ start_installed_owner() {
   local owner_out="$tmp_root/$label-owner.out"
   local owner_err="$tmp_root/$label-owner.err"
   local owner_pid
-  "$installed_lean_beam" --root "$root" ensure --hold > "$owner_out" 2> "$owner_err" &
+  "$installed_lean_beam" --root "$root" serve > "$owner_out" 2> "$owner_err" &
   owner_pid="$!"
   installed_owner_pids+=("$owner_pid")
   installed_owner_roots+=("$root")
-  if ! wait_for_file_text "$owner_err" "owning Beam session" "$label session owner" 600 0.1; then
+  if ! wait_for_file_text "$owner_err" "serving Beam session" "$label session owner" 600 0.1; then
     echo "expected installed wrapper owner to become ready for $root" >&2
     cat "$owner_out" >&2
     cat "$owner_err" >&2
@@ -978,13 +978,13 @@ run_custom_toolchain_install_test() (
   assert_doctor_contains "custom toolchain" "$custom_doctor_out" 'bundle source: installed'
   assert_doctor_contains "custom toolchain" "$custom_doctor_out" 'bundle toolchain fingerprint: '
   custom_owner_err="$custom_project_root/custom-owner.err"
-  ELAN_HOME="$custom_elan_home" "$custom_installed_lean_beam" --root "$custom_project_root" ensure --hold \
+  ELAN_HOME="$custom_elan_home" "$custom_installed_lean_beam" --root "$custom_project_root" serve \
     > /dev/null 2>"$custom_owner_err" &
   custom_owner_pid="$!"
-  if ! wait_for_file_text "$custom_owner_err" "owning Beam session" "custom-toolchain session owner" 600 0.1; then
+  if ! wait_for_file_text "$custom_owner_err" "serving Beam session" "custom-toolchain session owner" 600 0.1; then
     exit 1
   fi
-  ELAN_HOME="$custom_elan_home" "$custom_installed_lean_beam" --root "$custom_project_root" shutdown > /dev/null
+  ELAN_HOME="$custom_elan_home" "$custom_installed_lean_beam" --root "$custom_project_root" stop > /dev/null
   wait_for_exit "$custom_owner_pid" "custom-toolchain session owner" 120 0.1
   wait "$custom_owner_pid"
 )
@@ -1611,7 +1611,7 @@ if ! printf '%s\n' "$unsupported_doctor_out" | grep -q 'bundle toolchain fingerp
 fi
 
 unsupported_err="$(mktemp "$tmp_root/install-unsupported-toolchain-XXXXXX")"
-"$installed_lean_beam" --root "$unsupported_project_root" ensure --hold >"$unsupported_err" 2>&1 &
+"$installed_lean_beam" --root "$unsupported_project_root" serve >"$unsupported_err" 2>&1 &
 unsupported_owner_pid="$!"
 if ! wait_for_exit "$unsupported_owner_pid" "unsupported-toolchain session owner" 120 0.1; then
   kill -INT "$unsupported_owner_pid" 2>/dev/null || true

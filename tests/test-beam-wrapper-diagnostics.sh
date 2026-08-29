@@ -240,7 +240,7 @@ echo "[beam-wrapper:diagnostics] passed: guard_msgs stderr handling"
 echo "[beam-wrapper:diagnostics] starting default warning filtering"
 (
   cd "$warn_root"
-  "$beam_script" ensure lean > /dev/null
+  "$beam_script" stats > /dev/null
 
   cat > SaveSmoke/B.lean <<'EOF'
 def bVal : Nat := 1
@@ -303,7 +303,7 @@ echo "[beam-wrapper:diagnostics] passed: default warning filtering"
 echo "[beam-wrapper:diagnostics] starting full warning streaming"
 (
   cd "$warn_full_root"
-  "$beam_script" ensure lean > /dev/null
+  "$beam_script" stats > /dev/null
 
   cat > SaveSmoke/B.lean <<'EOF'
 def bVal : Nat := 1
@@ -653,7 +653,7 @@ echo "[beam-wrapper:diagnostics] starting stale-import recovery"
 (
   cd "$stale_root"
   lake build SaveSmoke/A.lean > /dev/null
-  "$beam_script" ensure lean > /dev/null
+  "$beam_script" stats > /dev/null
   printf 'def bVal : Nat := "broken"\n' > SaveSmoke/B.lean
 
   stale_sync_json="$(beam_wrapper_mktemp_file stale-sync-json)"

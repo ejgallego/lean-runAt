@@ -76,7 +76,7 @@ sandbox_beam() {
     --proc /proc \
     --unshare-pid \
     --chdir "$project_root" \
-    -- /usr/bin/env BEAM_CONTROL_ROOT="$control_root" \
+    -- /usr/bin/env BEAM_SESSION_ROOT="$control_root" \
       "$beam_script" --root "$project_root" "$@"
 }
 
@@ -132,8 +132,8 @@ sandbox_owner() {
     --unshare-pid \
     --chdir "$project_root" \
     -- /bin/bash -lc \
-      "export BEAM_CONTROL_ROOT='$control_root'; \
-       '$beam_script' --root '$project_root' ensure --hold >'$out' 2>'$err' & \
+      "export BEAM_SESSION_ROOT='$control_root'; \
+       '$beam_script' --root '$project_root' serve >'$out' 2>'$err' & \
        wrapper_pid=\$!; \
        (paused=false; \
         while kill -0 \"\$wrapper_pid\" 2>/dev/null; do \
@@ -171,12 +171,12 @@ sandbox_owner() {
 
 missing_out="$tmp_root/missing.out"
 missing_err="$tmp_root/missing.err"
-if sandbox_beam ensure >"$missing_out" 2>"$missing_err"; then
+if sandbox_beam stats >"$missing_out" 2>"$missing_err"; then
   echo "expected an ordinary sandbox command not to start an implicit daemon" >&2
   sed -n '1,160p' "$missing_out" >&2
   exit 1
 fi
-if ! grep -Fq "start 'lean-beam ensure --hold'" "$missing_err"; then
+if ! grep -Fq "start 'lean-beam serve'" "$missing_err"; then
   echo "expected the missing-owner error to provide the ownership command" >&2
   sed -n '1,160p' "$missing_err" >&2
   exit 1
@@ -184,7 +184,7 @@ fi
 
 sandbox_owner owner-1
 if ! wait_for_registry || ! wait_for_nonempty_file "$owner_out" "sandbox owner response"; then
-  echo "expected ensure --hold to publish an owned daemon" >&2
+  echo "expected serve to publish an owned daemon" >&2
   sed -n '1,200p' "$owner_err" >&2
   exit 1
 fi
@@ -199,10 +199,10 @@ if ! printf '%s\n' "$doctor_out" | grep -q 'daemon status: live'; then
   exit 1
 fi
 
-ensure_json="$(sandbox_beam ensure)"
-if [ "$(json_text_field "$ensure_json" ok)" != "true" ]; then
+stats_json="$(sandbox_beam stats)"
+if [ "$(json_text_field "$stats_json" ok)" != "true" ]; then
   echo "expected a separate PID namespace to attach to the owner session" >&2
-  printf '%s\n' "$ensure_json" >&2
+  printf '%s\n' "$stats_json" >&2
   exit 1
 fi
 if [ "$(read_json_field "$registry" daemonId)" != "$daemon_id_1" ] || \
@@ -213,7 +213,7 @@ fi
 
 duplicate_out="$tmp_root/duplicate.out"
 duplicate_err="$tmp_root/duplicate.err"
-if sandbox_beam ensure --hold >"$duplicate_out" 2>"$duplicate_err"; then
+if sandbox_beam serve >"$duplicate_out" 2>"$duplicate_err"; then
   echo "expected a second sandbox owner to be rejected" >&2
   exit 1
 fi
@@ -240,10 +240,10 @@ fi
 assert_no_lease_artifacts
 touch "$owner_resume"
 
-shutdown_json="$(sandbox_beam shutdown)"
-if [ "$(json_text_field "$shutdown_json" result.shutdown)" != "true" ]; then
-  echo "expected explicit shutdown to close the owned sandbox session" >&2
-  printf '%s\n' "$shutdown_json" >&2
+stop_json="$(sandbox_beam stop)"
+if [ "$(json_text_field "$stop_json" result.state)" != "stopping" ]; then
+  echo "expected explicit stop to close the owned sandbox session" >&2
+  printf '%s\n' "$stop_json" >&2
   exit 1
 fi
 if ! wait_for_exit "$owner_pid" "sandbox owner after shutdown" 120 0.1; then
@@ -294,7 +294,7 @@ sleep 4
 
 after_kill_out="$tmp_root/after-kill.out"
 after_kill_err="$tmp_root/after-kill.err"
-if sandbox_beam ensure >"$after_kill_out" 2>"$after_kill_err"; then
+if sandbox_beam stats >"$after_kill_out" 2>"$after_kill_err"; then
   echo "expected an ordinary command not to replace a dead owner implicitly" >&2
   sed -n '1,160p' "$after_kill_out" >&2
   exit 1

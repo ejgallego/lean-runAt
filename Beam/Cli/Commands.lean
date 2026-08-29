@@ -22,6 +22,33 @@ namespace Beam.Cli
 
 open Beam.Broker
 
+private inductive SessionState where
+  | absent
+  | running
+  | stopping
+  | recoveryRequired
+  deriving BEq, Repr
+
+private instance : ToJson SessionState where
+  toJson
+    | .absent => "absent"
+    | .running => "running"
+    | .stopping => "stopping"
+    | .recoveryRequired => "recoveryRequired"
+
+private structure SessionStatus where
+  state : SessionState
+  workspace : String
+  sessionDir : String
+  generation? : Option String := none
+  detail? : Option String := none
+  deriving ToJson
+
+private structure SessionTransitionResult where
+  state : SessionState
+  changed : Bool
+  deriving ToJson
+
 private def wrapperDisplayAction (fallback : String) : IO String := do
   match ← IO.getEnv "BEAM_WRAPPER_COMMAND" with
   | some action => pure action
@@ -95,26 +122,28 @@ private def runLeanRelease
   withProjectDaemon root .lean (explicitControlDir? := opts.explicitControlDir?) fun client =>
     callBroker root client <| leanReleaseRequest root path handle
 
-private def shutdownProjectDaemon (opts : CliOptions) : IO Unit := do
-  let root ← projectRootAny opts
+private def stopProjectSession (opts : CliOptions) : IO Unit := do
+  let root ← explicitProjectRoot opts "stop"
   match ← shutdownRegisteredProjectDaemon root opts.explicitControlDir? with
-  | .ok (some resp) => printResponse resp
+  | .ok (some resp) =>
+      failOnError resp
+      printResponse <| Response.success <|
+        toJson ({ state := .stopping, changed := true } : SessionTransitionResult)
   | .ok none =>
-      printJsonLine <| Json.mkObj [
-        ("result", Json.mkObj [("shutdown", toJson false), ("reason", toJson ("notFound" : String))])
-      ]
+      printResponse <| Response.success <|
+        toJson ({ state := .absent, changed := false } : SessionTransitionResult)
   | .error failure =>
       throw <| IO.userError (← daemonFailureMessage root failure opts.explicitControlDir?)
 
 private def recoverProjectSession (opts : CliOptions) (args : List String) : IO Unit := do
-  let root ← projectRootAny opts
+  let root ← explicitProjectRoot opts "recover"
   let (generation?, forceOpaque) ←
     match args with
     | ["--generation", generation] => pure (some generation, false)
     | ["--force"] => pure (none, true)
     | _ =>
         throw <| IO.userError
-          "usage: beam [--root PATH] [--control-dir DIR] recover --generation ID | --force"
+          "usage: beam --root PATH [--session-dir DIR] recover --generation ID | --force"
   let result ← recoverProjectDaemon root generation? forceOpaque opts.explicitControlDir?
   printJsonLine (toJson result)
 
@@ -143,13 +172,13 @@ private def parseBackendName (name : String) : IO Backend := do
   | .error err => throw <| IO.userError err
 
 private def commandMaySelectPort : List String → Bool
-  | ["ensure", "--hold"] => true
-  | ["ensure", _, "--hold"] => true
+  | ["serve"] => true
+  | ["serve", _] => true
   | _ => false
 
 private def validateRequestedPortScope (opts : CliOptions) : IO Unit := do
   if opts.requestedPort?.isSome && !commandMaySelectPort opts.args then
-    throw <| IO.userError "--port is only valid when starting an owner with 'ensure [lean|rocq] --hold'"
+    throw <| IO.userError "--port is only valid when starting an owner with 'serve [lean|rocq]'"
 
 private def runThenHoldUntilInterrupted
     (owner : ProjectDaemonOwner)
@@ -165,23 +194,44 @@ private def runThenHoldUntilInterrupted
       unless exitCode == 0 do
         throw <| IO.userError s!"owned Beam daemon exited with status {exitCode}"
 
-private def ensureBackend
+private def serveBackend
     (home : System.FilePath)
     (opts : CliOptions)
-    (backend : Backend)
-    (hold : Bool := false) : IO Unit := do
+    (backend : Backend) : IO Unit := do
   let root ← projectRoot opts backend
-  if hold then
-    withProjectDaemonOwner home root backend opts fun owner =>
-      runThenHoldUntilInterrupted owner do
-        callBroker root owner.client {
-          op := .ensure, backend := backend, root? := some root.toString
-        }
-        (← IO.getStdout).flush
-        IO.eprintln "beam: owning Beam session; interrupt this wrapper process when finished"
-  else
-    withProjectDaemon root backend (explicitControlDir? := opts.explicitControlDir?) fun client =>
-      callBroker root client { op := .ensure, backend := backend, root? := some root.toString }
+  withProjectDaemonOwner home root backend opts fun owner =>
+    runThenHoldUntilInterrupted owner do
+      callBroker root owner.client {
+        op := .ensure, backend := backend, root? := some root.toString
+      }
+      (← IO.getStdout).flush
+      IO.eprintln <|
+        s!"beam: serving Beam session; interrupt this process or run " ++
+        s!"`lean-beam --root {shellQuote root.toString} stop` when finished"
+
+private def sessionStatus (opts : CliOptions) : IO Unit := do
+  let root ← projectRootAny opts
+  let sessionDir ← Beam.Daemon.controlDirFor root opts.explicitControlDir?
+  let status (state : SessionState) (generation? detail? : Option String := none) : SessionStatus := {
+    state
+    workspace := root.toString
+    sessionDir := sessionDir.toString
+    generation?
+    detail?
+  }
+  let result : SessionStatus ←
+    match ← observeProjectRegistry root opts.explicitControlDir? with
+    | .absent => pure <| status .absent
+    | .live entry => pure <| status .running (some entry.daemonId)
+    | .draining entry => pure <| status .stopping (some entry.daemonId)
+    | .legacy => pure <| status .recoveryRequired (detail? := some "legacy session descriptor")
+    | .unsupported schemaVersion =>
+        pure <| status .recoveryRequired
+          (detail? := some s!"unsupported session descriptor schema {schemaVersion}")
+    | .malformed detail => pure <| status .recoveryRequired (detail? := some detail)
+    | .unusable entry reason =>
+        pure <| status .recoveryRequired (some entry.daemonId) (some reason.message)
+  printResponse <| Response.success (toJson result)
 
 def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit := do
   validateRequestedPortScope opts
@@ -215,14 +265,10 @@ def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit := do
       printMcpConfig home opts
   | "feedback-report" :: args =>
       Beam.Cli.Feedback.run home opts args
-  | "ensure" :: [] =>
-      ensureBackend home opts .lean
-  | "ensure" :: "--hold" :: [] =>
-      ensureBackend home opts .lean (hold := true)
-  | "ensure" :: backend :: [] =>
-      ensureBackend home opts (← parseBackendName backend)
-  | "ensure" :: backend :: "--hold" :: [] =>
-      ensureBackend home opts (← parseBackendName backend) (hold := true)
+  | "serve" :: [] =>
+      serveBackend home opts .lean
+  | "serve" :: backend :: [] =>
+      serveBackend home opts (← parseBackendName backend)
   | "lean-run-at" :: path :: version :: line :: character :: text =>
       runLeanRunAt opts (← wrapperDisplayAction "lean-run-at") path version line character text
   | "lean-run-at-handle" :: path :: version :: line :: character :: text =>
@@ -417,8 +463,10 @@ def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit := do
       let root ← projectRootAny opts
       withExistingProjectDaemon root (explicitControlDir? := opts.explicitControlDir?) fun client =>
         callBroker root client { op := .resetStats }
-  | "shutdown" :: [] =>
-      shutdownProjectDaemon opts
+  | "status" :: [] =>
+      sessionStatus opts
+  | "stop" :: [] =>
+      stopProjectSession opts
   | "recover" :: args =>
       recoverProjectSession opts args
   | "request-stream" :: raw :: [] =>

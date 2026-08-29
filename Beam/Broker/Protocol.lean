@@ -452,10 +452,10 @@ private def projectRequestForbiddenFields : Array String :=
   #["workspaceId", "workspaceMode", "daemonCapability", "root", "leanCmd", "leanPlugin", "rocqCmd"]
 
 private def ProjectRequest.supportedOp : Op → Bool
-  | .ensure | .openDocs | .cancel | .updateFile | .syncFile | .refreshFile | .close | .runAt
+  | .openDocs | .cancel | .updateFile | .syncFile | .refreshFile | .close | .runAt
   | .hover | .signatureHelp | .definition | .references | .documentSymbols | .workspaceSymbols
   | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release | .stats => true
-  | .initWorkspace | .listWorkspaces | .dropWorkspace | .resetStats | .shutdown => false
+  | .ensure | .initWorkspace | .listWorkspaces | .dropWorkspace | .resetStats | .shutdown => false
 
 def ProjectRequest.ofRequest (request : Request) : Except String ProjectRequest := do
   unless ProjectRequest.supportedOp request.op do

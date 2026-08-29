@@ -409,7 +409,11 @@ private def checkCliRootParsing : IO Unit := do
   expectIoErrorContains
     "missing explicit CLI root should use the workspace error boundary"
     "workspace root does not resolve"
-    (Beam.Cli.parseCliOptions {} ["--root", missingRoot.toString, "ensure", "lean"])
+    (Beam.Cli.parseCliOptions {} ["--root", missingRoot.toString, "serve", "lean"])
+  expectIoErrorContains
+    "relative session directory should be rejected"
+    "--session-dir requires an absolute path"
+    (Beam.Cli.parseCliOptions {} ["--session-dir", "relative-session", "status"])
   let root := System.FilePath.mk s!"/tmp/beam-cli-root-{← IO.monoNanosNow}"
   let control := root / "shared-control"
   try
@@ -418,13 +422,38 @@ private def checkCliRootParsing : IO Unit := do
     let expectedControl ← Beam.resolveExistingPath control
     let opts ← Beam.Cli.parseCliOptions {} [
       "--root", root.toString,
-      "--control-dir", control.toString,
+      "--session-dir", control.toString,
       "stats"
     ]
     require "explicit CLI root should be canonicalized" (opts.explicitRoot? == some expectedRoot)
-    require "explicit control directory should remain an exact selection"
+    require "explicit session directory should remain an exact selection"
       (opts.explicitControlDir? == some expectedControl)
     require "global selectors should not leak into command arguments" (opts.args == ["stats"])
+  finally
+    if ← root.pathExists then
+      IO.FS.removeDirAll root
+
+private def checkProjectRootAmbiguity : IO Unit := do
+  let root := System.FilePath.mk s!"/tmp/beam-cli-root-selection-{← IO.monoNanosNow}"
+  let leanRoot := root / "lean"
+  let rocqRoot := leanRoot / "rocq"
+  let nested := rocqRoot / "src"
+  try
+    IO.FS.createDirAll nested
+    IO.FS.writeFile (leanRoot / "lean-toolchain") "leanprover/lean4:stable\n"
+    IO.FS.writeFile (rocqRoot / "_RocqProject") "\n"
+    expectIoErrorContains
+      "backend-neutral root inference should reject mixed-root ambiguity"
+      "project root is ambiguous"
+      (Beam.Cli.inferProjectRootAny nested)
+    let explicitLean ← Beam.resolveExistingPath leanRoot
+    require "an explicit root should resolve mixed-root ambiguity"
+      ((← Beam.Cli.projectRootAny { explicitRoot? := some explicitLean }) == explicitLean)
+
+    IO.FS.writeFile (rocqRoot / "lean-toolchain") "leanprover/lean4:stable\n"
+    let sharedRoot ← Beam.resolveExistingPath rocqRoot
+    require "one directory containing both project markers should be one root candidate"
+      ((← Beam.Cli.inferProjectRootAny rocqRoot) == sharedRoot)
   finally
     if ← root.pathExists then
       IO.FS.removeDirAll root
@@ -597,13 +626,12 @@ private def checkDaemonFailureContext : IO Unit := do
       pid := 999999999
       ownerPid := 999999999
       port? := some 42424
-      workspaces := #[{
+      workspace := {
         workspaceId := Beam.Cli.projectDaemonWorkspaceId
         root := root.toString
-        configHash := "config-test"
         toolchain? := some "leanprover/lean4:test"
         bundleId? := some "bundle-test"
-      }]
+      }
       configHash := "config-test"
       startedAt := "2026-07-02T00:00:00Z"
     }
@@ -741,13 +769,12 @@ private def writeTestRegistryEntry
     pid := 999999999
     ownerPid := 999999999
     port?
-    workspaces := #[{
+    workspace := {
       workspaceId := Beam.Cli.projectDaemonWorkspaceId
       root := root.toString
-      configHash := "config-test"
       toolchain? := some "leanprover/lean4:test"
       bundleId? := some "bundle-test"
-    }]
+    }
     configHash := "config-test"
     startedAt := "2026-07-05T00:00:00Z"
   }
@@ -774,6 +801,11 @@ private def checkTypedRegistryReads : IO Unit := do
     match ← Beam.Daemon.readRegistry root with
     | .unsupported 999 => pure ()
     | state => throw <| IO.userError s!"unsupported registry was classified as {state.status}"
+
+    IO.FS.writeFile registryPath "{\"schemaVersion\":2}\n"
+    match ← Beam.Daemon.readRegistry root with
+    | .unsupported 2 => pure ()
+    | state => throw <| IO.userError s!"superseded multi-workspace registry was classified as {state.status}"
 
     IO.FS.writeFile registryPath "{\"schemaVersion\":\"one\"}\n"
     match ← Beam.Daemon.readRegistry root with
@@ -806,11 +838,11 @@ private def checkTypedRegistryReads : IO Unit := do
     let validText ← IO.FS.readFile registryPath
     let validJson ← IO.ofExcept <| Json.parse validText
     IO.FS.writeFile registryPath <|
-      (validJson.setObjVal! "workspaces" (toJson (#[] : Array Beam.Daemon.WorkspaceBinding))).compress
+      (validJson.setObjVal! "workspace" (Json.mkObj [])).compress
     match ← Beam.Daemon.readRegistry root with
     | .malformed detail =>
-        require "empty workspace descriptors should fail the typed boundary"
-          (detail.contains "at least one workspace")
+        require "incomplete workspace descriptors should fail the typed boundary"
+          (detail.contains "invalid registry schema")
     | state => throw <| IO.userError s!"empty workspace descriptor was classified as {state.status}"
 
     IO.FS.writeFile registryPath validText
@@ -1327,6 +1359,7 @@ def main : IO Unit := do
   checkSyncWaitSpecs
   checkCancelAcknowledgementDecoding
   checkCliRootParsing
+  checkProjectRootAmbiguity
   checkLeanOperationRequests
   checkDiagnosticScopeArgs
   checkStartupRetryPolicy

@@ -119,6 +119,16 @@ private def rejectControlDirObservation
 private def validatePrivateControlDir (dir : System.FilePath) : IO Unit := do
   rejectControlDirObservation dir (← observeControlDir dir)
 
+/-- Recognize absence without creating a session directory or accepting an unsafe existing leaf. -/
+private def sessionDescriptorAbsent (control : ProjectControl) : IO Bool := do
+  match ← observeControlDir control.dir with
+  | .absent => pure true
+  | .privateDir =>
+      match ← readRegistryAt control.registry with
+      | .absent => pure true
+      | .legacy | .unsupported _ | .malformed _ | .current _ => pure false
+  | .symlink | .nonPrivate _ | .notDirectory => pure false
+
 /--
 Create a missing dedicated control leaf as private, or validate an existing path without mutating
 it. The directory is ready before Beam creates its lock or any capability-bearing descriptor.
@@ -292,10 +302,10 @@ inductive RegistryObservation where
 def sessionWorkspaceForRoot?
     (entry : SessionDescriptor)
     (root : System.FilePath) : IO (Option WorkspaceBinding) := do
-  for workspace in entry.workspaces do
-    if ← Beam.sameFilePath (System.FilePath.mk workspace.root) root then
-      return some workspace
-  pure none
+  if ← Beam.sameFilePath (System.FilePath.mk entry.workspace.root) root then
+    pure (some entry.workspace)
+  else
+    pure none
 
 private def observeProjectRegistryAt
     (root registry : System.FilePath) : IO RegistryObservation := do
@@ -308,7 +318,7 @@ private def observeProjectRegistryAt
       if entry.daemonId.isEmpty || entry.capability.isEmpty then
         return .unusable entry .invalidIdentity
       let some workspace ← sessionWorkspaceForRoot? entry root
-        | return .unusable entry (.wrongRegistryRoot entry.rootSummary)
+        | return .unusable entry (.wrongRegistryRoot entry.workspace.root)
       if entry.lifecycle == .draining then
         return .draining entry
       let some endpoint := registryEndpoint? entry
@@ -665,16 +675,15 @@ private def registryEntryFor
     pid
     ownerPid := ownerPid.toNat
     port?
-    workspaces := #[{
+    workspace := {
       workspaceId := projectDaemonWorkspaceId
       root := desired.root.toString
-      configHash := desired.configHash
       leanCmd? := desired.leanCmd?
       plugin? := desired.plugin?.map (·.toString)
       rocqCmd? := desired.rocqCmd?
       toolchain? := desired.toolchain?
       bundleId? := some desired.bundleId
-    }]
+    }
     configHash := desired.configHash
     clientBin? := some desired.clientBin.toString
     daemonBin? := some desired.daemonBin.toString
@@ -819,9 +828,9 @@ def RegistryUnsafeReason.message : RegistryUnsafeReason → String
   | .wrongGeneration daemonRoot =>
       s!"the recorded endpoint serves another Beam generation for {daemonRoot}"
 
-private def activeOwnerMessage (root : System.FilePath) (entry : SessionDescriptor) : String :=
-  s!"Beam session for {root} is already owned by wrapper pid {entry.ownerPid}; " ++
-    "interrupt that 'lean-beam ensure --hold' process before starting another owner"
+private def activeOwnerMessage (root : System.FilePath) : String :=
+  s!"Beam session for {root} is already owned by a foreground process; " ++
+    "interrupt that 'lean-beam serve' process before starting another owner"
 
 private def configMismatchMessage
     (root : System.FilePath)
@@ -829,7 +838,7 @@ private def configMismatchMessage
     (expectedHash : String) : String :=
   s!"the live Beam session for {root} uses configuration {entry.configHash}, " ++
     s!"but this command requires {expectedHash}; the current owner was preserved. " ++
-    "Interrupt its 'lean-beam ensure --hold' process, then start a new owner with the desired configuration"
+    "Interrupt its 'lean-beam serve' process, then start a new owner with the desired configuration"
 
 private def drainingOwnerMessage (root : System.FilePath) (entry : SessionDescriptor) : String :=
   s!"Beam session {entry.daemonId} for {root} is draining; " ++
@@ -838,7 +847,7 @@ private def drainingOwnerMessage (root : System.FilePath) (entry : SessionDescri
 private def registryRecoveryMessage (root : System.FilePath) (detail : String) : String :=
   s!"Beam cannot safely use or replace the daemon registry for {root}: {detail}. " ++
     "The session remains fenced; preserve its descriptor and use explicit recovery with the same " ++
-    "--root and --control-dir selection after stopping the matching owner or daemon"
+    "--root and --session-dir selection after stopping the matching owner or daemon"
 
 private def generationRecoveryMessage
     (root : System.FilePath)
@@ -846,9 +855,9 @@ private def generationRecoveryMessage
     (reason : RegistryUnsafeReason) : String :=
   let message := registryRecoveryMessage root reason.message
   match reason with
-  | .wrongRegistryRoot recordedRoots =>
-      message ++ "; recovery must select one of the descriptor's recorded workspace roots " ++
-        s!"({recordedRoots}) with the same --control-dir; the selected root {root} cannot recover " ++
+  | .wrongRegistryRoot recordedRoot =>
+      message ++ "; recovery must select the descriptor's recorded workspace root " ++
+        s!"({recordedRoot}) with the same --session-dir; the selected root {root} cannot recover " ++
         s!"session {entry.daemonId}"
   | _ =>
       message ++ "; run " ++
@@ -878,6 +887,9 @@ def shutdownRegisteredProjectDaemon
     (root : System.FilePath)
     (explicitControlDir? : Option System.FilePath := none) :
     IO (Except BrokerClientFailure (Option Response)) := do
+  let selected ← projectControl root explicitControlDir?
+  if ← sessionDescriptorAbsent selected then
+    return .ok none
   let plan : ShutdownPlan ← withProjectControl root
       (explicitControlDir? := explicitControlDir?) fun control => do
     match ← observeProjectRegistryAt root control.registry with
@@ -933,6 +945,9 @@ def recoverProjectDaemon
     (generation? : Option String)
     (forceOpaque : Bool)
     (explicitControlDir? : Option System.FilePath := none) : IO RecoveryResult := do
+  let selected ← projectControl root explicitControlDir?
+  if ← sessionDescriptorAbsent selected then
+    return { recovered := false, reason? := some "absent" }
   withProjectControl root (explicitControlDir? := explicitControlDir?) fun control => do
     match ← readRegistryAt control.registry with
     | .absent =>
@@ -947,7 +962,7 @@ def recoverProjectDaemon
         let some workspace ← sessionWorkspaceForRoot? entry root
           | throw <| IO.userError <|
               s!"selected root {root} is not a workspace in session {entry.daemonId}; " ++
-              s!"recorded workspace roots: {entry.rootSummary}"
+              s!"recorded workspace root: {entry.workspace.root}"
         if ← registeredGenerationResponds root workspace entry then
           throw <| IO.userError <|
             s!"Beam session {entry.daemonId} still responds; stop its foreground owner or use authenticated shutdown"
@@ -1004,8 +1019,8 @@ def ProjectDaemonOwner.registered (owner : ProjectDaemonOwner) : IO Bool := do
   | .absent | .legacy | .unsupported _ | .malformed _ => pure false
 
 private def missingOwnerCommand : Option Backend → String
-  | some .rocq => "lean-beam ensure rocq --hold"
-  | some .lean | none => "lean-beam ensure --hold"
+  | some .rocq => "lean-beam serve rocq"
+  | some .lean | none => "lean-beam serve"
 
 private def missingOwnerMessage (root : System.FilePath) (backend? : Option Backend) : String :=
   s!"no live Beam session owner is registered for {root}; " ++
@@ -1019,7 +1034,7 @@ private def startOwnedProjectDaemon
   | .absent => pure ()
   | .live entry =>
       if entry.configHash == desired.configHash then
-        throw <| IO.userError (activeOwnerMessage desired.root entry)
+        throw <| IO.userError (activeOwnerMessage desired.root)
       else
         throw <| IO.userError (configMismatchMessage desired.root entry desired.configHash)
   | .draining entry => throw <| IO.userError (drainingOwnerMessage desired.root entry)

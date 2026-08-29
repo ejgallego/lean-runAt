@@ -358,7 +358,7 @@ wrapper_todo_owner_err="$(mktemp /tmp/lean-beam-wrapper-todo-owner-err-XXXXXX)"
 wrapper_todo_owner_pid=""
 wrapper_todo_cleanup() {
   scripts/lean-beam --root tests/save_olean_project \
-    --control-dir "$wrapper_todo_control_dir" shutdown > /dev/null 2>&1 || true
+    --session-dir "$wrapper_todo_control_dir" stop > /dev/null 2>&1 || true
   if [ -n "$wrapper_todo_owner_pid" ]; then
     wait "$wrapper_todo_owner_pid" 2>/dev/null || true
   fi
@@ -368,11 +368,11 @@ wrapper_todo_cleanup() {
 }
 
 scripts/lean-beam --root tests/save_olean_project \
-  --control-dir "$wrapper_todo_control_dir" ensure --hold \
+  --session-dir "$wrapper_todo_control_dir" serve \
   >"$wrapper_todo_owner_out" 2>"$wrapper_todo_owner_err" &
 wrapper_todo_owner_pid="$!"
 for _ in $(seq 1 600); do
-  if grep -Fq "owning Beam session" "$wrapper_todo_owner_err"; then
+  if grep -Fq "serving Beam session" "$wrapper_todo_owner_err"; then
     break
   fi
   if ! kill -0 "$wrapper_todo_owner_pid" 2>/dev/null; then
@@ -383,7 +383,7 @@ for _ in $(seq 1 600); do
   fi
   sleep 0.1
 done
-if ! grep -Fq "owning Beam session" "$wrapper_todo_owner_err"; then
+if ! grep -Fq "serving Beam session" "$wrapper_todo_owner_err"; then
   echo "timed out waiting for lean-beam todo wrapper owner" >&2
   cat "$wrapper_todo_owner_err" >&2
   wrapper_todo_cleanup
@@ -391,7 +391,7 @@ if ! grep -Fq "owning Beam session" "$wrapper_todo_owner_err"; then
 fi
 
 if ! scripts/lean-beam --root tests/save_olean_project \
-      --control-dir "$wrapper_todo_control_dir" \
+      --session-dir "$wrapper_todo_control_dir" \
       update TodoSmoke.lean \
     > "$wrapper_todo_update_out" 2>"$wrapper_todo_update_err"; then
   echo "expected lean-beam update wrapper smoke to succeed before todo" >&2
@@ -422,7 +422,7 @@ PY
 fi
 
 if ! scripts/lean-beam --root tests/save_olean_project \
-      --control-dir "$wrapper_todo_control_dir" \
+      --session-dir "$wrapper_todo_control_dir" \
       todo TodoSmoke.lean "$wrapper_todo_version" 13 0 14 0 --kind sorry --suggest none \
     > "$wrapper_todo_out" 2>"$wrapper_todo_err"; then
   echo "expected lean-beam todo wrapper smoke to succeed" >&2

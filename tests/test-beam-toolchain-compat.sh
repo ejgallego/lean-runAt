@@ -60,7 +60,7 @@ cleanup() {
   if [ -n "${stale_project_root:-}" ] && [ -d "$stale_project_root" ]; then
     HOME="$tmp_env_root/home" CODEX_HOME="$tmp_env_root/codex" CLAUDE_HOME="$tmp_env_root/claude" \
       ELAN_HOME="$host_elan_home" BEAM_INSTALL_BUNDLE_DIR="$tmp_bundle_dir" \
-      ./scripts/lean-beam --root "$stale_project_root" shutdown > /dev/null 2>&1 || true
+      ./scripts/lean-beam --root "$stale_project_root" stop > /dev/null 2>&1 || true
   fi
   if [ -n "${stale_owner_pid:-}" ]; then
     if kill -0 "$stale_owner_pid" 2>/dev/null; then
@@ -165,7 +165,7 @@ PY
 run_bundle_install() {
   local rc=0
   (
-    unset BEAM_HOME BEAM_CONTROL_ROOT
+    unset BEAM_HOME BEAM_SESSION_ROOT
     export HOME="$tmp_env_root/home"
     export CODEX_HOME="$tmp_env_root/codex"
     export CLAUDE_HOME="$tmp_env_root/claude"
@@ -275,9 +275,9 @@ run_stale_wrapper_checked() {
 }
 
 start_stale_owner() {
-  run_stale_wrapper ensure --hold > "$stale_owner_stdout" 2> "$stale_owner_stderr" &
+  run_stale_wrapper serve > "$stale_owner_stdout" 2> "$stale_owner_stderr" &
   stale_owner_pid="$!"
-  if ! wait_for_file_text "$stale_owner_stderr" "owning Beam session" \
+  if ! wait_for_file_text "$stale_owner_stderr" "serving Beam session" \
       "toolchain compatibility session owner" 600 0.1; then
     print_toolchain_context "explicit session owner failed to start"
     return 1
@@ -288,7 +288,7 @@ stop_stale_owner() {
   if [ -z "$stale_owner_pid" ]; then
     return 0
   fi
-  if ! run_stale_wrapper shutdown > /dev/null 2> "$stale_sync_stderr"; then
+  if ! run_stale_wrapper stop > /dev/null 2> "$stale_sync_stderr"; then
     print_toolchain_context "explicit session owner failed to shut down"
     return 1
   fi

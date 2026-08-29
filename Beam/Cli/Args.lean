@@ -209,22 +209,22 @@ private def resolveExplicitRootArg (root : String) : IO System.FilePath := do
   catch err =>
     throw <| IO.userError s!"workspace root does not resolve: {err.toString}"
 
-private def resolveControlDirArg (dir : String) : IO System.FilePath := do
+private def resolveSessionDirArg (dir : String) : IO System.FilePath := do
   let path := System.FilePath.mk dir
+  unless path.isAbsolute do
+    throw <| IO.userError s!"--session-dir requires an absolute path, got '{path}'"
   if ← path.pathExists then
     Beam.resolveExistingPath path
   else
-    let cwd ← IO.currentDir
-    let absolute := if path.isAbsolute then path else cwd / path
-    pure absolute.normalize
+    pure path.normalize
 
 partial def parseCliOptions (opts : CliOptions) : List String → IO CliOptions
   | [] => pure opts
   | "--root" :: root :: rest => do
       let root ← resolveExplicitRootArg root
       parseCliOptions { opts with explicitRoot? := some root } rest
-  | "--control-dir" :: dir :: rest => do
-      let dir ← resolveControlDirArg dir
+  | "--session-dir" :: dir :: rest => do
+      let dir ← resolveSessionDirArg dir
       parseCliOptions { opts with explicitControlDir? := some dir } rest
   | "--port" :: port :: rest => do
       let port ← IO.ofExcept <| parsePortText "port" port

@@ -133,7 +133,7 @@ inside the old Lean process is not sufficient to reload workspace configuration.
 ## Transport Lifetime
 
 The `lean-beam-mcp` stdio process owns its optional in-process broker runtime. MCP clients do not
-start or attach to a wrapper daemon and do not need a separate `lean-beam ensure --hold` owner. The
+start or attach to a wrapper daemon and do not need a separate `lean-beam serve` owner. The
 first Lean operation that needs broker execution creates the runtime lazily; later descriptors share
 that runtime while the broker remains authoritative for workspace membership. Feedback and cache
 eviction can inspect or update an absent runtime without creating one. `lean_drop_workspace` evicts
@@ -339,7 +339,7 @@ scope ends, so a late cancellation cannot affect a later request even if a broke
 is reused.
 
 EOF is the transport shutdown in both supported revisions. `lean-beam-mcp` defines no private
-shutdown request. This is separate from `lean-beam shutdown`, which sends the typed shutdown
+shutdown request. This is separate from `lean-beam --root ROOT stop`, which sends the typed shutdown
 operation directly to a Beam broker daemon.
 
 ## Progress And Diagnostic Logs

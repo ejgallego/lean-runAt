@@ -69,7 +69,7 @@ configuration from `lakefile.lean` text and never batch-builds as part of `save`
 Beam assumes Lake workspace configuration remains unchanged for the lifetime of the running Lean
 server. The server and existing file workers are not guaranteed to pick up edits to a lakefile,
 manifest, package override, `lean-toolchain`, Lean options, plugins, or dynamic libraries. After any
-such change, run `lean-beam shutdown` before the next command that uses the Lean server;
+such change, run `lean-beam --root ROOT stop` before the next command that uses the Lean server;
 `lean-beam refresh` only reopens the file within the current server and is not sufficient. Beam does
 not detect this configuration drift, so reusing a running session after such an edit is unsupported.
 
@@ -95,7 +95,7 @@ If no successful clean CI result is available, or if server-sensitive elaboratio
 discard the development checkpoints and perform one clean local batch build:
 
 ```bash
-lean-beam shutdown
+lean-beam --root ROOT stop
 lake clean
 lake build
 ```
@@ -118,7 +118,7 @@ Their transport types differ by surface.
 | Current result | Stable synced-state verdict for one document version. | Final broker/CLI `diagnostics`, `readiness`, and `fileProgress` fields; MCP spells the progress field `document_progress`. |
 
 Wrapper stderr is the human-facing surface. Machine consumers of an owned wrapper session should
-use final stdout JSON or `lean-beam --root ROOT [--control-dir DIR] request-stream <json|->`.
+use final stdout JSON or `lean-beam --root ROOT [--session-dir DIR] request-stream <json|->`.
 
 ### Machine Broker Stream
 
@@ -126,11 +126,11 @@ use final stdout JSON or `lean-beam --root ROOT [--control-dir DIR] request-stre
 broker observed it. Its input is a semantic project request with a required nonempty
 `clientRequestId`; callers cannot supply `root`, `workspaceId`, `daemonCapability`, executable
 configuration, workspace administration operations, or process-wide `shutdown` / `reset_stats`.
-Use the dedicated `lean-beam shutdown` command for lifecycle control. A request may produce any
+Use the dedicated `lean-beam --root ROOT stop` command for lifecycle control. A request may produce any
 number of `fileProgress` and `diagnostic` messages, followed by exactly one terminal `response`; the
 response is last and no later message belongs to that request.
 
-Keep the session's `lean-beam ensure --hold` owner active for the request lifetime. Only the holder
+Keep the session's `lean-beam serve` owner active for the request lifetime. Only the holder
 starts the daemon; the root-aware machine client reads the mode-`0600` descriptor, selects its
 frozen workspace binding, and injects routing and the per-generation capability. Requests
 participate in typed request admission and workspace-scoped cancellation but do not own the daemon.

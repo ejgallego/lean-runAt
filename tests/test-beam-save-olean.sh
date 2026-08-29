@@ -42,10 +42,10 @@ beam_start_owner() {
   local root="$1"
   local owner_out="$root/.beam-test-owner.out"
   local owner_err="$root/.beam-test-owner.err"
-  beam --root "$root" ensure --hold >"$owner_out" 2>"$owner_err" &
+  beam --root "$root" serve >"$owner_out" 2>"$owner_err" &
   beam_owner_last_pid="$!"
   beam_owner_pids+=("$beam_owner_last_pid")
-  if ! wait_for_file_text "$owner_err" "owning Beam session" "save-replay session owner" 600 0.1; then
+  if ! wait_for_file_text "$owner_err" "serving Beam session" "save-replay session owner" 600 0.1; then
     cat "$owner_out" >&2
     cat "$owner_err" >&2
     exit 1
@@ -371,7 +371,7 @@ cleanup() {
   local root owner_pid
   for root in "$tmp2" "$tmp3" "$tmp4" "$tmp5" "$tmp6" "$tmp7" "$tmp8"; do
     if [ -d "$root" ]; then
-      beam --root "$root" shutdown > /dev/null 2>&1 || true
+      beam --root "$root" stop > /dev/null 2>&1 || true
     fi
   done
   for owner_pid in ${beam_owner_pids[@]+"${beam_owner_pids[@]}"}; do
@@ -496,12 +496,12 @@ PY
     echo "expected successful retry to publish a replacement trace" >&2
     exit 1
   fi
-  beam --root "$tmp2" shutdown > /dev/null 2>&1 || true
+  beam --root "$tmp2" stop > /dev/null 2>&1 || true
   lake_build -v SaveSmoke/B.lean >"$log4" 2>&1
   rm -f .lake/build/lib/lean/SaveSmoke/A.olean .lake/build/lib/lean/SaveSmoke/A.ilean .lake/build/lib/lean/SaveSmoke/A.trace .lake/build/ir/SaveSmoke/A.c
   lake_build -v SaveSmoke/A.lean >"$log5" 2>&1
   lake_build >"$log2" 2>&1
-  beam --root "$tmp2" shutdown > /dev/null 2>&1 || true
+  beam --root "$tmp2" stop > /dev/null 2>&1 || true
 )
 if ! grep -Eq "Replayed SaveSmoke\\.B" "$log4"; then
   echo "expected exact-target lake build to replay SaveSmoke.B after broker save" >&2
@@ -547,7 +547,7 @@ PY
       exit 1
     fi
   done
-  beam --root "$tmp8" shutdown > /dev/null 2>&1 || true
+  beam --root "$tmp8" stop > /dev/null 2>&1 || true
   lake_build -v SaveSmoke/ModuleB.lean >"$log6" 2>&1
   LAKE_ARTIFACT_CACHE=false "$lake_cmd" env lean CheckModuleB.lean > /dev/null
 )
@@ -619,7 +619,7 @@ PY
   remove_owned_tmp_file "$unsupported_save_out"
   remove_owned_tmp_file "$unsupported_save_err"
   LAKE_ARTIFACT_CACHE=false "$lake_cmd" env lean CheckBatchOnly.lean > /dev/null
-  beam --root "$tmp7" shutdown > /dev/null 2>&1 || true
+  beam --root "$tmp7" stop > /dev/null 2>&1 || true
 )
 
 (cd "$tmp3" && lake_build > /dev/null)
@@ -657,7 +657,7 @@ edit_b_slow "$tmp3"
     exit 1
   fi
   lake_build -v SaveSmoke/A.lean >"$log3" 2>&1
-  beam --root "$tmp3" shutdown > /dev/null 2>&1 || true
+  beam --root "$tmp3" stop > /dev/null 2>&1 || true
 )
 if ! grep -Eq "Built SaveSmoke\\.B|Building SaveSmoke\\.B" "$log3"; then
   echo "expected save_olean race to leave SaveSmoke.B stale for downstream builds" >&2
@@ -711,7 +711,7 @@ LEAN_BEAM_BROKER_TRACE="$save_race_broker_trace" \
     exit 1
   fi
   beam --root "$tmp4" stats > /dev/null
-  beam --root "$tmp4" shutdown > /dev/null
+  beam --root "$tmp4" stop > /dev/null
   rm -f "$close_out" "$close_err"
 )
 
@@ -745,7 +745,7 @@ beam_start_owner "$tmp6"
     exit 1
   fi
   beam --root "$tmp6" stats > /dev/null
-  beam --root "$tmp6" shutdown > /dev/null
+  beam --root "$tmp6" stop > /dev/null
   rm -f "$save_out" "$save_err"
 )
 
@@ -808,6 +808,6 @@ beam_start_owner "$tmp5"
     exit 1
   fi
   beam --root "$tmp5" stats > /dev/null
-  beam --root "$tmp5" shutdown > /dev/null
+  beam --root "$tmp5" stop > /dev/null
   rm -f "$sync_out" "$sync_err" "$save_out" "$save_err"
 )

@@ -62,7 +62,7 @@ Preferred maintainer entrypoints:
 - new Codex task: `./scripts/codex-harness.sh session start <task-id>`
 - risky wrapper/install validation: `bash scripts/validate-defensive.sh`
 - public workflow checks: `lean-beam` and the skill docs
-- sandboxed repeated wrapper probes: `lean-beam ensure --hold`, then interrupt that foreground
+- sandboxed repeated wrapper probes: `lean-beam serve`, then interrupt that foreground
   process when the probe loop is finished
 - contributor process questions: [CONTRIBUTING.md](../CONTRIBUTING.md)
 
@@ -400,11 +400,9 @@ broker-derived decision.
 
 This wrapper path is easy to break accidentally, so keep the mental model simple.
 
-A CLI session descriptor is the schema-versioned `beam-daemon.json` selected by the control
-directory. It contains one generation identity, capability, lifecycle, endpoint, and a nonempty
-array of frozen workspace bindings. The public owner command currently creates one binding; the
-shape permits a future explicitly configured static multi-workspace session without changing
-request routing. Exactly one foreground `lean-beam ensure --hold` process owns the generation. It
+A CLI session descriptor is the schema-versioned `beam-daemon.json` selected by the session
+directory. It contains one generation identity, capability, lifecycle, endpoint, and one frozen
+workspace binding. Exactly one foreground `lean-beam serve` process owns the generation. It
 starts the daemon in a dedicated process session, passes the identity, effective configuration
 hash, and random capability through piped stdin, and retains the pipe's write end. Before creating
 the lock or descriptor, Beam creates a missing control leaf with mode `0700`, or validates that an
@@ -427,7 +425,7 @@ by an attaching command. Persisted PIDs are display-only diagnostics, never prob
 used as automatic stale-reclamation proof. Only the foreground owner may force termination, through
 its retained child handle and process group.
 
-The owner watches its exact descriptor generation and daemon child. `lean-beam shutdown` changes
+The owner watches its exact descriptor generation and daemon child. `lean-beam --root ROOT stop` changes
 that generation from `live` to `draining` under the control lock before sending authenticated
 shutdown. Normal holder exit likewise publishes `draining`, closes its pipe, waits for graceful
 teardown, and, after the deadline, terminates the owned process group. It removes only the exact
@@ -439,30 +437,32 @@ any recorded process. Opaque legacy, unsupported, or malformed state requires `r
 A paused holder keeps its pipe open and remains valid without expiry. If the project root
 disappears, cleanup uses the already resolved control path without recreating the project.
 
-Human commands may infer the nearest project root. The supported machine stream requires explicit
+Human commands may infer a project root only when the Lean and Rocq candidates agree or exactly one
+exists; otherwise they report every candidate and require `--root`. The supported machine stream requires explicit
 `--root` and a nonempty `clientRequestId`; its semantic JSON cannot supply `root`, `workspaceId`,
 capability, dynamic workspace operations, or process-wide control operations such as `shutdown` and
 `resetStats`. The wrapper selects the descriptor binding and injects session metadata. Lifecycle
-shutdown remains the dedicated `lean-beam shutdown` command so it can publish `draining` first. Raw
+shutdown remains the dedicated `lean-beam --root ROOT stop` command so it can publish `draining` first. Raw
 port-oriented `beam-client` requests are maintainer/debug tooling. A wrapper-owned daemon rejects
 `initWorkspace`, `listWorkspaces`, and `dropWorkspace`; a separately launched broker retains the
 generic multi-workspace surface and has its own explicit owner. Broker runtime ownership is a typed
 `ServerMode`: wrapper identity and capability cannot be constructed independently.
 
-The default control directory is `<root>/.beam`, discoverable to project-scoped agents.
-`--control-dir DIR` is an exact, stateless selection that every participant must repeat.
-`BEAM_CONTROL_ROOT` must be absolute and hashes each canonical root below a writable base for
+The default session directory is `<root>/.beam`, discoverable to project-scoped agents.
+An absolute `--session-dir DIR` is an exact, stateless selection that every participant must repeat.
+`BEAM_SESSION_ROOT` must be absolute and hashes each canonical root below a writable base for
 sandboxed/read-only roots. The selected directory is private to one local account; coordination is
 supported between that account's processes, not across a group-shared control directory. Existing
 directories must be prepared explicitly as mode `0700`; validation rejects symlinks, other file
 types, and broader permissions without mutating them.
 
-Do not hide policy inside automatic fallback between these locations. A future multi-root CLI owner
-should require a stable explicit control directory and freeze all bindings before publication.
+Do not hide policy inside automatic fallback between these locations. Wrapper descriptors stay
+single-workspace until a concrete multi-workspace CLI design defines explicit configuration and
+workspace selection.
 
 Keep these invariants covered:
 
-- only `ensure --hold` may create and publish a wrapper daemon generation
+- only `serve` may create and publish a wrapper daemon generation
 - a second owner is rejected while the current endpoint/root/generation identity is live
 - ordinary wrapper commands are read-only with respect to registry and process lifecycle, including
   in ambiguous or unsafe state; they attach to frozen owner configuration rather than recomputing it

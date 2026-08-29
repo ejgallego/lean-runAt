@@ -96,12 +96,12 @@ stop_hold_process() {
     return
   fi
   kill -INT "$hold_pid" > /dev/null 2>&1 || true
-  if ! wait_for_exit "$hold_pid" "ensure --hold owner" 200 0.05; then
+  if ! wait_for_exit "$hold_pid" "serve owner" 200 0.05; then
     kill "$hold_pid" > /dev/null 2>&1 || true
     wait "$hold_pid" 2>/dev/null || true
     hold_pid=""
     if [ "$require_clean_exit" = "true" ]; then
-      echo "expected ensure --hold owner to exit promptly after SIGINT" >&2
+      echo "expected serve owner to exit promptly after SIGINT" >&2
       return 1
     fi
     return
@@ -113,7 +113,7 @@ stop_hold_process() {
   set -e
   hold_pid=""
   if [ "$require_clean_exit" = "true" ] && [ "$status" -ne 0 ]; then
-    echo "expected ensure --hold owner to exit cleanly, got $status" >&2
+    echo "expected serve owner to exit cleanly, got $status" >&2
     return 1
   fi
 }
@@ -139,10 +139,10 @@ cleanup() {
   fi
   stop_hold_process
   if [ "$root_removed" != "true" ]; then
-    "$beam_script" --root "$tmp1" shutdown > /dev/null 2>&1 || true
+    "$beam_script" --root "$tmp1" stop > /dev/null 2>&1 || true
     remove_owned_tmp_tree "$tmp1"
   fi
-  "$beam_script" --root "$tmp2" shutdown > /dev/null 2>&1 || true
+  "$beam_script" --root "$tmp2" stop > /dev/null 2>&1 || true
   remove_owned_tmp_tree "$tmp2"
   if [ -n "$owned_bundle_dir" ]; then
     remove_owned_tmp_tree "$owned_bundle_dir"
@@ -168,7 +168,7 @@ fixture_toolchain="$(awk 'NR==1 {print $1}' tests/save_olean_project/lean-toolch
 
 invalid_backend_out="$tmp1/invalid-backend.out"
 invalid_backend_err="$tmp1/invalid-backend.err"
-if "$beam_script" --root "$tmp1" ensure typo --hold > "$invalid_backend_out" 2> "$invalid_backend_err"; then
+if "$beam_script" --root "$tmp1" serve typo > "$invalid_backend_out" 2> "$invalid_backend_err"; then
   echo "expected an unknown owner backend to be rejected" >&2
   cat "$invalid_backend_out" >&2
   exit 1
@@ -184,24 +184,43 @@ fi
 remove_tmp_tree_within "$tmp1/.beam" "$tmp1"
 missing_owner_out="$tmp1/missing-owner.out"
 missing_owner_err="$tmp1/missing-owner.err"
-if "$beam_script" --root "$tmp1" ensure > "$missing_owner_out" 2> "$missing_owner_err"; then
+if "$beam_script" --root "$tmp1" stats > "$missing_owner_out" 2> "$missing_owner_err"; then
   echo "expected an ordinary wrapper command to require a session owner" >&2
   cat "$missing_owner_out" >&2
   exit 1
 fi
-if ! grep -Fq "lean-beam ensure --hold" "$missing_owner_err"; then
+if ! grep -Fq "lean-beam serve" "$missing_owner_err"; then
   echo "expected missing-owner error to name the recovery command" >&2
   cat "$missing_owner_err" >&2
   exit 1
 fi
+missing_status="$("$beam_script" --root "$tmp1" status)"
+assert_json_field_equals "absent session status response" "$missing_status" ok true
+assert_json_field_equals "absent session status state" "$missing_status" result.state absent
+absent_stop="$("$beam_script" --root "$tmp1" stop)"
+assert_json_field_equals "absent session stop response" "$absent_stop" ok true
+assert_json_field_equals "absent session stop state" "$absent_stop" result.state absent
+assert_json_field_equals "absent session stop changed" "$absent_stop" result.changed false
+absent_recover="$("$beam_script" --root "$tmp1" recover --force)"
+assert_json_field_equals "absent session recovery" "$absent_recover" recovered false
 if [ -e "$tmp1/.beam" ]; then
-  echo "expected missing-owner attachment not to create the project control directory" >&2
+  echo "expected absent status, stop, and recovery not to create the project session directory" >&2
   find "$tmp1/.beam" -maxdepth 2 -print >&2 || true
   exit 1
 fi
 
-# A control path is an exact security boundary, not a redirect. Reject a symlinked default path
-# without changing the target or creating any control files through it.
+mkdir -p "$tmp1/.beam"
+chmod 700 "$tmp1/.beam"
+"$beam_script" --root "$tmp1" stop > /dev/null
+"$beam_script" --root "$tmp1" recover --force > /dev/null
+if [ -e "$tmp1/.beam/lock" ]; then
+  echo "expected absent lifecycle commands not to create a lock in an existing session directory" >&2
+  exit 1
+fi
+rmdir "$tmp1/.beam"
+
+# A session path is an exact security boundary, not a redirect. Reject a symlinked default path
+# without changing the target or creating any session files through it.
 symlink_control_target="$tmp2/symlink-control-target"
 mkdir -p "$symlink_control_target"
 chmod 755 "$symlink_control_target"
@@ -234,7 +253,7 @@ start_owner() {
   local label="$2"
   local out="$root/$label.out"
   local err="$root/$label.err"
-  "$beam_script" --root "$root" ensure --hold > "$out" 2> "$err" &
+  "$beam_script" --root "$root" serve > "$out" 2> "$err" &
   hold_pid="$!"
   local registry="$root/.beam/beam-daemon.json"
   local attempts="${BEAM_TEST_HOLD_READY_ATTEMPTS:-1800}"
@@ -256,11 +275,11 @@ start_owner() {
     sleep 0.1
   done
   if [ ! -s "$out" ] || [ ! -f "$registry" ]; then
-    echo "expected ensure --hold to publish its response and registry" >&2
+    echo "expected serve to publish its response and registry" >&2
     cat "$err" >&2
     exit 1
   fi
-  assert_json_field_equals "ensure --hold response" "$(cat "$out")" ok true "$err"
+  assert_json_field_equals "serve response" "$(cat "$out")" ok true "$err"
 }
 
 registry="$tmp1/.beam/beam-daemon.json"
@@ -281,10 +300,14 @@ if ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; 
   exit 1
 fi
 
-ensure_json="$("$beam_script" --root "$tmp1" ensure)"
-assert_json_field_equals "owned ensure response" "$ensure_json" ok true
 stats_json="$("$beam_script" --root "$tmp1" stats)"
 assert_json_field_equals "owned stats response" "$stats_json" ok true
+status_json="$("$beam_script" --root "$tmp1" status)"
+assert_json_field_equals "running session status response" "$status_json" ok true
+assert_json_field_equals "running session status state" "$status_json" result.state running
+assert_json_field_equals "running session status generation" "$status_json" result.generation "$daemon1_id"
+assert_json_field_equals "running session status workspace" "$status_json" result.workspace "$tmp1"
+assert_json_field_equals "running session status directory" "$status_json" result.sessionDir "$tmp1/.beam"
 
 machine_stats_json="$("$beam_script" --root "$tmp1" request-stream \
   '{"op":"stats","clientRequestId":"machine-stats"}')"
@@ -343,12 +366,11 @@ import sys
 registry, root = sys.argv[1:]
 with open(registry, encoding="utf-8") as stream:
     entry = json.load(stream)
-if entry.get("schemaVersion") != 2:
+if entry.get("schemaVersion") != 3:
     raise SystemExit(f"unexpected session schema: {entry.get('schemaVersion')}")
-workspaces = entry.get("workspaces")
-if not isinstance(workspaces, list) or len(workspaces) != 1:
-    raise SystemExit(f"unexpected workspace bindings: {workspaces!r}")
-workspace = workspaces[0]
+workspace = entry.get("workspace")
+if not isinstance(workspace, dict):
+    raise SystemExit(f"unexpected workspace binding: {workspace!r}")
 if workspace.get("root") != os.path.realpath(root):
     raise SystemExit(f"unexpected workspace root: {workspace!r}")
 if workspace.get("workspaceId") != "beam-cli-project":
@@ -368,7 +390,7 @@ fi
 
 cross_root_descriptor="$tmp2/cross-root-recovery.before"
 cp -- "$registry" "$cross_root_descriptor"
-if "$beam_script" --root "$tmp2" --control-dir "$tmp1/.beam" \
+if "$beam_script" --root "$tmp2" --session-dir "$tmp1/.beam" \
     recover --generation "$daemon1_id" \
     > "$tmp2/cross-root-recovery.out" 2> "$tmp2/cross-root-recovery.err"; then
   echo "expected recovery through a non-member root to fail closed" >&2
@@ -408,15 +430,15 @@ if [ "$(read_json_field "$registry" daemonId)" != "$daemon1_id" ] || \
   exit 1
 fi
 
-if BEAM_CONTROL_ROOT=relative-control-root \
+if BEAM_SESSION_ROOT=relative-control-root \
     "$beam_script" --root "$tmp1" stats \
     > "$tmp1/relative-control-root.out" 2> "$tmp1/relative-control-root.err"; then
-  echo "expected relative BEAM_CONTROL_ROOT to be rejected" >&2
+  echo "expected relative BEAM_SESSION_ROOT to be rejected" >&2
   exit 1
 fi
-if ! grep -Fq "BEAM_CONTROL_ROOT must be an absolute path" \
+if ! grep -Fq "BEAM_SESSION_ROOT must be an absolute path" \
     "$tmp1/relative-control-root.err"; then
-  echo "expected relative BEAM_CONTROL_ROOT rejection to explain the stable-path requirement" >&2
+  echo "expected relative BEAM_SESSION_ROOT rejection to explain the stable-path requirement" >&2
   cat "$tmp1/relative-control-root.err" >&2
   exit 1
 fi
@@ -484,7 +506,7 @@ fi
 
 second_owner_out="$tmp1/second-owner.out"
 second_owner_err="$tmp1/second-owner.err"
-if "$beam_script" --root "$tmp1" ensure --hold > "$second_owner_out" 2> "$second_owner_err"; then
+if "$beam_script" --root "$tmp1" serve > "$second_owner_out" 2> "$second_owner_err"; then
   echo "expected a second foreground owner to be rejected" >&2
   cat "$second_owner_out" >&2
   exit 1
@@ -497,7 +519,7 @@ fi
 
 collision_out="$tmp2/collision.out"
 collision_err="$tmp2/collision.err"
-if "$beam_script" --root "$tmp2" --port "$port1" ensure --hold > "$collision_out" 2> "$collision_err"; then
+if "$beam_script" --root "$tmp2" --port "$port1" serve > "$collision_out" 2> "$collision_err"; then
   echo "expected an owner not to claim another project's endpoint" >&2
   cat "$collision_out" >&2
   exit 1
@@ -520,7 +542,7 @@ import os
 
 with open(os.environ["REGISTRY_TEMPLATE"], encoding="utf-8") as stream:
     entry = json.load(stream)
-entry["workspaces"][0]["root"] = os.path.realpath(os.environ["STALE_ROOT"])
+entry["workspace"]["root"] = os.path.realpath(os.environ["STALE_ROOT"])
 replacement = os.environ["STALE_REGISTRY"] + ".replacement"
 with open(replacement, "w", encoding="utf-8") as stream:
     json.dump(entry, stream, separators=(",", ":"))
@@ -529,7 +551,7 @@ os.replace(replacement, os.environ["STALE_REGISTRY"])
 PY
 stale_shutdown_out="$tmp2/stale-cross-root-shutdown.out"
 stale_shutdown_err="$tmp2/stale-cross-root-shutdown.err"
-if "$beam_script" --root "$tmp2" shutdown \
+if "$beam_script" --root "$tmp2" stop \
     > "$stale_shutdown_out" 2> "$stale_shutdown_err"; then
   echo "expected shutdown to reject a registry whose endpoint serves another root" >&2
   cat "$stale_shutdown_out" >&2
@@ -570,7 +592,7 @@ PY
 legacy_before="$(cat "$stale_registry")"
 legacy_owner_out="$tmp2/legacy-owner.out"
 legacy_owner_err="$tmp2/legacy-owner.err"
-if "$beam_script" --root "$tmp2" ensure --hold \
+if "$beam_script" --root "$tmp2" serve \
     > "$legacy_owner_out" 2> "$legacy_owner_err"; then
   echo "expected owner startup to reject a schema-less legacy registry" >&2
   cat "$legacy_owner_out" >&2
@@ -620,7 +642,7 @@ fi
 busy_port="$(cat "$busy_port_file")"
 busy_out="$tmp2/non-beam-port.out"
 busy_err="$tmp2/non-beam-port.err"
-if "$beam_script" --root "$tmp2" --port "$busy_port" ensure --hold > "$busy_out" 2> "$busy_err"; then
+if "$beam_script" --root "$tmp2" --port "$busy_port" serve > "$busy_out" 2> "$busy_err"; then
   echo "expected owner startup to reject a port occupied by a non-Beam service" >&2
   cat "$busy_out" >&2
   exit 1
@@ -664,7 +686,7 @@ busy_port="$(cat "$busy_port_file")"
 busy_out="$tmp2/silent-non-beam-port.out"
 busy_err="$tmp2/silent-non-beam-port.err"
 silent_probe_started="$SECONDS"
-if "$beam_script" --root "$tmp2" --port "$busy_port" ensure --hold > "$busy_out" 2> "$busy_err"; then
+if "$beam_script" --root "$tmp2" --port "$busy_port" serve > "$busy_out" 2> "$busy_err"; then
   echo "expected owner startup to reject a silent non-Beam service" >&2
   cat "$busy_out" >&2
   exit 1
@@ -703,7 +725,7 @@ rsync -a "$BEAM_INSTALL_BUNDLE_DIR/" "$drift_bundle_dir/"
 drift_out="$tmp1/config-drift.out"
 drift_err="$tmp1/config-drift.err"
 if ! BEAM_INSTALL_BUNDLE_DIR="$drift_bundle_dir" \
-    "$beam_script" --root "$tmp1" ensure > "$drift_out" 2> "$drift_err"; then
+    "$beam_script" --root "$tmp1" stats > "$drift_out" 2> "$drift_err"; then
   echo "expected ordinary attachment to use the owner's frozen configuration" >&2
   cat "$drift_err" >&2
   exit 1
@@ -713,7 +735,7 @@ assert_json_file_field_equals \
 drift_owner_out="$tmp1/config-drift-owner.out"
 drift_owner_err="$tmp1/config-drift-owner.err"
 if BEAM_INSTALL_BUNDLE_DIR="$drift_bundle_dir" \
-    "$beam_script" --root "$tmp1" ensure --hold \
+    "$beam_script" --root "$tmp1" serve \
       > "$drift_owner_out" 2> "$drift_owner_err"; then
   echo "expected a mismatched replacement owner to be rejected" >&2
   cat "$drift_owner_out" >&2
@@ -742,8 +764,26 @@ if ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null |
   exit 1
 fi
 
-shutdown_json="$("$beam_script" --root "$tmp1" shutdown)"
-assert_json_field_equals "explicit session shutdown" "$shutdown_json" ok true
+if (
+  cd "$tmp1"
+  "$beam_script" stop > "$tmp1/implicit-stop.out" 2> "$tmp1/implicit-stop.err"
+); then
+  echo "expected stop to require an explicit root" >&2
+  exit 1
+fi
+if ! grep -Fq "stop requires an explicit --root PATH" "$tmp1/implicit-stop.err"; then
+  echo "expected implicit stop rejection to explain the explicit selector" >&2
+  cat "$tmp1/implicit-stop.err" >&2
+  exit 1
+fi
+if ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; then
+  echo "implicit stop rejection must preserve the running session" >&2
+  exit 1
+fi
+
+stop_json="$("$beam_script" --root "$tmp1" stop)"
+assert_json_field_equals "explicit session stop" "$stop_json" ok true
+assert_json_field_equals "explicit session stop state" "$stop_json" result.state stopping
 expect_slow_request_cancelled "$tmp1" "shutdown-active" "shutdown-active"
 if ! wait_for_exit "$hold_pid" "owner after explicit shutdown" 200 0.05; then
   cat "$tmp1/owner-1.err" >&2
@@ -767,6 +807,8 @@ if [ -e "$registry" ]; then
   cat "$registry" >&2
   exit 1
 fi
+stopped_status="$("$beam_script" --root "$tmp1" status)"
+assert_json_field_equals "stopped session status state" "$stopped_status" result.state absent
 
 start_owner "$tmp1" "owner-2"
 daemon2_pid="$(read_json_field "$registry" pid)"
@@ -805,7 +847,7 @@ if [ "$(read_json_field "$registry" daemonId)" != "$daemon2_id" ] || \
   cat "$registry" >&2
   exit 1
 fi
-if "$beam_script" --root "$tmp1" ensure --hold \
+if "$beam_script" --root "$tmp1" serve \
     > "$tmp1/crash-replacement.out" 2> "$tmp1/crash-replacement.err"; then
   echo "expected crash-fenced state to reject a replacement owner" >&2
   exit 1
@@ -844,9 +886,13 @@ if ! kill -0 "$hold_pid" 2>/dev/null || ! kill -0 "$draining_daemon_pid" 2>/dev/
   echo "expected the paused daemon and its owner to remain alive during the drain check" >&2
   exit 1
 fi
+draining_status="$("$beam_script" --root "$tmp1" status)"
+assert_json_field_equals "draining session status" "$draining_status" result.state stopping
+assert_json_field_equals \
+  "draining session status generation" "$draining_status" result.generation "$draining_daemon_id"
 draining_lookup_out="$tmp1/draining-lookup.out"
 draining_lookup_err="$tmp1/draining-lookup.err"
-if "$beam_script" --root "$tmp1" ensure > "$draining_lookup_out" 2> "$draining_lookup_err"; then
+if "$beam_script" --root "$tmp1" stats > "$draining_lookup_out" 2> "$draining_lookup_err"; then
   echo "expected an ordinary command not to attach to a draining generation" >&2
   cat "$draining_lookup_out" >&2
   exit 1
@@ -858,7 +904,7 @@ if ! grep -Fq "is draining" "$draining_lookup_err"; then
 fi
 replacement_owner_out="$tmp1/replacement-during-drain.out"
 replacement_owner_err="$tmp1/replacement-during-drain.err"
-if "$beam_script" --root "$tmp1" ensure --hold \
+if "$beam_script" --root "$tmp1" serve \
     > "$replacement_owner_out" 2> "$replacement_owner_err"; then
   echo "expected a draining generation to fence out a replacement owner" >&2
   cat "$replacement_owner_out" >&2
@@ -921,12 +967,17 @@ fi
 expect_slow_request_cancelled "$tmp1" "owner-loss-active" "owner-loss-active"
 owner_loss_out="$tmp1/owner-loss.out"
 owner_loss_err="$tmp1/owner-loss.err"
-if "$beam_script" --root "$tmp1" ensure > "$owner_loss_out" 2> "$owner_loss_err"; then
+if "$beam_script" --root "$tmp1" stats > "$owner_loss_out" 2> "$owner_loss_err"; then
   echo "expected a command after owner loss to preserve the abnormal-session fence" >&2
   cat "$owner_loss_out" >&2
   exit 1
 fi
 owner_loss_generation="$(read_json_field "$registry" daemonId)"
+owner_loss_status="$("$beam_script" --root "$tmp1" status)"
+assert_json_field_equals \
+  "owner-loss session status" "$owner_loss_status" result.state recoveryRequired
+assert_json_field_equals \
+  "owner-loss session status generation" "$owner_loss_status" result.generation "$owner_loss_generation"
 if ! grep -Fq "recover --generation $owner_loss_generation" "$owner_loss_err"; then
   echo "expected owner-loss diagnostics to name exact-generation recovery" >&2
   cat "$owner_loss_err" >&2
@@ -963,7 +1014,7 @@ nonprivate_control="$tmp2/nonprivate-control"
 mkdir -p "$nonprivate_control"
 chmod 755 "$nonprivate_control"
 nonprivate_mode_before="$(file_mode "$nonprivate_control")"
-if "$beam_script" --root "$tmp2" --control-dir "$nonprivate_control" recover --force \
+if "$beam_script" --root "$tmp2" --session-dir "$nonprivate_control" recover --force \
     > "$tmp2/nonprivate-control.out" 2> "$tmp2/nonprivate-control.err"; then
   echo "expected an existing non-private control directory to be rejected" >&2
   exit 1
@@ -984,7 +1035,7 @@ if find "$nonprivate_control" -mindepth 1 -print -quit | grep -q .; then
 fi
 
 # An absent exact control leaf is safe to create and privatize before descriptor publication.
-"$beam_script" --root "$tmp2" --control-dir "$explicit_control" ensure --hold \
+"$beam_script" --root "$tmp2" --session-dir "$explicit_control" serve \
   > "$tmp2/explicit-control-owner.out" 2> "$tmp2/explicit-control-owner.err" &
 hold_pid="$!"
 explicit_registry="$explicit_control/beam-daemon.json"
@@ -992,7 +1043,7 @@ if ! wait_for_nonempty_file "$explicit_registry" "explicit control-directory ses
   cat "$tmp2/explicit-control-owner.err" >&2
   exit 1
 fi
-explicit_stats="$("$beam_script" --root "$tmp2" --control-dir "$explicit_control" stats)"
+explicit_stats="$("$beam_script" --root "$tmp2" --session-dir "$explicit_control" stats)"
 assert_json_field_equals "explicit control-directory attachment" "$explicit_stats" ok true
 if [ "$(file_mode "$explicit_control")" != "700" ] || \
     [ "$(file_mode "$explicit_registry")" != "600" ]; then
