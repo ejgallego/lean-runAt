@@ -512,6 +512,7 @@ beam_wrapper_prepare_project_root() {
   rsync -a --exclude='.beam/' tests/save_olean_project/ "$root"/
   rm -rf -- "$root/.beam"
   mkdir -p "$root/.beam"
+  chmod 700 "$root/.beam"
   beam_wrapper_register_root "$root"
   printf '%s\n' "$root"
 }

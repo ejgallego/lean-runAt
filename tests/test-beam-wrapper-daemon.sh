@@ -37,6 +37,13 @@ paused_daemon_pid=""
 busy_pid=""
 busy_port_file=""
 
+file_mode() {
+  case "$(uname -s)" in
+    Darwin) stat -f '%Lp' "$1" ;;
+    *) stat -c '%a' "$1" ;;
+  esac
+}
+
 start_slow_request() {
   local root="$1"
   local label="$2"
@@ -151,6 +158,7 @@ for tmp in "$tmp1" "$tmp2"; do
   rsync -a --exclude='.beam/' tests/save_olean_project/ "$tmp"/
   remove_tmp_tree_within "$tmp/.beam" "$tmp"
   mkdir -p "$tmp/.beam"
+  chmod 700 "$tmp/.beam"
   mkdir -p "$tmp/tests/scenario/docs"
   cp tests/scenario/docs/SlowPoll.lean "$tmp/tests/scenario/docs/SlowPoll.lean"
 done
@@ -191,6 +199,35 @@ if [ -e "$tmp1/.beam" ]; then
   find "$tmp1/.beam" -maxdepth 2 -print >&2 || true
   exit 1
 fi
+
+# A control path is an exact security boundary, not a redirect. Reject a symlinked default path
+# without changing the target or creating any control files through it.
+symlink_control_target="$tmp2/symlink-control-target"
+mkdir -p "$symlink_control_target"
+chmod 755 "$symlink_control_target"
+symlink_target_mode_before="$(file_mode "$symlink_control_target")"
+ln -s "$symlink_control_target" "$tmp1/.beam"
+if "$beam_script" --root "$tmp1" recover --force \
+    > "$tmp1/symlink-control.out" 2> "$tmp1/symlink-control.err"; then
+  echo "expected a symlinked default control directory to be rejected" >&2
+  exit 1
+fi
+if ! grep -Fq "symbolic links are not accepted" "$tmp1/symlink-control.err"; then
+  echo "expected symlinked control rejection to explain the exact-path boundary" >&2
+  cat "$tmp1/symlink-control.err" >&2
+  exit 1
+fi
+if [ "$(file_mode "$symlink_control_target")" != "$symlink_target_mode_before" ]; then
+  echo "symlinked control rejection changed the target directory mode" >&2
+  exit 1
+fi
+if find "$symlink_control_target" -mindepth 1 -print -quit | grep -q .; then
+  echo "symlinked control rejection created files in the target directory" >&2
+  find "$symlink_control_target" -mindepth 1 -maxdepth 2 -print >&2
+  exit 1
+fi
+rm -f -- "$tmp1/.beam"
+rmdir "$symlink_control_target"
 
 start_owner() {
   local root="$1"
@@ -318,16 +355,8 @@ if workspace.get("workspaceId") != "beam-cli-project":
     raise SystemExit(f"unexpected workspace id: {workspace!r}")
 PY
 
-case "$(uname -s)" in
-  Darwin)
-    control_dir_mode="$(stat -f '%Lp' "$tmp1/.beam")"
-    registry_mode="$(stat -f '%Lp' "$registry")"
-    ;;
-  *)
-    control_dir_mode="$(stat -c '%a' "$tmp1/.beam")"
-    registry_mode="$(stat -c '%a' "$registry")"
-    ;;
-esac
+control_dir_mode="$(file_mode "$tmp1/.beam")"
+registry_mode="$(file_mode "$registry")"
 if [ "$control_dir_mode" != "700" ]; then
   echo "expected the capability control directory to use mode 700, got $control_dir_mode" >&2
   exit 1
@@ -930,7 +959,31 @@ if [ ! -f "$quarantined_registry" ]; then
 fi
 
 explicit_control="$tmp2/shared-control"
-mkdir -p "$explicit_control"
+nonprivate_control="$tmp2/nonprivate-control"
+mkdir -p "$nonprivate_control"
+chmod 755 "$nonprivate_control"
+nonprivate_mode_before="$(file_mode "$nonprivate_control")"
+if "$beam_script" --root "$tmp2" --control-dir "$nonprivate_control" recover --force \
+    > "$tmp2/nonprivate-control.out" 2> "$tmp2/nonprivate-control.err"; then
+  echo "expected an existing non-private control directory to be rejected" >&2
+  exit 1
+fi
+if ! grep -Fq "existing mode is 0755, expected 0700" "$tmp2/nonprivate-control.err"; then
+  echo "expected non-private control rejection to explain the required mode" >&2
+  cat "$tmp2/nonprivate-control.err" >&2
+  exit 1
+fi
+if [ "$(file_mode "$nonprivate_control")" != "$nonprivate_mode_before" ]; then
+  echo "non-private control rejection changed the existing directory mode" >&2
+  exit 1
+fi
+if find "$nonprivate_control" -mindepth 1 -print -quit | grep -q .; then
+  echo "non-private control rejection created files in the existing directory" >&2
+  find "$nonprivate_control" -mindepth 1 -maxdepth 2 -print >&2
+  exit 1
+fi
+
+# An absent exact control leaf is safe to create and privatize before descriptor publication.
 "$beam_script" --root "$tmp2" --control-dir "$explicit_control" ensure --hold \
   > "$tmp2/explicit-control-owner.out" 2> "$tmp2/explicit-control-owner.err" &
 hold_pid="$!"
@@ -941,6 +994,11 @@ if ! wait_for_nonempty_file "$explicit_registry" "explicit control-directory ses
 fi
 explicit_stats="$("$beam_script" --root "$tmp2" --control-dir "$explicit_control" stats)"
 assert_json_field_equals "explicit control-directory attachment" "$explicit_stats" ok true
+if [ "$(file_mode "$explicit_control")" != "700" ] || \
+    [ "$(file_mode "$explicit_registry")" != "600" ]; then
+  echo "expected a newly created explicit control directory and descriptor to use modes 700/600" >&2
+  exit 1
+fi
 if "$beam_script" --root "$tmp2" stats \
     > "$tmp2/default-control-stats.out" 2> "$tmp2/default-control-stats.err"; then
   echo "expected the default and explicit control selections to remain distinct" >&2

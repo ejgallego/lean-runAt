@@ -233,10 +233,12 @@ separate holder; the stdio MCP process owns its runtime session.
 The default session descriptor and lock live in `<root>/.beam`. This is intentional for
 project-scoped agent sandboxes: clients that can access the same workspace can discover the same
 session. Before creating a lock or capability-bearing descriptor, Beam makes the selected control
-directory account-private (`0700`); the published descriptor is `0600`. This permits coordination
-between sandboxes and agents running as the same local account, but a group-shared or traversable
-control directory is not a supported authentication boundary. Use an exact alternate directory
-when the project is read-only or several same-account clients need another stable control plane:
+directory account-private (`0700`) when the leaf does not exist; the published descriptor is
+`0600`. An existing selection must already be a real, non-symlinked directory with mode `0700`, or
+Beam refuses it without changing its permissions. This permits coordination between sandboxes and
+agents running as the same local account, but a group-shared or traversable control directory is
+not a supported authentication boundary. Use an exact alternate directory when the project is
+read-only or several same-account clients need another stable control plane:
 
 ```bash
 lean-beam --root /workspace/a --control-dir /workspace/control ensure --hold
@@ -244,11 +246,13 @@ lean-beam --root /workspace/a --control-dir /workspace/control stats
 ```
 
 Every participant must supply the same `--root` and `--control-dir`; Beam does not search alternate
-control directories. `BEAM_CONTROL_ROOT=/writable/base` is the sandbox convenience form and must be
-absolute: Beam derives a separate hashed directory for each canonical root below that base. An
+control directories. If the exact directory already exists, prepare its `0700` mode explicitly;
+Beam will not adopt it by silently changing permissions. `BEAM_CONTROL_ROOT=/writable/base` is the
+sandbox convenience form and must be absolute: Beam derives a separate hashed directory for each
+canonical root below that base. An
 explicit control directory is also the intended future location for a statically configured
-multi-workspace CLI session. The current public owner command still publishes one frozen workspace, and wrapper mode
-does not allow runtime `init_workspace`, `list_workspaces`, or `drop_workspace` requests. The
+multi-workspace CLI session. The current public owner command still publishes one frozen workspace,
+and wrapper mode does not allow runtime `init_workspace`, `list_workspaces`, or `drop_workspace` requests. The
 supported semantic `request-stream` also excludes process-wide `shutdown` and `reset_stats`; use
 the dedicated `lean-beam shutdown` command for lifecycle control.
 Use a stable external control directory when ownership must remain fenced while the project path is

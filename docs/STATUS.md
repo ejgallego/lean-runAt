@@ -214,8 +214,11 @@ Exact event ordering and examples live in
   available inside project-scoped agent sandboxes. `--control-dir DIR` selects one exact alternate
   control directory; callers must repeat the same selection for every owner, request, diagnostic,
   shutdown, and recovery command. `BEAM_CONTROL_ROOT` is the sandbox convenience that derives a
-  per-root subdirectory below an absolute writable base. Beam makes every selected control
-  directory account-private (`0700`) before creating its lock or capability descriptor. A stable
+  per-root subdirectory below an absolute writable base. Beam requires every selected control
+  directory to be account-private (`0700`) before creating its lock or capability descriptor: it
+  creates and privatizes a missing leaf, but accepts an existing path only when it is a real,
+  non-symlinked mode-`0700` directory. It rejects broader existing permissions without changing
+  them. A stable
   explicit control directory is also the intended future boundary for a statically configured
   multi-workspace CLI session; dynamic
   workspace mutation remains unavailable in wrapper mode.

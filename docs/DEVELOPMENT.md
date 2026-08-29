@@ -407,10 +407,12 @@ shape permits a future explicitly configured static multi-workspace session with
 request routing. Exactly one foreground `lean-beam ensure --hold` process owns the generation. It
 starts the daemon in a dedicated process session, passes the identity, effective configuration
 hash, and random capability through piped stdin, and retains the pipe's write end. Before creating
-the lock or descriptor, Beam makes the selected control directory `0700`; the mode-`0600`
-descriptor is written through an exclusive random temporary path and publishes `live` or
-`draining`. Every wrapper request, including cancellation, generation probes, and shutdown,
-presents the capability. The daemon watches the pipe's read end;
+the lock or descriptor, Beam creates a missing control leaf with mode `0700`, or validates that an
+existing leaf is a real, non-symlinked directory already using mode `0700`. It never changes an
+existing selection's permissions. The mode-`0600` descriptor is written through an exclusive
+random temporary path and publishes `live` or `draining`. Every wrapper request, including
+cancellation, generation probes, and shutdown, presents the capability. The daemon watches the
+pipe's read end;
 EOF closes admission, marks admitted requests for cancellation, shuts down backend sessions, and
 stops the listener. There is no heartbeat, lease, or time-based retirement fence.
 
@@ -451,7 +453,9 @@ The default control directory is `<root>/.beam`, discoverable to project-scoped 
 `--control-dir DIR` is an exact, stateless selection that every participant must repeat.
 `BEAM_CONTROL_ROOT` must be absolute and hashes each canonical root below a writable base for
 sandboxed/read-only roots. The selected directory is private to one local account; coordination is
-supported between that account's processes, not across a group-shared control directory.
+supported between that account's processes, not across a group-shared control directory. Existing
+directories must be prepared explicitly as mode `0700`; validation rejects symlinks, other file
+types, and broader permissions without mutating them.
 
 Do not hide policy inside automatic fallback between these locations. A future multi-root CLI owner
 should require a stable explicit control directory and freeze all bindings before publication.
@@ -466,6 +470,8 @@ Keep these invariants covered:
   and cannot remove a replacement; abnormal exit leaves the fence for explicit recovery
 - recovery of a current descriptor requires both its exact generation and one of its recorded
   workspace roots; a wrong-root caller cannot quarantine another session
+- control preparation changes permissions only on a leaf Beam just created; an existing control
+  path must be a non-symlinked mode-`0700` directory and rejection leaves it untouched
 - owner EOF, explicit shutdown, and project-root disappearance all close admission before backend
   teardown and complete with bounded child cleanup
 - persisted numeric PIDs are never signalled or used for automatic stale reclamation

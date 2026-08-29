@@ -10,6 +10,13 @@ open Lean
 
 namespace Beam
 
+/-- Return the POSIX permission bits reported by `lstat`, without following the final symlink. -/
+@[extern "lean_beam_lstat_mode"]
+private opaque lstatMode (path : @& String) : IO UInt32
+
+def fileModeNoFollow (path : System.FilePath) : IO UInt32 :=
+  lstatMode path.toString
+
 def trimLine (text : String) : String :=
   text.trimAscii.toString
 

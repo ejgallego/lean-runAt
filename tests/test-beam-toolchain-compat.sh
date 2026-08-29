@@ -219,6 +219,7 @@ prepare_stale_diagnostic_project() {
   printf '%s\n' "$toolchain" > "$stale_project_root/lean-toolchain"
   rm -rf -- "$stale_project_root/.beam"
   mkdir -p "$stale_project_root/.beam"
+  chmod 700 "$stale_project_root/.beam"
 }
 
 assert_stale_diagnostic_payload() {

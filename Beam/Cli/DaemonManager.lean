@@ -59,16 +59,96 @@ private def projectControl
   let dir ← controlDirFor root explicitControlDir?
   pure { root, dir, registry := dir / "beam-daemon.json" }
 
+private def privateControlDirRights : IO.FileRight := {
+  user := { read := true, write := true, execution := true }
+}
+
+private def privateControlDirMode : UInt32 :=
+  privateControlDirRights.flags
+
+private def invalidControlDirMessage (dir detail : String) : String :=
+  s!"unsafe Beam control directory {dir}: {detail}. Select a dedicated directory that is a real " ++
+    "directory with mode 0700; Beam does not change permissions on existing paths"
+
+private def permissionModeText (mode : UInt32) : String :=
+  let value := mode.toNat
+  s!"0{value / 64}{(value / 8) % 8}{value % 8}"
+
+private inductive ControlDirObservation where
+  | absent
+  | privateDir
+  | symlink
+  | nonPrivate (mode : UInt32)
+  | notDirectory
+
+/-- Inspect the exact control leaf without following a final symbolic link. -/
+private def observeControlDir (dir : System.FilePath) : IO ControlDirObservation := do
+  try
+    let metadata ← dir.symlinkMetadata
+    match metadata.type with
+    | .dir =>
+        let mode ← Beam.fileModeNoFollow dir
+        if mode == privateControlDirMode then
+          pure .privateDir
+        else
+          pure <| .nonPrivate mode
+    | .symlink => pure .symlink
+    | .file | .other => pure .notDirectory
+  catch
+  | .noFileOrDirectory .. => pure .absent
+  | err => throw err
+
+private def rejectControlDirObservation
+    (dir : System.FilePath) : ControlDirObservation → IO Unit
+  | .symlink =>
+      throw <| IO.userError <|
+        invalidControlDirMessage dir.toString "symbolic links are not accepted"
+  | .nonPrivate mode =>
+      throw <| IO.userError <|
+        invalidControlDirMessage dir.toString
+          s!"existing mode is {permissionModeText mode}, expected 0700"
+  | .notDirectory =>
+      throw <| IO.userError <|
+        invalidControlDirMessage dir.toString "the path is not a directory"
+  | .absent =>
+      throw <| IO.userError <|
+        invalidControlDirMessage dir.toString "the path disappeared during control preparation"
+  | .privateDir => pure ()
+
+/-- Accept an existing control path only when it is a real, account-private directory. -/
+private def validatePrivateControlDir (dir : System.FilePath) : IO Unit := do
+  rejectControlDirObservation dir (← observeControlDir dir)
+
 /--
-Create the selected control directory and make it private before creating its lock or any
-capability-bearing descriptor. Wrapper authentication assumes that this directory is shared only
-between processes of the same local account.
+Create a missing dedicated control leaf as private, or validate an existing path without mutating
+it. The directory is ready before Beam creates its lock or any capability-bearing descriptor.
 -/
 private def preparePrivateControlDir (dir : System.FilePath) : IO Unit := do
-  IO.FS.createDirAll dir
-  IO.setAccessRights dir {
-    user := { read := true, write := true, execution := true }
-  }
+  match ← observeControlDir dir with
+  | .privateDir => return
+  | .absent => pure ()
+  | observation => rejectControlDirObservation dir observation
+  if let some parent := dir.parent then
+    IO.FS.createDirAll parent
+  try
+    IO.FS.createDir dir
+  catch
+  | .alreadyExists .. =>
+      -- A concurrent owner may have created the leaf after our absent observation. Never adopt it
+      -- implicitly: apply the same read-only validation as any other existing path.
+      validatePrivateControlDir dir
+      return
+  | err => throw err
+  try
+    -- This chmod is restricted to the leaf created successfully by this invocation.
+    IO.setAccessRights dir privateControlDirRights
+    validatePrivateControlDir dir
+  catch err =>
+    try
+      IO.FS.removeDir dir
+    catch _ =>
+      pure ()
+    throw err
 
 /-- Supply project registry mutation only for the dynamic extent of the project control lock. -/
 private def withProjectControl
@@ -1060,8 +1140,11 @@ def withProjectDaemonOwner
     (backend : Backend)
     (opts : CliOptions)
     (act : ProjectDaemonOwner → IO α) : IO α := do
-  let desired ← desiredConfig home root backend
   let controlDir ← controlDirFor root opts.explicitControlDir?
+  -- Establish or validate the control boundary before bundle resolution can create project-local
+  -- `.beam` state for a previously unseen toolchain.
+  preparePrivateControlDir controlDir
+  let desired ← desiredConfig home root backend
   let owned ← withProjectControl root (explicitControlDir? := some controlDir) fun control =>
     startOwnedProjectDaemon control desired opts
   let exitCodeRef ← IO.mkRef (none : Option UInt32)
