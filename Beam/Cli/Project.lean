@@ -11,6 +11,7 @@ import Beam.Cli.RuntimeBundle
 import Beam.Lean.Workspace
 import Beam.Path
 import Beam.Project
+import Beam.System
 
 open Lean
 
@@ -86,10 +87,10 @@ def leanToolchain (root : System.FilePath) : IO String := do
   let path := root / "lean-toolchain"
   unless ← path.pathExists do
     throw <| IO.userError s!"missing lean-toolchain in {root}"
-  pure <| trimLine (← IO.FS.readFile path)
+  pure <| Beam.trimLine (← IO.FS.readFile path)
 
 def leanBin (root : System.FilePath) : IO String :=
-  readCmdTrim "elan" #["which", "lean"] (some root)
+  Beam.readCmdTrim "elan" #["which", "lean"] (some root)
 
 def rocqCandidates (root : System.FilePath) : List System.FilePath :=
   [root / "_opam" / "bin" / "coq-lsp", root / "_opam" / "_opam" / "bin" / "coq-lsp"]
@@ -101,7 +102,7 @@ def maybeRocqCmd (root : System.FilePath) : IO (Option String) := do
   match ← IO.getEnv "BEAM_ROCQ_CMD" with
   | some cmd => pure (some cmd)
   | none =>
-      if ← commandAvailable "coq-lsp" then
+      if ← Beam.commandAvailable "coq-lsp" then
         pure (some "coq-lsp")
       else
         pure none

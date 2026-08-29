@@ -18,6 +18,7 @@ private def writeFakeServer (root : System.FilePath) : IO System.FilePath := do
   let body := String.intercalate "\n" [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
+    "printf '%s\\n' \"$$\" > \"$(dirname \"$0\")/fake-lean.pid\"",
     "frame() {",
     "  local body=\"$1\"",
     "  printf 'Content-Length: %s\\r\\n\\r\\n%s' \"${#body}\" \"$body\"",
@@ -37,6 +38,19 @@ private def writeFakeServer (root : System.FilePath) : IO System.FilePath := do
     throw <| IO.userError s!"failed to chmod fake startup server\n{out.stderr}"
   pure script
 
+private partial def waitForProcessGone (pid : Nat) (tries : Nat := 80) : IO Unit := do
+  let out ← IO.Process.output {
+    cmd := "/bin/kill"
+    args := #["-0", toString pid]
+  }
+  if out.exitCode != 0 then
+    pure ()
+  else if tries == 0 then
+    throw <| IO.userError s!"failed provisional backend process {pid} remained alive"
+  else
+    IO.sleep 25
+    waitForProcessGone pid (tries - 1)
+
 def main : IO Unit := do
   let endpoint ← freshTcpEndpoint
   let root ← mkTempProjectRoot "beam-daemon-startup"
@@ -54,6 +68,10 @@ def main : IO Unit := do
       throw <| IO.userError s!"expected internalError for startup failure, got {(toJson resp).compress}"
     unless err.message.contains "initialize failed" do
       throw <| IO.userError s!"expected startup failure to mention initialize failure, got {(toJson resp).compress}"
+    let pidText ← IO.FS.readFile (root / "fake-lean.pid")
+    let some pid := pidText.trimAscii.toString.toNat?
+      | throw <| IO.userError s!"invalid fake backend pid '{pidText}'"
+    waitForProcessGone pid
   finally
     try
       broker.kill

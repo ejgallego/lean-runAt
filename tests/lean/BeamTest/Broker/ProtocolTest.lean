@@ -648,7 +648,7 @@ private def checkRequestArgsBoundary : IO Unit := do
     codeActionResolveRocqUnsupported.codeActionResolveArgs
 
 private def checkWorkspaceRoutingFields : IO Unit := do
-  let processWideOps := #[Op.cancel, .listWorkspaces, .resetStats, .shutdown]
+  let processWideOps := #[Op.listWorkspaces, .resetStats, .shutdown]
   let optionallyScopedOps := #[Op.openDocs, .stats]
 
   for op in Op.all do
@@ -661,6 +661,9 @@ private def checkWorkspaceRoutingFields : IO Unit := do
         .required
     require s!"{op.key} has the wrong workspace scope"
       (op.workspaceScope == expectedScope)
+    let expectedTracking := op != .cancel && op != .shutdown
+    require s!"{op.key} has the wrong active-request tracking policy"
+      (op.tracksActiveRequest == expectedTracking)
     let request : Request := { op }
     let decoded ← expectOk s!"minimal {op.key} request round trip" <|
       fromJson? (α := Request) (toJson request)
@@ -776,6 +779,54 @@ private def checkWorkspaceRoutingFields : IO Unit := do
       require "unsupported workspace mode error should name accepted values"
         (err.contains "'set', 'verify', or 'reset'")
 
+private def checkProjectRequestBoundary : IO Unit := do
+  let semanticJson := Json.mkObj [
+    ("op", toJson Op.runAt),
+    ("backend", toJson Backend.lean),
+    ("clientRequestId", toJson "project-request"),
+    ("path", toJson "Demo.lean"),
+    ("version", toJson (1 : Nat)),
+    ("line", toJson (0 : Nat)),
+    ("character", toJson (0 : Nat)),
+    ("text", toJson "exact rfl")
+  ]
+  let projectRequest ← expectOk "semantic project request" <|
+    fromJson? (α := ProjectRequest) semanticJson
+  let attached := projectRequest.attach "workspace-a" "/workspace/a" "session-capability"
+  require "project request attachment injects the selected workspace"
+    (attached.workspaceId? == some "workspace-a")
+  require "project request attachment injects the owner-side root"
+    (attached.root? == some "/workspace/a")
+  require "project request attachment injects session authority"
+    (attached.daemonCapability? == some "session-capability")
+  match fromJson? (α := ProjectRequest) <| Json.mkObj [("op", toJson Op.stats)] with
+  | .ok _ => throw <| IO.userError "project request unexpectedly accepted a missing request id"
+  | .error err =>
+      require "project request id rejection should explain the machine identity requirement"
+        (err.contains "non-empty clientRequestId")
+  let cancelRequest ← expectOk "semantic cancellation request" <|
+    fromJson? (α := ProjectRequest) <| Json.mkObj [
+      ("op", toJson Op.cancel),
+      ("clientRequestId", toJson "cancel-command"),
+      ("cancelRequestId", toJson "project-request")
+    ]
+  let attachedCancel := cancelRequest.attach "workspace-a" "/workspace/a" "session-capability"
+  require "project cancellation is workspace-scoped"
+    (attachedCancel.workspaceId? == some "workspace-a")
+  require "project cancellation does not invent an unsupported root field"
+    attachedCancel.root?.isNone
+  for field in ["workspaceId", "root", "daemonCapability", "leanCmd"] do
+    match fromJson? (α := ProjectRequest) (semanticJson.setObjVal! field (toJson "forbidden")) with
+    | .ok _ => throw <| IO.userError s!"project request unexpectedly accepted session field '{field}'"
+    | .error _ => pure ()
+  for op in [Op.initWorkspace, .listWorkspaces, .dropWorkspace, .resetStats, .shutdown] do
+    match fromJson? (α := ProjectRequest) <| Json.mkObj [
+      ("op", toJson op),
+      ("clientRequestId", toJson "control-request")
+    ] with
+    | .ok _ => throw <| IO.userError s!"project request unexpectedly accepted control op '{op.key}'"
+    | .error _ => pure ()
+
 private def checkWorkspaceLifecycleProtocol : IO Unit := do
   let root := System.FilePath.mk "/workspace"
   let previous := System.FilePath.mk "/previous-workspace"
@@ -789,12 +840,16 @@ private def checkWorkspaceLifecycleProtocol : IO Unit := do
 
   let runtime ← Beam.Broker.ServerRuntime.create
     ({ root } : Beam.Broker.BrokerConfig) "fixture"
+  require "broker workspace query should expose the constructor workspace"
+    ((← runtime.workspaceRoot? "fixture") == some root)
+  require "broker workspace query should reject an unknown workspace"
+    ((← runtime.workspaceRoot? "unknown") == none)
   for op in #[Op.ensure, .initWorkspace, .dropWorkspace] do
-    let (missingWorkspaceResp, _) ← runtime.dispatchRequest { op }
+    let missingWorkspaceResp ← runtime.dispatchRequest { op }
     require s!"{op.key} should reject omitted workspace identity"
       (missingWorkspaceResp.error?.any fun err =>
         err.code == "invalidParams" && err.message.contains "workspaceId is required")
-  let (processStatsResp, _) ← runtime.dispatchRequest { op := .stats }
+  let processStatsResp ← runtime.dispatchRequest { op := .stats }
   let some processStats := processStatsResp.result?
     | throw <| IO.userError s!"process-wide stats failed: {(toJson processStatsResp).compress}"
   requireFieldAbsent "process-wide stats" "root" processStats
@@ -858,6 +913,246 @@ private def checkWorkspaceLifecycleProtocol : IO Unit := do
     fromJson? (α := Beam.Workspace.DropResult) dropJson
   require "typed workspace drop preserves lifecycle state"
     (decodedDrop.workspaceId == "fixture" && decodedDrop.dropped && decodedDrop.invalidatedHandles)
+  let dropResult ← runtime.dropWorkspace "fixture"
+  match dropResult with
+  | .error failure =>
+      throw <| IO.userError s!"broker workspace drop failed: {failure.error.message}"
+  | .ok dropped =>
+      require "broker workspace drop should succeed" dropped.dropped
+      require "broker workspace drop should invalidate handles" dropped.invalidatedHandles
+  require "broker workspace query should observe a dropped workspace"
+    ((← runtime.workspaceRoot? "fixture") == none)
+
+  match ← runtime.initWorkspaceWithConfig "fixture" ({ root } : Beam.Broker.BrokerConfig) with
+  | .error failure =>
+      throw <| IO.userError s!"typed broker workspace initialization failed: {failure.error.message}"
+  | .ok initialized =>
+      require "typed broker workspace initialization should return its workspace"
+        (initialized.workspaceId == "fixture" && initialized.root == root)
+      require "typed broker workspace initialization should report a new runtime"
+        (!initialized.runtimeReused && !initialized.invalidatedHandles)
+
+private inductive LifecycleTeardown where
+  | reset
+  | drop
+
+private def LifecycleTeardown.label : LifecycleTeardown → String
+  | .reset => "reset"
+  | .drop => "drop"
+
+private partial def waitForPath
+    (path : System.FilePath)
+    (tries : Nat := 200) : IO Bool := do
+  if ← path.pathExists then
+    pure true
+  else if tries == 0 then
+    pure false
+  else
+    IO.sleep 10
+    waitForPath path (tries - 1)
+
+private partial def waitForTaskBefore
+    (task : Task α)
+    (blockedBy : Task β)
+    (tries : Nat := 300) : IO (Option α) := do
+  if ← IO.hasFinished blockedBy then
+    pure none
+  else if ← IO.hasFinished task then
+    pure <| some (← IO.wait task)
+  else if tries == 0 then
+    pure none
+  else
+    IO.sleep 10
+    waitForTaskBefore task blockedBy (tries - 1)
+
+private def stubbornSession
+    (workspaceId : WorkspaceId)
+    (root sentinel : System.FilePath) : IO Session := do
+  let proc ← IO.Process.spawn {
+    toStdioConfig := brokerStdio
+    cmd := "python3"
+    args := #[
+      "-c",
+      "import pathlib, sys, time; sys.stdin.buffer.readline(); pathlib.Path(sys.argv[1]).write_text('shutdown'); time.sleep(30)",
+      sentinel.toString
+    ]
+  }
+  let pending ← Std.Mutex.new ({} : Std.TreeMap Lean.JsonRpc.RequestID PendingRequest)
+  pure {
+    workspaceId
+    backend := .lean
+    root
+    epoch := 1
+    sessionToken := s!"stubborn-{workspaceId}"
+    proc
+    stdin := IO.FS.Stream.ofHandle proc.stdin
+    stdout := IO.FS.Stream.ofHandle proc.stdout
+    pending
+  }
+
+private def runLifecycleTeardown
+    (kind : LifecycleTeardown)
+    (runtime : ServerRuntime)
+    (workspaceId : WorkspaceId)
+    (replacement : BrokerConfig) : IO (Except ResponseFailure Bool) := do
+  match kind with
+  | .reset =>
+      match ← runtime.initWorkspaceWithConfig workspaceId replacement (some .reset) with
+      | .ok result => pure <| .ok result.invalidatedHandles
+      | .error failure => pure <| .error failure
+  | .drop =>
+      match ← runtime.dropWorkspace workspaceId with
+      | .ok result => pure <| .ok result.invalidatedHandles
+      | .error failure => pure <| .error failure
+
+private def checkLifecycleTeardownReleasesStateMutex
+    (kind : LifecycleTeardown) : IO Unit := do
+  let nonce ← IO.monoNanosNow
+  let targetId := "teardown-target"
+  let observerId := "teardown-observer"
+  let targetRoot := System.FilePath.mk s!"/tmp/beam-{kind.label}-target-{nonce}"
+  let replacementRoot := System.FilePath.mk s!"/tmp/beam-{kind.label}-replacement-{nonce}"
+  let observerRoot := System.FilePath.mk s!"/tmp/beam-{kind.label}-observer-{nonce}"
+  let sentinel := System.FilePath.mk s!"/tmp/beam-{kind.label}-shutdown-{nonce}"
+  let targetConfig : BrokerConfig := { root := targetRoot }
+  let replacementConfig : BrokerConfig := { root := replacementRoot }
+  let observerConfig : BrokerConfig := { root := observerRoot }
+  let runtime ← ServerRuntime.create targetConfig targetId
+  let session ← stubbornSession targetId targetRoot sentinel
+  runtime.state.atomically do
+    let state ← get
+    let targetWorkspace : WorkspaceState := {
+      config := targetConfig
+      lean := { nextEpoch := 2, session? := some session }
+    }
+    let observerWorkspace : WorkspaceState := { config := observerConfig }
+    let workspaces := state.workspaces.insert targetId targetWorkspace
+    let workspaces := workspaces.insert observerId observerWorkspace
+    set { state with workspaces }
+  let teardownTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+    runLifecycleTeardown kind runtime targetId replacementConfig
+  try
+    unless ← waitForPath sentinel do
+      throw <| IO.userError s!"{kind.label}: backend did not enter shutdown"
+    require s!"{kind.label}: teardown fixture should still be waiting for the backend"
+      (!(← IO.hasFinished teardownTask))
+
+    let queryTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      runtime.workspaceRoot? observerId
+    let some queryOutcome ← waitForTaskBefore queryTask teardownTask
+      | throw <| IO.userError s!"{kind.label}: unrelated workspace query blocked on teardown"
+    let queryRoot ←
+      match queryOutcome with
+      | .ok queryRoot => pure queryRoot
+      | .error err => throw err
+    require s!"{kind.label}: unrelated workspace query should retain its root"
+      (queryRoot == some observerRoot)
+    require s!"{kind.label}: unrelated workspace query should finish before teardown"
+      (!(← IO.hasFinished teardownTask))
+
+    let teardownOutcome ← IO.wait teardownTask
+    let teardownResult ←
+      match teardownOutcome with
+      | .ok result => pure result
+      | .error err => throw err
+    match teardownResult with
+    | .error failure =>
+        throw <| IO.userError s!"{kind.label}: lifecycle transition failed: {failure.error.message}"
+    | .ok invalidatedHandles =>
+        require s!"{kind.label}: lifecycle transition should invalidate handles" invalidatedHandles
+  finally
+    try
+      session.proc.kill
+    catch _ =>
+      pure ()
+    if ← sentinel.pathExists then
+      IO.FS.removeFile sentinel
+
+private def checkLifecycleTeardownConcurrency : IO Unit := do
+  checkLifecycleTeardownReleasesStateMutex .reset
+  checkLifecycleTeardownReleasesStateMutex .drop
+
+private partial def waitForCancellation
+    (cancelRef : IO.Ref Bool)
+    (tries : Nat := 100) : IO Unit := do
+  if ← cancelRef.get then
+    pure ()
+  else if tries == 0 then
+    throw <| IO.userError "timed out waiting for runtime close cancellation"
+  else
+    IO.sleep 10
+    waitForCancellation cancelRef (tries - 1)
+
+private def checkSessionCloseAdmission : IO Unit := do
+  let root := System.FilePath.mk "/tmp/beam-session-close-admission"
+  let runtime ← Beam.Broker.ServerRuntime.create
+    ({ root } : Beam.Broker.BrokerConfig) "fixture"
+  let beforeClose ← runtime.dispatchRequest { op := .stats }
+  require "stats should be admitted before session close" beforeClose.ok
+  let active ←
+    match ← ActiveRequestRegistry.register runtime.activeRequests none (some "close-drain") with
+    | .ok active => pure active
+    | .error failure => throw <| IO.userError failure.message
+  let closeTask ← IO.asTask (prio := Task.Priority.dedicated) runtime.close
+  waitForCancellation active.cancelRef
+  let concurrentCloseTask ← IO.asTask (prio := Task.Priority.dedicated) runtime.close
+  IO.sleep 10
+  require "runtime close should wait for admitted dispatch scopes"
+    (!(← IO.hasFinished closeTask))
+  require "concurrent runtime close should share the same drain"
+    (!(← IO.hasFinished concurrentCloseTask))
+  ActiveRequestRegistry.unregister runtime.activeRequests (some active)
+  match ← IO.wait closeTask with
+  | .ok () => pure ()
+  | .error err => throw err
+  match ← IO.wait concurrentCloseTask with
+  | .ok () => pure ()
+  | .error err => throw err
+  runtime.close
+  let afterClose ← runtime.dispatchRequest { op := .stats }
+  require "ordinary requests should be rejected after session close"
+    (afterClose.error?.any fun err => err.code == "requestCancelled")
+  let shutdown ← runtime.dispatchRequest { op := .shutdown }
+  require "shutdown remains idempotent after admission closes" shutdown.ok
+  require "closed admission should leave no active request"
+    ((← ActiveRequestRegistry.count runtime.activeRequests) == 0)
+
+private def checkWrapperDaemonAuthorization : IO Unit := do
+  let root := System.FilePath.mk "/tmp/beam-wrapper-daemon-authorization"
+  let capability := "generation-secret"
+  let runtime ← Beam.Broker.ServerRuntime.create
+    ({ root } : Beam.Broker.BrokerConfig) "fixture"
+    (.wrapper { daemonId := "generation-a", configHash := "config-a" } capability)
+  try
+    for (label, capability?) in [
+        ("missing", none),
+        ("wrong", some "another-generation-secret")
+      ] do
+      let response ← runtime.dispatchRequest {
+        op := .stats
+        daemonCapability? := capability?
+      }
+      require s!"wrapper daemon should reject {label} capability"
+        (response.error?.any fun err =>
+          err.code == "invalidParams" && err.message.contains "invalid Beam daemon capability")
+
+    let stats ← runtime.dispatchRequest {
+      op := .stats
+      daemonCapability? := some capability
+    }
+    require "wrapper daemon should admit the exact generation capability" stats.ok
+
+    for op in [Op.initWorkspace, .listWorkspaces, .dropWorkspace] do
+      let response ← runtime.dispatchRequest {
+        op
+        workspaceId? := some "fixture"
+        daemonCapability? := some capability
+      }
+      require s!"wrapper daemon should disable dynamic {op.key}"
+        (response.error?.any fun err =>
+          err.code == "invalidParams" && err.message.contains "wrapper-owned daemon mode")
+  finally
+    runtime.close
 
 def main : IO Unit := do
   checkResponseJsonShape
@@ -872,7 +1167,11 @@ def main : IO Unit := do
   checkStaleDirectDepHints
   checkRequestArgsBoundary
   checkWorkspaceRoutingFields
+  checkProjectRequestBoundary
   checkWorkspaceLifecycleProtocol
+  checkLifecycleTeardownConcurrency
+  checkSessionCloseAdmission
+  checkWrapperDaemonAuthorization
 
 end BeamTest.Broker.ProtocolTest
 

@@ -19,6 +19,13 @@ warn_full_root="$(beam_wrapper_prepare_project_root diagnostics-warn-full)"
 stale_root="$(beam_wrapper_prepare_project_root diagnostics-stale)"
 renamed_stale_root="$(beam_wrapper_prepare_project_root diagnostics-renamed-stale)"
 
+beam_wrapper_start_owner "$broken_root"
+beam_wrapper_start_owner "$guard_msgs_io_stderr_root"
+beam_wrapper_start_owner "$warn_root"
+beam_wrapper_start_owner "$warn_full_root"
+beam_wrapper_start_owner "$stale_root"
+beam_wrapper_start_owner "$renamed_stale_root"
+
 fail_json() {
   local message="$1"
   local json_payload="$2"
@@ -98,6 +105,7 @@ expect_sync_result_shape() {
   expect_json_field_present "$json_payload" "$prefix.readiness" "$label readiness" "$err_file"
 }
 
+echo "[beam-wrapper:diagnostics] starting blocking-error diagnostics"
 (
   cd "$broken_root"
 
@@ -182,7 +190,9 @@ expect_sync_result_shape() {
     exit 1
   fi
 )
+echo "[beam-wrapper:diagnostics] passed: blocking-error diagnostics"
 
+echo "[beam-wrapper:diagnostics] starting guard_msgs stderr handling"
 (
   cd "$guard_msgs_io_stderr_root"
 
@@ -225,7 +235,9 @@ EOF
     exit 1
   fi
 )
+echo "[beam-wrapper:diagnostics] passed: guard_msgs stderr handling"
 
+echo "[beam-wrapper:diagnostics] starting default warning filtering"
 (
   cd "$warn_root"
   "$beam_script" ensure lean > /dev/null
@@ -286,7 +298,9 @@ EOF
     exit 1
   fi
 )
+echo "[beam-wrapper:diagnostics] passed: default warning filtering"
 
+echo "[beam-wrapper:diagnostics] starting full warning streaming"
 (
   cd "$warn_full_root"
   "$beam_script" ensure lean > /dev/null
@@ -337,12 +351,13 @@ EOF
   warn_full_registry="$(beam_wrapper_registry_path "$warn_full_root")"
   beam_wrapper_expect_file "$warn_full_registry"
   port9="$(read_json_field "$warn_full_registry" port)"
+  capability9="$(read_json_field "$warn_full_registry" capability)"
   client9="$(read_json_field "$warn_full_registry" clientBin 2>/dev/null || true)"
   if [ -z "$client9" ]; then
     client9="$client"
   fi
 
-  stream_req="$(printf '{"op":"sync_file","workspaceId":"beam-cli-project","root":"%s","path":"SaveSmoke/B.lean","diagnosticScope":"all"}' "$warn_full_root")"
+  stream_req="$(printf '{"op":"sync_file","workspaceId":"beam-cli-project","root":"%s","path":"SaveSmoke/B.lean","diagnosticScope":"all","daemonCapability":"%s"}' "$warn_full_root" "$capability9")"
   stream_out="$(beam_wrapper_mktemp_file stream-out)"
   stream_err="$(beam_wrapper_mktemp_file stream-err)"
   "$client9" --port "$port9" request-stream "$stream_req" >"$stream_out" 2>"$stream_err"
@@ -431,8 +446,10 @@ EOF
     exit 1
   fi
 )
+echo "[beam-wrapper:diagnostics] passed: full warning streaming"
 
 
+echo "[beam-wrapper:diagnostics] starting renamed-dependency stale recovery"
 (
   cd "$renamed_stale_root"
 
@@ -630,7 +647,9 @@ EOF
     exit 1
   fi
 )
+echo "[beam-wrapper:diagnostics] passed: renamed-dependency stale recovery"
 
+echo "[beam-wrapper:diagnostics] starting stale-import recovery"
 (
   cd "$stale_root"
   lake build SaveSmoke/A.lean > /dev/null
@@ -758,3 +777,4 @@ EOF
   fi
   assert_json_completed_file_progress "recovered lean-refresh" "$refreshed_a" fileProgress
 )
+echo "[beam-wrapper:diagnostics] passed: stale-import recovery"

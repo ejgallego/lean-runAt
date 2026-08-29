@@ -158,15 +158,13 @@ private def fakeServerWithLeanSession
     config
     lean := { nextEpoch := 1, session? := some session }
   }
-  pure {
-    state := ← Std.Mutex.new {
+  let server ← Beam.Broker.ServerRuntime.create config fixtureWorkspaceId
+  server.state.atomically do
+    set ({
       bootstrapConfig := config
       workspaces := Std.TreeMap.empty.insert fixtureWorkspaceId workspace
-    }
-    endpoint := .tcp 0
-    stop := ← IO.mkRef false
-    activeRequests := ← Beam.Broker.ActiveRequestRegistry.create
-  }
+    } : Beam.Broker.State)
+  pure server
 
 def checkRunAtStreamsSetupDiagnostics : IO Unit := do
   let rootBase := System.FilePath.mk s!"/tmp/beam-daemon-run-at-stream-{← IO.monoNanosNow}"
@@ -186,7 +184,7 @@ def checkRunAtStreamsSetupDiagnostics : IO Unit := do
   let server ← fakeServerWithLeanSession root session
   let streamedRef ← IO.mkRef #[]
   try
-    let (resp, _) ← server.dispatchRequest {
+    let resp ← server.dispatchRequest {
       op := .runAt
       workspaceId? := some fixtureWorkspaceId
       root? := some root.toString

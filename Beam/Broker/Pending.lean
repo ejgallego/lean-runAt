@@ -96,11 +96,34 @@ def resolveError
   catch _ =>
     pure ()
 
-def awaitOutcome (promise : IO.Promise (Except ResponseFailure PendingResult)) :
-    IO (Except ResponseFailure PendingResult) := do
-  let some result ← IO.wait promise.result?
+/-- Give an already-marked broker cancellation precedence over a concurrent backend failure. -/
+private def failureRespectingCancellation
+    (cancelRef? : Option (IO.Ref Bool))
+    (fallback : ResponseFailure) : IO ResponseFailure := do
+  let cancelled ←
+    match cancelRef? with
+    | some cancelRef => cancelRef.get
+    | none => pure false
+  if cancelled then
+    pure <|
+      (responseFailureFor .requestCancelled
+        "request was cancelled before its backend failure was observed")
+      |>.withOptionalFileProgress fallback.fileProgress?
+  else
+    pure fallback
+
+/--
+Await the pending request, giving its already-marked cancellation identity precedence over a
+concurrent backend failure while preserving observations attached to that failure. A completed
+backend success remains successful.
+-/
+def awaitOutcome (pending : PendingRequest) : IO (Except ResponseFailure PendingResult) := do
+  let some outcome ← IO.wait pending.promise.result?
     | throw <| IO.userError "pending broker request promise dropped"
-  pure result
+  match outcome with
+  | .ok result => pure (.ok result)
+  | .error failure =>
+      pure (.error (← failureRespectingCancellation pending.cancelRef? failure))
 
 private def normalizePublishDiagnostics (params : PublishDiagnosticsParams) :
     PublishDiagnosticsParams := {
@@ -318,45 +341,91 @@ def propagateCancellation
 
 end PendingRequestStore
 
-structure ActiveRequest where
+private structure ActiveRequestKey where
+  workspaceId? : Option WorkspaceId
   clientRequestId : String
+deriving BEq, Ord
+
+structure ActiveRequest where
+  workspaceId? : Option WorkspaceId
+  clientRequestId? : Option String
   token : Nat
   cancelRef : IO.Ref Bool
 
 private structure ActiveRequestRegistryState where
   nextToken : Nat := 1
-  requests : Std.TreeMap String ActiveRequest := {}
+  accepting : Bool := true
+  requests : Std.TreeMap ActiveRequestKey ActiveRequest := {}
+  anonymousRequests : Std.TreeMap Nat ActiveRequest := {}
+  drainedSignaled : Bool := false
 
 structure ActiveRequestRegistry where
   private mutex : Std.Mutex ActiveRequestRegistryState
+  private drained : IO.Promise Unit
 
 namespace ActiveRequestRegistry
 
 def create : BaseIO ActiveRequestRegistry := do
-  pure { mutex := ← Std.Mutex.new {} }
+  pure {
+    mutex := ← Std.Mutex.new {}
+    drained := ← IO.Promise.new
+  }
+
+private def activeRequestCount
+    (state : ActiveRequestRegistryState) : Nat :=
+  state.requests.size + state.anonymousRequests.size
+
+private def markDrainedIfReady
+    (state : ActiveRequestRegistryState) : ActiveRequestRegistryState × Bool :=
+  if !state.accepting && activeRequestCount state == 0 && !state.drainedSignaled then
+    ({ state with drainedSignaled := true }, true)
+  else
+    (state, false)
+
+private def resolveDrainedIfNeeded
+    (registry : ActiveRequestRegistry)
+    (shouldResolve : Bool) : IO Unit := do
+  if shouldResolve then
+    registry.drained.resolve ()
 
 def register
     (registry : ActiveRequestRegistry)
-    (clientRequestId? : Option String) : IO (Except BrokerFailure (Option ActiveRequest)) := do
-  match clientRequestId? with
-  | none =>
-      pure (.ok none)
-  | some clientRequestId =>
-      let cancelRef ← IO.mkRef false
-      registry.mutex.atomically do
-        let state ← get
-        if state.requests.contains clientRequestId then
+    (workspaceId? : Option WorkspaceId)
+    (clientRequestId? : Option String) : IO (Except BrokerFailure ActiveRequest) := do
+  let cancelRef ← IO.mkRef false
+  registry.mutex.atomically do
+    let state ← get
+    unless state.accepting do
+      return .error {
+        code := .requestCancelled
+        message := "Beam session owner is closing"
+      }
+    match clientRequestId? with
+    | none =>
+        let active : ActiveRequest := {
+          workspaceId?, clientRequestId?, token := state.nextToken, cancelRef
+        }
+        set { state with
+          nextToken := state.nextToken + 1
+          anonymousRequests := state.anonymousRequests.insert active.token active
+        }
+        pure <| .ok active
+    | some clientRequestId =>
+        let key : ActiveRequestKey := { workspaceId?, clientRequestId }
+        if state.requests.contains key then
           pure <| .error {
             code := .invalidParams
-            message := s!"clientRequestId '{clientRequestId}' is already active"
+            message := s!"clientRequestId '{clientRequestId}' is already active in this workspace"
           }
         else
-          let active : ActiveRequest := { clientRequestId, token := state.nextToken, cancelRef }
-          set ({
+          let active : ActiveRequest := {
+            workspaceId?, clientRequestId?, token := state.nextToken, cancelRef
+          }
+          set { state with
             nextToken := state.nextToken + 1
-            requests := state.requests.insert clientRequestId active
-          } : ActiveRequestRegistryState)
-          pure <| .ok <| some active
+            requests := state.requests.insert key active
+          }
+          pure <| .ok active
 
 def unregister
     (registry : ActiveRequestRegistry)
@@ -364,20 +433,65 @@ def unregister
   match active? with
   | none => pure ()
   | some active =>
-      registry.mutex.atomically do
+      let shouldResolve ← registry.mutex.atomically do
         let state ← get
-        match state.requests.get? active.clientRequestId with
-        | some current =>
-            if current.token == active.token then
-              set { state with requests := state.requests.erase active.clientRequestId }
-        | none =>
-            pure ()
+        let state :=
+          match active.clientRequestId? with
+          | some clientRequestId =>
+              let key : ActiveRequestKey := { workspaceId? := active.workspaceId?, clientRequestId }
+              match state.requests.get? key with
+              | some current =>
+                  if current.token == active.token then
+                    { state with requests := state.requests.erase key }
+                  else
+                    state
+              | none => state
+          | none =>
+              match state.anonymousRequests.get? active.token with
+              | some current =>
+                  if current.token == active.token then
+                    { state with anonymousRequests := state.anonymousRequests.erase active.token }
+                  else
+                    state
+              | none => state
+        let (state, shouldResolve) := markDrainedIfReady state
+        set state
+        pure shouldResolve
+      resolveDrainedIfNeeded registry shouldResolve
+
+def count (registry : ActiveRequestRegistry) : IO Nat := do
+  registry.mutex.atomically do
+    pure (activeRequestCount (← get))
+
+/-- Atomically close request admission and mark every admitted request for cancellation. -/
+def closeAdmission (registry : ActiveRequestRegistry) : IO Unit := do
+  let (active, shouldResolve) ← registry.mutex.atomically do
+    let state : ActiveRequestRegistryState ← get
+    if !state.accepting then
+      pure (#[], false)
+    else
+      let (state, shouldResolve) := markDrainedIfReady { state with accepting := false }
+      set state
+      let named := state.requests.toList.map Prod.snd |>.toArray
+      let anonymous := state.anonymousRequests.toList.map Prod.snd |>.toArray
+      pure (named ++ anonymous, shouldResolve)
+  for request in active do
+    request.cancelRef.set true
+  resolveDrainedIfNeeded registry shouldResolve
+
+/-- Wait until admission is closed and every request admitted before closure has unregistered. -/
+def awaitDrained (registry : ActiveRequestRegistry) : IO Unit := do
+  let some _ ← IO.wait registry.drained.result?
+    | throw <| IO.userError "active request registry drain promise dropped"
+  pure ()
 
 def markCancelled
     (registry : ActiveRequestRegistry)
+    (workspaceId? : Option WorkspaceId)
     (clientRequestId : String) : IO (Option ActiveRequest) := do
   registry.mutex.atomically do
-    let active? := (← get).requests.get? clientRequestId
+    let key : ActiveRequestKey := { workspaceId?, clientRequestId }
+    let active? := (← get).requests.get? key
     match active? with
     | none =>
         pure none
@@ -389,9 +503,14 @@ def markCancelledActive
     (registry : ActiveRequestRegistry)
     (active : ActiveRequest) : IO (Option ActiveRequest) := do
   registry.mutex.atomically do
-    match (← get).requests.get? active.clientRequestId with
-    | none =>
-      pure none
+    let state ← get
+    let current? :=
+      match active.clientRequestId? with
+      | some clientRequestId =>
+          state.requests.get? { workspaceId? := active.workspaceId?, clientRequestId }
+      | none => state.anonymousRequests.get? active.token
+    match current? with
+    | none => pure none
     | some current =>
         if current.token == active.token then
           current.cancelRef.set true

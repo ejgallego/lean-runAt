@@ -130,6 +130,29 @@ After editing a lakefile, manifest, package override, `lean-toolchain`, Lean opt
 dynamic libraries, drop that workspace or restart the MCP server before the next request. Re-syncing
 inside the old Lean process is not sufficient to reload workspace configuration.
 
+## Transport Lifetime
+
+The `lean-beam-mcp` stdio process owns its optional in-process broker runtime. MCP clients do not
+start or attach to a wrapper daemon and do not need a separate `lean-beam ensure --hold` owner. The
+first Lean operation that needs broker execution creates the runtime lazily; later descriptors share
+that runtime while the broker remains authoritative for workspace membership. Feedback and cache
+eviction can inspect or update an absent runtime without creating one. `lean_drop_workspace` evicts
+one cached workspace but does not end the stdio session.
+
+Closing stdin or reaching EOF closes MCP request admission. The server cooperatively cancels active
+cancellable requests, waits for every admitted request and non-cancellable workspace eviction to
+finish, then closes the broker runtime and all remaining backend sessions. A JSON-RPC request ID is
+active only until its request reaches terminal completion. The server retires that exact admission
+before publishing its terminal response, so a client may reuse the ID after observing the response;
+the completion barrier is resolved only after the terminal response write attempt finishes, including
+when that write fails.
+
+CLI ingress has a different transport lifetime: a broker daemon accepts one request per socket
+connection, and disconnecting that connection cancels its exact broker admission. MCP carries many
+overlapping requests on one stdio stream and therefore owns application-level ID routing,
+cancellation, output serialization, and workspace-control fences. Both paths use the same broker
+request dispatcher and runtime teardown boundary.
+
 ## Code Ownership
 
 - [Beam/Broker/Protocol.lean](../Beam/Broker/Protocol.lean) owns broker request, response, handle,
@@ -146,9 +169,9 @@ inside the old Lean process is not sufficient to reload workspace configuration.
 - [Beam/Mcp/Protocol.lean](../Beam/Mcp/Protocol.lean) owns the current MCP JSON-RPC helpers.
 - [Beam/Mcp/Runtime.lean](../Beam/Mcp/Runtime.lean) owns root-to-runtime configuration.
 - [Beam/Mcp/SelfCheck.lean](../Beam/Mcp/SelfCheck.lean) owns the installed-wrapper self-check.
-- [Beam/Mcp/Server.lean](../Beam/Mcp/Server.lean) owns descriptor resolution, lazy cache dispatch,
-  the typed protocol-family state machine, the physically separate application registry, and the
-  synchronous protocol-test seam.
+- [Beam/Mcp/Server.lean](../Beam/Mcp/Server.lean) owns descriptor resolution, lazy broker-runtime
+  access, the typed protocol-family state machine, and the synchronous protocol-test seam. The
+  broker runtime is authoritative for workspace state.
 - [Beam/Mcp/StdioServer.lean](../Beam/Mcp/StdioServer.lean) owns the permanent stdin reader,
   concurrent coordination, cancellation, cache-control barriers, and serialized output.
 

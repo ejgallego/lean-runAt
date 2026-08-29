@@ -28,7 +28,7 @@ private def checkStaleHandleIsolation
     (server : Beam.Broker.ServerRuntime)
     (req : Beam.Broker.Request) : IO Unit := do
   let staleHandleRef ← IO.mkRef (none : Option Beam.Broker.RequestHandle)
-  let (completedResp, _) ← server.dispatchRequestWithHandle req (fun handle => do
+  let completedResp ← server.dispatchRequestWithHandle req (fun handle => do
     staleHandleRef.set (some handle)
     unless ← handle.cancel do
       throw <| IO.userError "completed broker request handle was not cancellable"
@@ -39,7 +39,7 @@ private def checkStaleHandleIsolation
 
   let staleCancelledRef ← IO.mkRef false
   let replacementCancelledRef ← IO.mkRef false
-  let (replacementResp, _) ← server.dispatchRequestWithHandle req (fun replacement => do
+  let replacementResp ← server.dispatchRequestWithHandle req (fun replacement => do
     staleCancelledRef.set (← staleHandle.cancel)
     replacementCancelledRef.set (← replacement.cancel)
     pure true)
@@ -68,7 +68,7 @@ def checkCancellationAndLifetime : IO Unit := do
   }
   let runOnce : IO Unit := do
     let handleRef ← IO.mkRef (none : Option Beam.Broker.RequestHandle)
-    let (resp, _) ← server.dispatchRequestWithHandle req (fun handle => do
+    let resp ← server.dispatchRequestWithHandle req (fun handle => do
       handleRef.set (some handle)
       unless ← handle.cancel do
         throw <| IO.userError "new broker request handle was not cancellable"
@@ -84,8 +84,21 @@ def checkCancellationAndLifetime : IO Unit := do
     runOnce
     checkStaleHandleIsolation server req
 
+    let anonymousHandleRef ← IO.mkRef (none : Option Beam.Broker.RequestHandle)
+    let anonymousResp ← server.dispatchRequestWithHandle
+      { req with clientRequestId? := none } (fun handle => do
+        anonymousHandleRef.set (some handle)
+        unless ← handle.cancel do
+          throw <| IO.userError "anonymous broker request handle was not cancellable"
+        pure true)
+    checkCancelledResponse anonymousResp
+    let some anonymousHandle ← anonymousHandleRef.get
+      | throw <| IO.userError "anonymous broker request handle was not captured"
+    if ← anonymousHandle.cancel then
+      throw <| IO.userError "anonymous broker request handle remained active after dispatch"
+
     let rejectedHandleRef ← IO.mkRef (none : Option Beam.Broker.RequestHandle)
-    let (rejectedResp, _) ← server.dispatchRequestWithHandle req (fun handle => do
+    let rejectedResp ← server.dispatchRequestWithHandle req (fun handle => do
       rejectedHandleRef.set (some handle)
       pure false)
     checkCancelledResponse rejectedResp
@@ -96,7 +109,7 @@ def checkCancellationAndLifetime : IO Unit := do
     runOnce
 
     let failedHandleRef ← IO.mkRef (none : Option Beam.Broker.RequestHandle)
-    let (failedResp, _) ← server.dispatchRequestWithHandle req (fun handle => do
+    let failedResp ← server.dispatchRequestWithHandle req (fun handle => do
       failedHandleRef.set (some handle)
       throw <| IO.userError "before-dispatch test failure")
     checkErrorCode "failed before-dispatch callback" "internalError" failedResp
@@ -108,7 +121,7 @@ def checkCancellationAndLifetime : IO Unit := do
 
     let callbackInvoked ← IO.mkRef false
     let invalidReq := { req with cancelRequestId? := some "unrelated-field" }
-    let (invalidResp, _) ← server.dispatchRequestWithHandle invalidReq (fun _ => do
+    let invalidResp ← server.dispatchRequestWithHandle invalidReq (fun _ => do
       callbackInvoked.set true
       pure true)
     checkErrorCode "invalid request before admission" "invalidParams" invalidResp

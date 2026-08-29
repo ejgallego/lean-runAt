@@ -44,33 +44,32 @@ inductive ProtocolState where
   | modern
   deriving Repr
 
-structure ApplicationState where
-  workspaces : Std.TreeMap Beam.Broker.WorkspaceId System.FilePath := {}
-  runtime? : Option Beam.Broker.ServerRuntime := none
-
 structure ServerState where
   protocol : Std.Mutex ProtocolState
-  application : IO.Ref ApplicationState
+  private runtime : Std.Mutex (Option Beam.Broker.ServerRuntime)
 
 def ServerState.create : IO ServerState := do
   pure {
     protocol := ← Std.Mutex.new .undecided
-    application := ← IO.mkRef {}
+    runtime := ← Std.Mutex.new none
   }
 
 def ServerState.protocolState (state : ServerState) : IO ProtocolState :=
   state.protocol.atomically get
 
-def ServerState.applicationState (state : ServerState) : IO ApplicationState :=
-  state.application.get
+private def ServerState.runtime? (state : ServerState) : IO (Option Beam.Broker.ServerRuntime) :=
+  state.runtime.atomically get
 
-private def ApplicationState.trackWorkspace
-    (state : ApplicationState)
-    (workspaceId : Beam.Broker.WorkspaceId)
-    (root : System.FilePath) : ApplicationState := {
-  state with
-  workspaces := state.workspaces.insert workspaceId root
-}
+/-- Close and forget the in-process broker runtime owned by this MCP server state. -/
+def ServerState.closeRuntime (state : ServerState) : IO Unit :=
+  state.runtime.atomically do
+    match ← get with
+    | none => pure ()
+    | some runtime =>
+        -- Transfer ownership out of the state before waiting for broker teardown. A concurrent
+        -- creator remains excluded by the same mutex, and repeated close calls are idempotent.
+        set (none : Option Beam.Broker.ServerRuntime)
+        runtime.close
 
 structure NotificationSink where
   send : Json → IO Unit := fun _ => pure ()
@@ -318,9 +317,11 @@ private def RequestStatusEmitter.emitOnce
     Std.Internal.UV.Timer.stop emitter.timer
 
 private def RequestStatusEmitter.finish (emitter : RequestStatusEmitter) : IO Unit := do
-  emitter.state.atomically do
-    modify fun current => { current with finished := true }
-  Std.Internal.UV.Timer.stop emitter.timer
+  try
+    emitter.state.atomically do
+      modify fun current => { current with finished := true }
+  finally
+    Std.Internal.UV.Timer.stop emitter.timer
 
 private def RequestStatusEmitter.create
     (notifier : Notifier)
@@ -329,19 +330,26 @@ private def RequestStatusEmitter.create
     (path? : Option String) : IO RequestStatusEmitter := do
   let delayMs ← requestStatusDelayMs
   let timer ← Std.Internal.UV.Timer.mk delayMs.toUInt64 false
-  let emitter : RequestStatusEmitter := {
-    requestId := requestId.json
-    tool
-    path?
-    state := ← Std.Mutex.new {}
-    timer
-    emitStatus := emitToolStatusLog notifier
-  }
-  let timerResult ← timer.next
-  IO.chainTask timerResult.result? fun
-    | some () => emitter.emitOnce .running s!"{toolTarget tool path?} is still working."
-    | none => pure ()
-  pure emitter
+  try
+    let emitter : RequestStatusEmitter := {
+      requestId := requestId.json
+      tool
+      path?
+      state := ← Std.Mutex.new {}
+      timer
+      emitStatus := emitToolStatusLog notifier
+    }
+    let timerResult ← timer.next
+    IO.chainTask timerResult.result? fun
+      | some () => emitter.emitOnce .running s!"{toolTarget tool path?} is still working."
+      | none => pure ()
+    pure emitter
+  catch err =>
+    try
+      Std.Internal.UV.Timer.stop timer
+    catch _ =>
+      pure ()
+    throw err
 
 private def toolPath? (arguments : Json) : Option String :=
   (arguments.getObjValAs? String "path").toOption
@@ -468,13 +476,11 @@ private def createRuntimeForRoot
       | .error err => pure <| .error err
 
 private def ensureBrokerWorkspace
-    (state : ServerState)
     (opts : Options)
     (runtime : Beam.Broker.ServerRuntime)
     (workspaceId : Beam.Broker.WorkspaceId)
     (root : System.FilePath) : IO (Except RpcError System.FilePath) := do
-  let application ← state.applicationState
-  match application.workspaces.get? workspaceId with
+  match ← runtime.workspaceRoot? workspaceId with
   | some trackedRoot =>
       if trackedRoot == root then
         pure <| .ok root
@@ -485,36 +491,27 @@ private def ensureBrokerWorkspace
       match ← Runtime.mkBrokerConfig (runtimeOptions opts) root with
       | .error err => pure <| .error err
       | .ok config =>
-          let brokerResp ← runtime.initWorkspaceWithConfig workspaceId config (some .set)
-          match brokerResp with
-          | .successResult .. =>
-              state.application.modify fun application =>
-                application.trackWorkspace workspaceId config.root
-              pure <| .ok config.root
-          | .errorResult failure =>
+          match ← runtime.initWorkspaceWithConfig workspaceId config (some .set) with
+          | .ok initialized => pure <| .ok initialized.root
+          | .error failure =>
               pure <| .error <| RpcError.invalidRequest failure.error.message
 
 private def ensureRuntimeForWorkspace
     (state : ServerState)
     (opts : Options)
-    (setupMutex : Std.Mutex Unit)
     (workspaceId : Beam.Broker.WorkspaceId)
     (root : System.FilePath) : IO (Except RpcError (Beam.Broker.ServerRuntime × System.FilePath)) := do
-  setupMutex.atomically do
-    let application ← state.applicationState
-    match application.runtime? with
+  state.runtime.atomically do
+    match ← get with
     | some runtime =>
-        match ← ensureBrokerWorkspace state opts runtime workspaceId root with
+        match ← ensureBrokerWorkspace opts runtime workspaceId root with
         | .ok canonicalRoot => pure <| .ok (runtime, canonicalRoot)
         | .error err => pure <| .error err
     | none =>
         match ← createRuntimeForRoot opts workspaceId root with
         | .error err => pure <| .error err
         | .ok (runtime, canonicalRoot) =>
-            state.application.modify fun application => {
-              application.trackWorkspace workspaceId canonicalRoot with
-              runtime? := some runtime
-            }
+            set (some runtime)
             pure <| .ok (runtime, canonicalRoot)
 
 private def workspaceErrorToToolError (err : Beam.Workspace.RootError) : ToolError :=
@@ -572,14 +569,14 @@ private def decodeBeamStatsResult (json : Json) : Except String BeamStatsResult 
 private def handleBeamStats
     (state : ServerState) : IO Json := do
   let runtime ←
-    match (← state.applicationState).runtime? with
+    match ← state.runtime? with
     | some runtime => pure runtime
     | none =>
         return callToolResult <| Json.mkObj [
           ("uptimeMs", toJson (0 : Nat)),
           ("workspaces", Json.mkObj [])
         ]
-  let (brokerResp, _) ← runtime.dispatchRequest { op := .stats }
+  let brokerResp ← runtime.dispatchRequest { op := .stats }
   match normalizeBrokerResponse .beamStats brokerResp with
   | .error err =>
       pure <| callToolErrorResult err
@@ -596,14 +593,8 @@ private def handleBeamStats
           pure <| callToolResult result
 
 private def handleDropWorkspace
-    (state : ServerState)
+    (runtime? : Option Beam.Broker.ServerRuntime)
     (workspace : ResolvedWorkspace) : IO Json := do
-  let application ← state.applicationState
-  let updateTrackedState : IO Unit :=
-    state.application.modify fun application => {
-      application with
-      workspaces := application.workspaces.erase workspace.workspaceId
-    }
   let resultJson (dropped invalidatedHandles : Bool) (reason? : Option String := none) : Json :=
     Json.mkObj <| [
       ("workspace", toJson workspace.descriptor),
@@ -612,26 +603,15 @@ private def handleDropWorkspace
     ] ++ match reason? with
       | some reason => [("reason", toJson reason)]
       | none => []
-  match application.runtime? with
+  match runtime? with
   | none =>
       pure <| callToolResult <| resultJson false false (some "notFound")
   | some runtime =>
-      let (brokerResp, _) ← runtime.dispatchRequest {
-        op := .dropWorkspace
-        workspaceId? := some workspace.workspaceId
-      }
-      match brokerResp with
-      | .successResult payload .. =>
-          match fromJson? (α := Beam.Workspace.DropResult) payload with
-          | .ok dropped =>
-              if dropped.dropped then
-                updateTrackedState
-              pure <| callToolResult <|
-                resultJson dropped.dropped dropped.invalidatedHandles dropped.reason?
-          | .error err =>
-              pure <| callToolErrorResult <| ToolError.invalidResult
-                s!"invalid workspace drop result: {err}"
-      | .errorResult failure =>
+      match ← runtime.dropWorkspace workspace.workspaceId with
+      | .ok dropped =>
+          pure <| callToolResult <|
+            resultJson dropped.dropped dropped.invalidatedHandles dropped.reason?
+      | .error failure =>
           pure <| callToolErrorResult <| ToolError.fromBrokerError failure.error
 
 private def resolvedBeamHome? : IO (Option System.FilePath) := do
@@ -664,8 +644,7 @@ def Internal.serverVersionText (opts : Options) : IO String := do
 private def handleBeamVersion
     (state : ServerState)
     (opts : Options) : IO Json := do
-  let application ← state.applicationState
-  let identity ← serverIdentity opts none (some application.runtime?.isSome)
+  let identity ← serverIdentity opts none (some (← state.runtime?).isSome)
   pure <| callToolResult identity.asJson
 
 private def collectFeedbackRuntimePayload
@@ -677,13 +656,13 @@ private def collectFeedbackRuntimePayload
   | none =>
       pure (Json.null, Json.null, warnings.push "no active MCP Lean runtime was available for stats/open-files")
   | some runtime =>
-      let (statsResp, _) ← runtime.dispatchRequest {
+      let statsResp ← runtime.dispatchRequest {
         op := .stats
         workspaceId? := some workspaceId
         root? := some root.toString
       }
       let (stats, warnings) := Beam.Feedback.responsePayloadOrWarning "stats" statsResp warnings
-      let (openResp, _) ← runtime.dispatchRequest {
+      let openResp ← runtime.dispatchRequest {
         op := .openDocs
         workspaceId? := some workspaceId
         root? := some root.toString
@@ -752,9 +731,8 @@ private def handleBeamFeedback
     else do
       let identity ← serverIdentity opts (some root) (some runtime?.isSome)
       let daemon ← Beam.Daemon.daemonDebugContextJson root
-      let warnings := Beam.Daemon.daemonDebugWarnings daemon
       let (stats, openDocs, warnings') ←
-        collectFeedbackRuntimePayload runtime? workspaceId root warnings
+        collectFeedbackRuntimePayload runtime? workspaceId root #[]
       pure {
         generatedAt
         activeRoot? := some root.toString
@@ -800,7 +778,6 @@ private def brokerRequestForTool
 def Internal.handleToolCall
     (state : ServerState)
     (opts : Options)
-    (setupMutex : Std.Mutex Unit)
     (brokerClientRequestId : String)
     (beforeDispatch : Beam.Broker.RequestHandle → IO Bool)
     (req : Request)
@@ -827,8 +804,8 @@ def Internal.handleToolCall
       | .error err => return .ok <| callToolErrorResult err
     if initialProgress == 0 then
       emitProgress? progress? s!"{params.name.key}: preparing workspace eviction"
-    let result ← setupMutex.atomically do
-      handleDropWorkspace state workspace
+    let result ← state.runtime.atomically do
+      handleDropWorkspace (← get) workspace
     Internal.traceMcp
       s!"tools/call workspace drop complete id={req.id.label} tool={params.name.key}"
     return .ok result
@@ -850,12 +827,14 @@ def Internal.handleToolCall
   if params.name == .beamFeedbackReport then
     let reporter ← CallReporter.create notifier req.id params progress?
     try
-      let application ← state.applicationState
-      let selectedRuntime? :=
-        if application.workspaces.get? workspace.workspaceId == some workspace.root then
-          application.runtime?
-        else
-          none
+      let selectedRuntime? ←
+        match ← state.runtime? with
+        | none => pure none
+        | some runtime =>
+            if (← runtime.workspaceRoot? workspace.workspaceId) == some workspace.root then
+              pure (some runtime)
+            else
+              pure none
       let result ← handleBeamFeedback opts workspace.descriptor workspace.workspaceId
         workspace.root selectedRuntime? params.arguments progress?
       Internal.traceMcp s!"tools/call feedback complete id={req.id.label} tool={params.name.key}"
@@ -869,10 +848,10 @@ def Internal.handleToolCall
         Internal.traceMcp s!"tools/call invalid input id={req.id.label} tool={params.name.key} error={err}"
         return .ok <| callToolErrorResult <| ToolError.invalidInput err
   let reporter ← CallReporter.create notifier req.id params progress?
-  reporter.emitPreparing
   try
+    reporter.emitPreparing
     let (runtime, root) ←
-      match ← ensureRuntimeForWorkspace state opts setupMutex workspace.workspaceId workspace.root with
+      match ← ensureRuntimeForWorkspace state opts workspace.workspaceId workspace.root with
       | .ok runtimeAndRoot =>
           Internal.traceMcp s!"tools/call runtime ready id={req.id.label} tool={params.name.key}"
           pure runtimeAndRoot
@@ -886,7 +865,7 @@ def Internal.handleToolCall
     let emitBrokerProgress? : Option (Beam.Broker.SyncFileProgress → IO Unit) :=
       reporter.progress?.map fun _ => reporter.emitFileProgress
     Internal.traceMcp s!"tools/call dispatch broker id={req.id.label} tool={params.name.key}"
-    let (brokerResp, _) ← runtime.dispatchRequestWithHandle brokerReq beforeDispatch
+    let brokerResp ← runtime.dispatchRequestWithHandle brokerReq beforeDispatch
       (emitProgress? := emitBrokerProgress?)
       (emitDiagnostic? := some emitDiagnostic)
     Internal.traceMcp
@@ -905,7 +884,6 @@ def Internal.handleToolCall
 private def handleReadyOperationRequest
     (state : ServerState)
     (opts : Options)
-    (setupMutex : Std.Mutex Unit)
     (brokerClientRequestId : String)
     (req : Request)
     (admitted : AdmittedRequestContext)
@@ -929,7 +907,7 @@ private def handleReadyOperationRequest
       pure <| successResponseForEra era req.id result
   | "tools/call" =>
       let parsedParams := parseCallToolParams req.params?
-      match ← Internal.handleToolCall state opts setupMutex brokerClientRequestId
+      match ← Internal.handleToolCall state opts brokerClientRequestId
           (fun _ => pure true) req admitted parsedParams notifications with
       | .ok result => pure <| successResponseForEra era req.id result
       | .error err => pure <| errorResponse req.id err
@@ -1062,7 +1040,6 @@ def Internal.handleRequestForProtocol
     (req : Request)
     (evidence : RequestProtocolEvidence)
     (notifications : NotificationSink := {}) : IO Json := do
-  let setupMutex ← Std.Mutex.new ()
   let brokerClientRequestId := s!"mcp:sync:{req.id.label}"
   let era ←
     match ← Internal.admitCompatibleRequest state evidence with
@@ -1106,7 +1083,7 @@ def Internal.handleRequestForProtocol
       | .error err => pure <| errorResponse req.id err
       | .ok admitted =>
           handleReadyOperationRequest
-            state opts setupMutex brokerClientRequestId req admitted notifications
+            state opts brokerClientRequestId req admitted notifications
   | method =>
       match era with
       | .modern _ =>

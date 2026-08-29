@@ -1866,6 +1866,20 @@ def run_concurrent_dispatch(repo_root, fixture_root, timeout, server_trace=False
             require(isinstance(slow_structured, dict), f"slow runAt missing structured content: {slow_result}")
             require_success("slow concurrent runAt", slow_structured)
             expect_result(client.request("ping", request_id=slow_id))
+            async_reuse_id = "async-tool-request-id-reuse"
+            for reuse_iteration in range(64):
+                version_result = expect_result(
+                    client.request(
+                        "tools/call",
+                        {"name": "beam_version", "arguments": {}},
+                        request_id=async_reuse_id,
+                    )
+                )
+                require(
+                    version_result.get("isError") is not True,
+                    f"async request-ID reuse tool call {reuse_iteration} failed: {version_result}",
+                )
+                expect_result(client.request("ping", request_id=async_reuse_id))
             require(
                 len(status_log_notifications(client, slow_id)) == status_count,
                 f"slow no-token runAt emitted duplicate or post-response statuses: {client.notifications}",
@@ -2075,7 +2089,44 @@ def run_concurrent_dispatch(repo_root, fixture_root, timeout, server_trace=False
             eof_request_id = "eof-inflight"
             client.send_request("tools/call", slow_params, request_id=eof_request_id)
             wait_for_file(started_path, timeout, "EOF runAt gate sentinel")
+            eof_drop_token = "eof-workspace-drop-progress"
+            eof_drop_id = client.send_request(
+                "tools/call",
+                {
+                    "name": "lean_drop_workspace",
+                    "arguments": {"workspace": workspace_descriptor(project_root)},
+                    "_meta": {"progressToken": eof_drop_token},
+                },
+                request_id="eof-workspace-drop",
+            )
+            wait_for_progress_notification(
+                client,
+                eof_drop_token,
+                min(timeout, 5.0),
+                "EOF workspace drop admission",
+            )
             client.close_input()
+            eof_drop_result = expect_result(client.read_response(eof_drop_id))
+            require(
+                eof_drop_result.get("isError") is not True,
+                f"workspace drop admitted before EOF failed: {eof_drop_result}",
+            )
+            eof_dropped = eof_drop_result.get("structuredContent")
+            require(
+                isinstance(eof_dropped, dict) and eof_dropped.get("dropped") is True,
+                f"workspace drop admitted before EOF did not evict the runtime: {eof_drop_result}",
+            )
+            require_progress_sequence(
+                client.progress_notifications(eof_drop_token),
+                eof_drop_token,
+                "EOF workspace drop progress",
+            )
+            returncode = client.wait_for_exit_after_eof(timeout)
+            require(returncode == 0, f"legacy server exited with code {returncode} after active EOF")
+            require(
+                not client.response_ready(eof_request_id),
+                "request cancelled by EOF produced a terminal response",
+            )
             client.forget_request(eof_request_id)
         finally:
             if not release_path.exists():
@@ -3126,53 +3177,117 @@ def run_legacy_eof_teardown(repo_root, fixture_root, timeout):
             client.close()
 
 
+def require_clean_exit_after_closed_stdout(client, message, label):
+    try:
+        client.proc.stdout.close()
+        client.send_message(message)
+        client.close_input()
+        try:
+            client.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            client.proc.kill()
+            fail(f"lean-beam-mcp did not exit after stdout was closed during {label}")
+        client.stderr_thread.join(timeout=1)
+        stderr = "\n".join(client.stderr_lines)
+        require(
+            client.proc.returncode == 0,
+            f"lean-beam-mcp exited with {client.proc.returncode} during {label}\n{stderr}",
+        )
+        if client.server_trace:
+            unexpected = [
+                line for line in stderr.splitlines()
+                if not line.startswith("lean-beam-mcp trace ")
+            ]
+            require(
+                not unexpected,
+                f"lean-beam-mcp wrote unexpected non-trace stderr during {label}:\n"
+                + "\n".join(unexpected),
+            )
+        else:
+            require(
+                stderr.strip() == "",
+                f"lean-beam-mcp wrote unexpected stderr during {label}:\n{stderr}",
+            )
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
+            client.proc.wait(timeout=5)
+
+
 def run_closed_stdout_regression(repo_root, fixture_root, timeout):
     with tempfile.TemporaryDirectory(prefix="lean-beam-mcp-closed-stdout-") as tmp:
         project_root = Path(tmp) / "project"
         copy_project_fixture(fixture_root, project_root)
-        client = McpClient(
+        initialize_client = McpClient(
             repo_root,
             project_root,
             timeout,
-            label="closed-stdout-regression",
+            label="closed-stdout-initialize",
             drain_stdout=False,
         )
-        stderr = ""
+        require_clean_exit_after_closed_stdout(
+            initialize_client,
+            {
+                "jsonrpc": "2.0",
+                "id": "closed-stdout-initialize",
+                "method": "initialize",
+                "params": initialize_params(),
+            },
+            "initialize response",
+        )
+
+        control_client = McpClient(
+            repo_root,
+            project_root,
+            timeout,
+            label="closed-stdout-control",
+            drain_stdout=False,
+        )
         try:
-            client.proc.stdout.close()
-            client.send_message(
+            control_client.send_message(
                 {
                     "jsonrpc": "2.0",
-                    "id": "closed-stdout",
+                    "id": "closed-stdout-control-initialize",
                     "method": "initialize",
                     "params": initialize_params(),
                 }
             )
-            client.proc.stdin.close()
-            try:
-                client.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                client.proc.kill()
-                fail("lean-beam-mcp did not exit after stdout was closed")
-            client.stderr_thread.join(timeout=1)
-            stderr = "\n".join(client.stderr_lines)
-            require(client.proc.returncode == 0, f"lean-beam-mcp exited with {client.proc.returncode}\n{stderr}")
-            if client.server_trace:
-                unexpected = [
-                    line for line in stderr.splitlines()
-                    if not line.startswith("lean-beam-mcp trace ")
-                ]
-                require(
-                    not unexpected,
-                    "lean-beam-mcp wrote unexpected non-trace stderr after closed stdout:\n"
-                    + "\n".join(unexpected),
-                )
-            else:
-                require(stderr.strip() == "", f"lean-beam-mcp wrote unexpected stderr after closed stdout:\n{stderr}")
+            ready, _, _ = select.select([control_client.proc.stdout], [], [], timeout)
+            require(ready, "closed-stdout control regression did not receive initialize response")
+            initialized = json.loads(control_client.proc.stdout.readline())
+            require(
+                initialized.get("id") == "closed-stdout-control-initialize",
+                f"closed-stdout control regression received wrong initialize response: {initialized}",
+            )
+            expect_result(initialized)
+            control_client.send_message(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                }
+            )
+            require_clean_exit_after_closed_stdout(
+                control_client,
+                {
+                    "jsonrpc": "2.0",
+                    "id": "closed-stdout-control",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "lean_drop_workspace",
+                        "arguments": {
+                            "workspace": workspace_descriptor(project_root),
+                        },
+                        "_meta": {
+                            "progressToken": "closed-stdout-control-progress",
+                        },
+                    },
+                },
+                "workspace-control response",
+            )
         finally:
-            if client.proc.poll() is None:
-                client.proc.kill()
-                client.proc.wait(timeout=5)
+            if control_client.proc.poll() is None:
+                control_client.proc.kill()
+                control_client.proc.wait(timeout=5)
 
 
 def main():

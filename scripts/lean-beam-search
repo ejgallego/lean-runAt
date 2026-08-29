@@ -45,7 +45,7 @@ usage:
 notes:
   - branch, linear, playout, and release read a prior wrapper response or handle JSON from stdin
   - mint requires the version returned by `lean-beam update <path>` or `lean-beam sync <path>`
-  - lean-beam opts such as --root and --port may appear before the subcommand
+  - lean-beam opts such as --root may appear before the subcommand
 EOF
   exit 1
 }

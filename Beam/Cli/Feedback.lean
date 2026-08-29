@@ -8,12 +8,13 @@ import Lean
 import Beam.Broker.Client
 import Beam.Cli.Args
 import Beam.Cli.DaemonManager
-import Beam.Cli.Lock
 import Beam.Cli.Output
 import Beam.Cli.Project
 import Beam.Daemon.Debug
+import Beam.Daemon.Paths
 import Beam.Feedback
 import Beam.Feedback.Broker
+import Beam.System
 import Beam.Version
 
 open Lean
@@ -92,34 +93,56 @@ private def versionIdentityJson (home : System.FilePath) : IO Json := do
 
 private def collectDaemonPayload
     (root : System.FilePath)
+    (explicitControlDir? : Option System.FilePath)
     (warnings : Array String) : IO (Json × Json × Array String) := do
-  match ← registryLiveFor root with
-  | none =>
-      pure (Json.null, Json.null, warnings.push "no live Beam daemon was available for stats/open-files")
-  | some entry =>
+  match ← observeProjectRegistry root explicitControlDir? with
+  | .live entry =>
       match Beam.Daemon.registryEndpoint? entry with
       | none =>
           pure (Json.null, Json.null, warnings.push "Beam daemon registry did not contain a valid endpoint")
       | some endpoint =>
-          let statsResp ← sendRequest endpoint {
+          let some workspace ← Beam.Cli.sessionWorkspaceForRoot? entry root
+            | return (Json.null, Json.null,
+                warnings.push "the Beam session does not contain the selected project root")
+          let controlDir ← Beam.Daemon.controlDirFor root explicitControlDir?
+          let client : ProjectDaemonClient := {
+            endpoint
+            capability := entry.capability
+            workspaceId := workspace.workspaceId
+            controlDir
+          }
+          let statsResp ← sendRequest endpoint <| client.authorize {
             op := .stats
-            workspaceId? := some Beam.Cli.projectDaemonWorkspaceId
+            workspaceId? := some client.workspaceId
             root? := some root.toString
           }
           let (stats, warnings) := Beam.Feedback.responsePayloadOrWarning "stats" statsResp warnings
-          let openResp ← sendRequest endpoint {
+          let openResp ← sendRequest endpoint <| client.authorize {
             op := .openDocs
-            workspaceId? := some Beam.Cli.projectDaemonWorkspaceId
+            workspaceId? := some client.workspaceId
             root? := some root.toString
           }
           let (openDocs, warnings) := Beam.Feedback.responsePayloadOrWarning "open-files" openResp warnings
           pure (stats, openDocs, warnings)
+  | .absent =>
+      pure (Json.null, Json.null, warnings.push "no live Beam daemon was available for stats/open-files")
+  | .draining _ =>
+      pure (Json.null, Json.null, warnings.push "the Beam daemon is draining")
+  | .legacy =>
+      pure (Json.null, Json.null, warnings.push "the Beam daemon registry is legacy and unsupported")
+  | .unsupported _ =>
+      pure (Json.null, Json.null, warnings.push "the Beam daemon registry schema is unsupported")
+  | .malformed detail =>
+      pure (Json.null, Json.null, warnings.push s!"the Beam daemon registry is malformed: {detail}")
+  | .unusable _ reason =>
+      pure (Json.null, Json.null, warnings.push s!"the Beam daemon registry is unsafe: {reason.message}")
 
 private def collectNonConfidential
     (home : System.FilePath)
     (root? : Option System.FilePath)
+    (explicitControlDir? : Option System.FilePath)
     (warnings : Array String) : IO Beam.Feedback.Collection := do
-  let generatedAt ← utcTimestamp
+  let generatedAt ← Beam.utcTimestamp
   let identity ← versionIdentityJson home
   let (stats, openDocs, daemon, warnings) ←
     match root? with
@@ -127,9 +150,8 @@ private def collectNonConfidential
         pure (Json.null, Json.null, Json.null,
           warnings.push "could not infer project root; daemon debug context was not collected")
     | some root => do
-        let daemon ← daemonDebugContextJson root
-        let warnings := warnings ++ Beam.Daemon.daemonDebugWarnings daemon
-        let (stats, openDocs, warnings) ← collectDaemonPayload root warnings
+        let daemon ← Beam.Daemon.daemonDebugContextJson root explicitControlDir?
+        let (stats, openDocs, warnings) ← collectDaemonPayload root explicitControlDir? warnings
         pure (stats, openDocs, daemon, warnings)
   pure {
     generatedAt
@@ -145,7 +167,7 @@ private def collectNonConfidential
 
 private def collectConfidential : IO Beam.Feedback.Collection := do
   pure {
-    generatedAt := ← utcTimestamp
+    generatedAt := ← Beam.utcTimestamp
     data := Json.mkObj [("identity", confidentialIdentityJson)]
   }
 
@@ -196,12 +218,13 @@ def run (home : System.FilePath) (cliOpts : CliOptions) (args : List String) : I
     else
       pure (none, #[])
   let collection ←
-    if input.confidential then collectConfidential else collectNonConfidential home root? warnings
+    if input.confidential then collectConfidential
+    else collectNonConfidential home root? cliOpts.explicitControlDir? warnings
   let allowedRoots ←
     if Beam.Feedback.Internal.needsEvidenceRoots input then
       match root? with
       | some root => do
-          let control ← controlDir root
+          let control ← Beam.Daemon.controlDirFor root cliOpts.explicitControlDir?
           pure #[root, control]
       | none => pure #[]
     else

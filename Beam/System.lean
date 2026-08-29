@@ -10,6 +10,13 @@ open Lean
 
 namespace Beam
 
+/-- Return the POSIX permission bits reported by `lstat`, without following the final symlink. -/
+@[extern "lean_beam_lstat_mode"]
+private opaque lstatMode (path : @& String) : IO UInt32
+
+def fileModeNoFollow (path : System.FilePath) : IO UInt32 :=
+  lstatMode path.toString
+
 def trimLine (text : String) : String :=
   text.trimAscii.toString
 
@@ -45,26 +52,6 @@ def commandAvailable (cmd : String) (args : Array String := #["--help"]) : IO Bo
     pure true
   catch _ =>
     pure false
-
-def killCommand : IO String := do
-  let candidates := [System.FilePath.mk "/bin/kill", System.FilePath.mk "/usr/bin/kill"]
-  for candidate in candidates do
-    if ← candidate.pathExists then
-      return candidate.toString
-  if ← commandAvailable "kill" #["-l"] then
-    pure "kill"
-  else
-    throw <| IO.userError "could not find kill command"
-
-def pidAlive (pid : Nat) : IO Bool := do
-  let out ← IO.Process.output { cmd := (← killCommand), args := #["-0", toString pid] }
-  pure (out.exitCode == 0)
-
-def currentPidNamespace? : IO (Option String) := do
-  try
-    pure <| some (← readCmdTrim "readlink" #["/proc/self/ns/pid"])
-  catch _ =>
-    pure none
 
 def utcTimestamp : IO String := do
   readCmdTrim "date" #["-u", "+%Y-%m-%dT%H:%M:%SZ"]

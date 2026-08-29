@@ -188,7 +188,7 @@ What is not a valid checkpoint target:
   `error.message` includes a compact preview of underlying diagnostics and/or command messages, and
   `error.data.sync` contains the blocking sync verdict
 - wrapper `stderr` is the human-facing diagnostic surface
-- `beam-client request-stream ...` is the machine-facing streamed surface
+- `lean-beam --root ROOT request-stream ...` is the supported machine-facing wrapper stream
 - streamed diagnostics are request-scoped observations; they may carry `completionBlocking=true`,
   but save-blocking evidence is attached to the final sync/save verdict
 - the field-level progress, diagnostic, and readiness contract lives in
@@ -210,7 +210,7 @@ What is not a valid checkpoint target:
 Treat `fileProgress` as observability, not as proof that every call is a full barrier.
 
 ```bash
-lean-beam ensure
+# with `lean-beam ensure --hold` running in another process
 sync_out="$(lean-beam sync "Foo.lean")"
 printf '%s\n' "$sync_out"
 version="$(printf '%s\n' "$sync_out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["version"])')"
@@ -308,7 +308,7 @@ If you edit `A.lean` and `B.lean` imports `A.lean`, a successful probe in `B.lea
 itself to prove the dependency cone is fresh.
 
 ```bash
-lean-beam ensure
+# with `lean-beam ensure --hold` running in another process
 # make a real edit in A.lean and save the source file to disk
 lean-beam sync "A.lean"
 b_update="$(lean-beam update "B.lean")"

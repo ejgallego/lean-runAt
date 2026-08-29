@@ -163,8 +163,11 @@ not currently in use.
 
 Restart active agent and MCP client sessions before any `prune --apply`; otherwise a process may
 still be running from a runtime selected for removal. A later request rebuilds any needed bundle
-that was pruned. Pruning uses the same install lock as the installer and each selected bundle's
-build lock, and refuses symlinked installed bundle-cache roots or symlinked and unmarked runtime
+that was pruned. Pruning uses the same atomic-directory install lock as the shell installer and a
+kernel-backed file lock for each selected bundle. Bundle lock files remain as stable coordination
+inodes after release; kernel ownership disappears automatically when the holder exits. The install
+lock is never stale-reaped, so a crashed installer fails closed and requires explicit recovery.
+Pruning also refuses symlinked installed bundle-cache roots or symlinked and unmarked runtime
 directories.
 
 Apply is incremental rather than transactional: Beam validates and removes one displayed path at a
@@ -200,10 +203,14 @@ lean-beam doctor
 Command positions use Lean/LSP coordinates: line and character are zero-based, and character counts
 UTF-16 code units.
 
-Then start the per-project daemon and ask questions against a saved Lean file in that project:
+Start one foreground owner for the wrapper session and keep it running. In another terminal or agent
+process, ask questions against saved Lean files in that project:
 
 ```bash
-lean-beam ensure
+# terminal/session 1
+lean-beam ensure --hold
+
+# terminal/session 2
 update_json="$(lean-beam update "Foo.lean")"
 printf '%s\n' "$update_json"
 version="$(printf '%s\n' "$update_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["version"])')"
@@ -212,6 +219,69 @@ lean-beam definition "Foo.lean" "$version" 10 2
 lean-beam goals before "Foo.lean" "$version" 10 2
 lean-beam run-at "Foo.lean" "$version" 10 2 "exact trivial"
 ```
+
+`lean-beam ensure --hold` is the only wrapper command that starts the per-project daemon. Its
+inherited ownership pipe defines the session lifetime: interrupt the holder, or run
+`lean-beam shutdown`, to close the daemon and its backend processes. Plain `lean-beam ensure` and
+all other wrapper commands attach to an existing owner and fail with a recovery command when none
+is live. Attaching commands use the owner's frozen configuration and do not rebuild a competing
+desired configuration. A second owner does resolve its proposed configuration and reports any
+mismatch while preserving the old owner. During shutdown the registry reports `draining` and a
+replacement owner is refused until the old process tree has exited. MCP clients do not need a
+separate holder; the stdio MCP process owns its runtime session.
+
+The default session descriptor and lock live in `<root>/.beam`. This is intentional for
+project-scoped agent sandboxes: clients that can access the same workspace can discover the same
+session. Before creating a lock or capability-bearing descriptor, Beam makes the selected control
+directory account-private (`0700`) when the leaf does not exist; the published descriptor is
+`0600`. An existing selection must already be a real, non-symlinked directory with mode `0700`, or
+Beam refuses it without changing its permissions. This permits coordination between sandboxes and
+agents running as the same local account, but a group-shared or traversable control directory is
+not a supported authentication boundary. Use an exact alternate directory when the project is
+read-only or several same-account clients need another stable control plane:
+
+```bash
+lean-beam --root /workspace/a --control-dir /workspace/control ensure --hold
+lean-beam --root /workspace/a --control-dir /workspace/control stats
+```
+
+Every participant must supply the same `--root` and `--control-dir`; Beam does not search alternate
+control directories. If the exact directory already exists, prepare its `0700` mode explicitly;
+Beam will not adopt it by silently changing permissions. `BEAM_CONTROL_ROOT=/writable/base` is the
+sandbox convenience form and must be absolute: Beam derives a separate hashed directory for each
+canonical root below that base. An
+explicit control directory is also the intended future location for a statically configured
+multi-workspace CLI session. The current public owner command still publishes one frozen workspace,
+and wrapper mode does not allow runtime `init_workspace`, `list_workspaces`, or `drop_workspace` requests. The
+supported semantic `request-stream` also excludes process-wide `shutdown` and `reset_stats`; use
+the dedicated `lean-beam shutdown` command for lifecycle control.
+Use a stable external control directory when ownership must remain fenced while the project path is
+deleted and recreated; deleting a project-local `.beam` necessarily deletes its default fence.
+
+An abnormal owner or broker exit leaves the descriptor as a safety fence. After independently
+establishing that the recorded generation is no longer authoritative, quarantine that exact record
+without signalling its recorded PIDs:
+
+```bash
+lean-beam --root /workspace/a recover --generation GENERATION_ID
+```
+
+Use the same `--control-dir` selection when applicable. `recover --force` is reserved for opaque
+legacy, unsupported, or malformed descriptors. Recovery preserves the old file under a
+`beam-daemon.recovered-*.json` name for diagnosis.
+
+For a current descriptor, the selected `--root` must be one of its recorded workspace bindings;
+using the same control directory with an unrelated root cannot quarantine the session.
+
+Machine clients should avoid root auto-detection and raw port/session fields:
+
+```bash
+lean-beam --root /workspace/a request-stream \
+  '{"op":"stats","clientRequestId":"agent-stats-1"}'
+```
+
+The wrapper selects the frozen workspace and injects root, workspace identity, generation
+capability, and endpoint. `beam-client --port ...` is lower-level maintainer/debug tooling.
 
 The `python3` line extracts `result.version` for shell examples. You can also copy that version
 number from the printed `lean-beam update` JSON.
@@ -264,9 +334,9 @@ checks.
 
 The running Lean server and existing file workers are not guaranteed to pick up Lake workspace
 configuration changes. After editing a lakefile, manifest, package override, `lean-toolchain`, Lean
-options, plugins, or dynamic libraries, run `lean-beam shutdown` before the next command that uses
-the Lean server. `lean-beam refresh` reopens a file within the current server and is not sufficient
-for this case.
+options, plugins, or dynamic libraries, run `lean-beam shutdown`, then start a new
+`lean-beam ensure --hold` owner before the next wrapper command that uses the Lean server.
+`lean-beam refresh` reopens a file within the current server and is not sufficient for this case.
 
 ### Final Batch Validation
 

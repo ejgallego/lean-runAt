@@ -15,23 +15,71 @@ namespace Beam.Daemon
 
 open Beam.Broker
 
-structure RegistryEntry where
-  daemonId : String
-  pid : Nat
-  pidNamespace? : Option String := none
-  port? : Option Nat := none
+def registrySchemaVersion : Nat :=
+  2
+
+inductive RegistryLifecycle where
+  | live
+  | draining
+  deriving BEq, Repr
+
+instance : ToJson RegistryLifecycle where
+  toJson
+    | .live => "live"
+    | .draining => "draining"
+
+instance : FromJson RegistryLifecycle where
+  fromJson?
+    | .str "live" => .ok .live
+    | .str "draining" => .ok .draining
+    | json => .error s!"expected registry lifecycle 'live' or 'draining', got {json.compress}"
+
+/-- One statically configured workspace owned by a CLI session. -/
+structure WorkspaceBinding where
+  workspaceId : WorkspaceId
   root : String
   configHash : String
   leanCmd? : Option String := none
   plugin? : Option String := none
   rocqCmd? : Option String := none
   toolchain? : Option String := none
+  bundleId? : Option String := none
+  deriving FromJson, ToJson
+
+/--
+The private descriptor for one wrapper-owned CLI session.
+
+The descriptor is deliberately shaped as a session with a nonempty workspace collection even
+while the public owner command creates one workspace. This keeps session identity separate from
+workspace routing and leaves static multi-workspace ownership as an additive CLI feature.
+-/
+structure SessionDescriptor where
+  schemaVersion : Nat
+  lifecycle : RegistryLifecycle
+  daemonId : String
+  capability : String
+  pid : Nat
+  ownerPid : Nat
+  port? : Option Nat := none
+  workspaces : Array WorkspaceBinding
+  /-- Hash of the complete frozen session configuration. -/
+  configHash : String
   clientBin? : Option String := none
   daemonBin? : Option String := none
-  bundleId? : Option String := none
   startedAt : String
   requestedPort? : Option Nat := none
   deriving FromJson, ToJson
+
+def SessionDescriptor.rootSummary (entry : SessionDescriptor) : String :=
+  String.intercalate ", " <| entry.workspaces.toList.map (·.root)
+
+def SessionDescriptor.identity (entry : SessionDescriptor) : DaemonIdentity := {
+  daemonId := entry.daemonId
+  configHash := entry.configHash
+}
+
+def SessionDescriptor.redactedJson (entry : SessionDescriptor) : Json :=
+  (toJson entry).setObjVal! "capability" (toJson "<redacted>")
 
 structure DesiredConfig where
   root : System.FilePath
@@ -48,32 +96,60 @@ structure DesiredConfig where
 def natToPort? (n : Nat) : Option UInt16 :=
   if n < UInt16.size then some n.toUInt16 else none
 
-def registryEndpoint? (entry : RegistryEntry) : Option Transport.Endpoint := do
+def registryEndpoint? (entry : SessionDescriptor) : Option Transport.Endpoint := do
   (natToPort? =<< entry.port?).map Transport.Endpoint.tcp
 
-def endpointFromEntry (entry : RegistryEntry) : IO Transport.Endpoint := do
+def endpointFromEntry (entry : SessionDescriptor) : IO Transport.Endpoint := do
   match registryEndpoint? entry with
   | some endpoint => pure endpoint
-  | none => throw <| IO.userError s!"invalid Beam daemon transport data in registry for {entry.root}"
+  | none =>
+      let message :=
+        s!"invalid Beam daemon transport data for session {entry.daemonId} ({entry.rootSummary})"
+      throw (IO.userError message)
 
 def endpointSummary (endpoint : Transport.Endpoint) : String :=
   Transport.endpointDescription endpoint
 
-private def statsRoot? (resp : Response) : Option String := do
-  let result ← resp.result?
-  result.getObjValAs? String "root" |>.toOption
+private structure DaemonProbe where
+  root : String
+  identity? : Option DaemonIdentity
 
-def daemonRoot?
+private def daemonProbeResponseTimeoutMs : Nat :=
+  2000
+
+private def daemonProbeOfResponse (resp : Response) : Except BrokerClientFailure DaemonProbe := do
+  unless resp.ok do
+    throw <| .invalidResponse s!"Beam daemon stats probe failed: {(toJson resp).compress}"
+  let some result := resp.result?
+    | throw <| .invalidResponse "Beam daemon stats probe omitted its result"
+  let root ←
+    match result.getObjValAs? String "root" with
+    | .ok root => pure root
+    | .error err => throw <| .invalidResponse s!"invalid Beam daemon stats root: {err}"
+  let identity? ←
+    match result.getObjVal? "daemonIdentity" with
+    | .error _ => pure none
+    | .ok identityJson =>
+        match fromJson? identityJson with
+        | .ok identity => pure (some identity)
+        | .error err =>
+            throw <| .invalidResponse s!"invalid Beam daemon identity: {err}"
+  pure { root, identity? }
+
+private def daemonProbe
     (endpoint : Transport.Endpoint)
-    (workspaceId : WorkspaceId) : IO (Option String) := do
-  try
-    let resp ← sendRequest endpoint { op := .stats, workspaceId? := some workspaceId }
-    if resp.ok then
-      pure (statsRoot? resp)
-    else
-      pure none
-  catch _ =>
-    pure none
+    (workspaceId : WorkspaceId)
+    (capability? : Option String := none) : IO (Except BrokerClientFailure DaemonProbe) := do
+  match ← sendRequestWithStreamTimeoutResult endpoint
+      { op := .stats, workspaceId? := some workspaceId, daemonCapability? := capability? }
+      daemonProbeResponseTimeoutMs (fun _ => pure ()) with
+  | .ok resp => pure <| daemonProbeOfResponse resp
+  | .error failure => pure <| .error failure
+
+def daemonRootResult
+    (endpoint : Transport.Endpoint)
+    (workspaceId : WorkspaceId) : IO (Except BrokerClientFailure String) := do
+  pure <| (← daemonProbe endpoint workspaceId).map (·.root)
 
 def endpointOccupancyError
     (endpoint : Transport.Endpoint)
@@ -83,25 +159,24 @@ def endpointOccupancyError
 def endpointInUseError (endpoint : Transport.Endpoint) : String :=
   s!"selected endpoint {endpointSummary endpoint} is already in use"
 
-def startupFailureSuggestsEndpointInUse (message : String) : Bool :=
-  message.contains "address already in use" ||
-  message.contains "Address already in use"
+def endpointGenerationMismatchError
+    (endpoint : Transport.Endpoint)
+    (daemonRoot : System.FilePath) : String :=
+  s!"selected endpoint {endpointSummary endpoint} already serves Beam root {daemonRoot} " ++
+    "with another daemon generation"
+
+def endpointProtocolError (endpoint : Transport.Endpoint) (detail : String) : String :=
+  s!"selected endpoint {endpointSummary endpoint} did not return a valid Beam daemon response: {detail}"
+
+def startupLogSuggestsEndpointInUse (logText : String) : Bool :=
+  logText.contains "address already in use" ||
+  logText.contains "Address already in use"
 
 def shouldRetryAutomaticStartup
     (usesAutomaticEndpoint : Bool)
     (tries : Nat)
     (endpointOccupied startupAddressInUse : Bool) : Bool :=
   usesAutomaticEndpoint && tries > 0 && (endpointOccupied || startupAddressInUse)
-
--- A listening TCP port is not enough evidence that it belongs to this project:
--- random auto-port selection can collide with an unrelated Beam daemon.
-def daemonServesRoot
-    (endpoint : Transport.Endpoint)
-    (workspaceId : WorkspaceId)
-    (root : System.FilePath) : IO Bool := do
-  match ← daemonRoot? endpoint workspaceId with
-  | some daemonRoot => Beam.sameFilePath (System.FilePath.mk daemonRoot) root
-  | none => pure false
 
 def endpointAcceptsConnection (endpoint : Transport.Endpoint) : IO Bool := do
   try
@@ -110,5 +185,38 @@ def endpointAcceptsConnection (endpoint : Transport.Endpoint) : IO Bool := do
     pure true
   catch _ =>
     pure false
+
+inductive DaemonGenerationStatus where
+  | unavailable
+  | unrecognized (failure : BrokerClientFailure)
+  | wrongRoot (daemonRoot : String)
+  | wrongGeneration (daemonRoot : String)
+  | exact
+  deriving Repr
+
+/-- Classify one endpoint observation against the expected root and wrapper daemon generation. -/
+def daemonGenerationStatus
+    (endpoint : Transport.Endpoint)
+    (workspaceId : WorkspaceId)
+    (root : System.FilePath)
+    (identity : DaemonIdentity)
+    (capability : String) : IO DaemonGenerationStatus := do
+  match ← daemonProbe endpoint workspaceId (some capability) with
+  | .error failure =>
+      match failure with
+      | .transport _ _ =>
+          if ← endpointAcceptsConnection endpoint then
+            pure <| .unrecognized failure
+          else
+            pure .unavailable
+      | .invalidResponse _ | .streamCallback _ | .responseTimeout _ =>
+          pure <| .unrecognized failure
+  | .ok probe =>
+      unless ← Beam.sameFilePath (System.FilePath.mk probe.root) root do
+        return .wrongRoot probe.root
+      if probe.identity? == some identity then
+        pure .exact
+      else
+        pure <| .wrongGeneration probe.root
 
 end Beam.Daemon

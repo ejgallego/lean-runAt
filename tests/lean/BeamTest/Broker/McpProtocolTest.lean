@@ -757,6 +757,51 @@ private def expectToolErrorCode (label expectedCode : String) (resp : Json) : IO
   requireJsonString s!"{label} structured error" "code" expectedCode structured
   pure structured
 
+private def requireRuntimeActiveResult
+    (label : String)
+    (expected : Bool)
+    (response : Json) : IO Unit := do
+  let result ← requireObjVal s!"{label} response" "result" response
+  requireJsonBool s!"{label} result" "isError" false result
+  let structured ← requireObjVal s!"{label} result" "structuredContent" result
+  requireJsonBool s!"{label} structured" "runtime_active" expected structured
+
+private def requireLegacyRuntimeActive
+    (state : Beam.Mcp.Server.ServerState)
+    (opts : Beam.Mcp.Server.Options)
+    (label : String)
+    (id : Nat)
+    (expected : Bool)
+    (notifications : Beam.Mcp.Server.NotificationSink := {}) : IO Unit := do
+  let response ← handleRpcRequestWithNotifications state opts notifications label id "tools/call" <|
+    some <| toolCallParams "beam_version"
+  requireRuntimeActiveResult label expected response
+
+private def requireModernRuntimeActive
+    (state : Beam.Mcp.Server.ServerState)
+    (opts : Beam.Mcp.Server.Options)
+    (label : String)
+    (id : Nat)
+    (expected : Bool) : IO Unit := do
+  let response ← handleRpcRequest state opts label id "tools/call" <| some <| modernParams [
+    ("name", toJson "beam_version"),
+    ("arguments", Json.mkObj [])
+  ]
+  requireRuntimeActiveResult label expected response
+
+private def legacyStatsWorkspaces
+    (state : Beam.Mcp.Server.ServerState)
+    (opts : Beam.Mcp.Server.Options)
+    (notifications : Beam.Mcp.Server.NotificationSink)
+    (label : String)
+    (id : Nat) : IO Json := do
+  let response ← handleRpcRequestWithNotifications state opts notifications label id "tools/call" <|
+    some <| toolCallParams "beam_stats"
+  let result ← requireObjVal s!"{label} response" "result" response
+  requireJsonBool s!"{label} result" "isError" false result
+  let structured ← requireObjVal s!"{label} result" "structuredContent" result
+  requireObjVal s!"{label} structured" "workspaces" structured
+
 private def requireModernResultEnvelope (label : String) (result : Json) : IO Unit := do
   requireJsonString label "resultType" "complete" result
   let resultMeta ← requireObjVal label "_meta" result
@@ -856,11 +901,8 @@ private def checkModernProtocol : IO Unit := do
   requireModernResultEnvelope "modern confidential beam_feedback_report result" feedbackResult
   requireConfidentialFeedbackResult "modern confidential beam_feedback_report" confidentialSecret
     feedbackResult
-  let stateAfterFeedback ← state.applicationState
-  require "modern beam_feedback_report should not create a broker runtime"
-    stateAfterFeedback.runtime?.isNone
-  require "modern beam_feedback_report should not create a workspace cache"
-    stateAfterFeedback.workspaces.toList.isEmpty
+  requireModernRuntimeActive state opts
+    "modern beam_feedback_report should not create a broker runtime" 1022 false
 
   let preservedMetaResult := Beam.Mcp.modernResult <| Json.mkObj [
     ("_meta", Json.mkObj [("example.test/value", toJson "preserved")])
@@ -1166,11 +1208,8 @@ private def checkServerBasics : IO Unit := do
   requireConfidentialFeedbackResult "beam feedback confidential" confidentialSecret
     feedbackConfidentialResult
 
-  let stateAfterFeedback ← state.applicationState
-  require "beam_feedback_report should not create a broker runtime"
-    stateAfterFeedback.runtime?.isNone
-  require "beam_feedback_report should not create a workspace cache"
-    stateAfterFeedback.workspaces.toList.isEmpty
+  requireLegacyRuntimeActive state opts
+    "beam_feedback_report should not create a broker runtime" 26 false
 
   let uncachedDropResp ← handleRpcRequest state opts "drop uncached workspace" 24 "tools/call" <|
     some <| toolCallParams "lean_drop_workspace" <| withWorkspace root (Json.mkObj [])
@@ -1188,11 +1227,8 @@ private def checkServerBasics : IO Unit := do
     uncachedDropStructured
   requireJsonString "drop uncached workspace structured result" "reason" "notFound"
     uncachedDropStructured
-  let stateAfterUncachedDrop ← state.applicationState
-  require "dropping an uncached workspace should not create a broker runtime"
-    stateAfterUncachedDrop.runtime?.isNone
-  require "dropping an uncached workspace should not create a workspace cache"
-    stateAfterUncachedDrop.workspaces.toList.isEmpty
+  requireLegacyRuntimeActive state opts
+    "dropping an uncached workspace should not create a broker runtime" 27 false
 
   let rawToolResp ← handleRpcRequest state opts "raw tool rejection" 3 "tools/call" <|
     some <| toolCallParams Beam.LSP.RunAt.method
@@ -1406,12 +1442,6 @@ private def callLeanSync
   handleRpcRequestWithNotifications state opts notifications s!"lean_sync {path}" id "tools/call" <|
     some <| toolCallParams "lean_sync" arguments
 
-private def shutdownMcpRuntime (state : Beam.Mcp.Server.ServerState) : IO Unit := do
-  match (← state.applicationState).runtime? with
-  | none => pure ()
-  | some runtime =>
-      discard <| runtime.dispatchRequest { op := .shutdown }
-
 private def checkIdempotentLifecycleTools : IO Unit := do
   let root ← mkTempProjectRoot "lean-beam-mcp-idempotent-lifecycle"
   let state ← Beam.Mcp.Server.ServerState.create
@@ -1426,8 +1456,15 @@ private def checkIdempotentLifecycleTools : IO Unit := do
     let syncResp ← callLeanSync state opts notifications root 2 "SaveSmoke/B.lean"
     let syncResult ← requireObjVal "lifecycle lean_sync response" "result" syncResp
     requireJsonBool "lifecycle lean_sync result" "isError" false syncResult
+    let canonicalRoot ← Beam.resolveExistingPath root
+    let workspaceId := (Beam.Workspace.Descriptor.ofRoot canonicalRoot).cacheKey
+    let workspaces ← legacyStatsWorkspaces state opts notifications
+      "lifecycle stats after sync" 3
+    let workspaceStats ← requireObjVal
+      "lifecycle stats after sync workspaces" workspaceId workspaces
+    requireJsonString "lifecycle stats workspace" "root" canonicalRoot.toString workspaceStats
 
-    for (id, label) in #[(3, "first"), (4, "repeated")] do
+    for (id, label) in #[(4, "first"), (5, "repeated")] do
       let closeResp ← handleRpcRequestWithNotifications state opts notifications
         s!"{label} lean close" id "tools/call" <| some <| toolCallParams "lean_close" <|
           withWorkspace root <| Json.mkObj [
@@ -1440,7 +1477,7 @@ private def checkIdempotentLifecycleTools : IO Unit := do
       requireJsonBool s!"{label} lean_close structured result" "closed" true closeStructured
 
     let firstDropResp ← handleRpcRequestWithNotifications state opts notifications
-      "first lean drop workspace" 5 "tools/call" <|
+      "first lean drop workspace" 6 "tools/call" <|
         some <| toolCallParams "lean_drop_workspace" <| withWorkspace root (Json.mkObj [])
     let firstDropResult ← requireObjVal "first lean_drop_workspace response" "result" firstDropResp
     requireJsonBool "first lean_drop_workspace result" "isError" false firstDropResult
@@ -1449,9 +1486,12 @@ private def checkIdempotentLifecycleTools : IO Unit := do
     requireJsonBool "first lean_drop_workspace structured result" "dropped" true firstDropStructured
     requireJsonBool "first lean_drop_workspace structured result" "invalidated_handles" true
       firstDropStructured
+    let workspaces ← legacyStatsWorkspaces state opts notifications
+      "lifecycle stats after drop" 7
+    requireFieldAbsent "lifecycle stats after drop workspaces" workspaceId workspaces
 
     let repeatedDropResp ← handleRpcRequestWithNotifications state opts notifications
-      "repeated lean drop workspace" 6 "tools/call" <|
+      "repeated lean drop workspace" 8 "tools/call" <|
         some <| toolCallParams "lean_drop_workspace" <| withWorkspace root (Json.mkObj [])
     let repeatedDropResult ←
       requireObjVal "repeated lean_drop_workspace response" "result" repeatedDropResp
@@ -1464,8 +1504,13 @@ private def checkIdempotentLifecycleTools : IO Unit := do
       repeatedDropStructured
     requireJsonString "repeated lean_drop_workspace structured result" "reason" "notFound"
       repeatedDropStructured
+
+    state.closeRuntime
+    requireLegacyRuntimeActive state opts
+      "MCP runtime close should clear ServerState ownership" 9 false notifications
+    state.closeRuntime
   finally
-    shutdownMcpRuntime state
+    state.closeRuntime
     try
       if ← root.pathExists then
         IO.FS.removeDirAll root
@@ -1606,7 +1651,7 @@ private def checkDiagnosticLogForwarding : IO Unit := do
     requireJsonBool "error log data" "completion_blocking" false errorData
     requireFieldAbsent "error log data" "save_blocking" errorData
   finally
-    shutdownMcpRuntime state
+    state.closeRuntime
     try
       if ← root.pathExists then
         IO.FS.removeDirAll root

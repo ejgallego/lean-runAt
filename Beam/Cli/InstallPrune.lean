@@ -31,6 +31,56 @@ private structure InstallPrunePlan where
   oldRuntimes : Array System.FilePath := #[]
   staleBundles : Array System.FilePath := #[]
 
+private def installLockPollMs : Nat :=
+  100
+
+/--
+Coordinate pruning with the bootstrap shell installer, which owns `.install-lock` as a directory.
+
+Unlike the old generic directory lock, this compatibility boundary never reaps a purportedly stale
+owner: `mkdir` is the only acquisition operation and only the process that created the directory
+removes it. A crashed installer therefore fails closed and requires explicit operator recovery.
+-/
+private partial def acquireInstallLockUntil
+    (lockDir : System.FilePath)
+    (startedNanos deadlineNanos timeoutMs : Nat) : IO Unit := do
+  let acquired ←
+    try
+      IO.FS.createDir lockDir
+      pure true
+    catch
+    | .alreadyExists .. => pure false
+    | error => throw error
+  if acquired then
+    let selfPid ← IO.Process.getPID
+    IO.FS.writeFile (lockDir / "pid") s!"{selfPid}\n"
+    return
+  let now ← IO.monoNanosNow
+  if now >= deadlineNanos then
+    let waitedMs := (now - startedNanos) / 1000000
+    throw <| IO.userError <|
+      s!"timed out after {waitedMs} ms waiting for Beam lock {lockDir}; timeout: {timeoutMs} ms"
+  IO.sleep installLockPollMs.toUInt32
+  acquireInstallLockUntil lockDir startedNanos deadlineNanos timeoutMs
+
+private def releaseInstallLock (lockDir : System.FilePath) : IO Unit := do
+  let pidPath := lockDir / "pid"
+  if ← pidPath.pathExists then
+    IO.FS.removeFile pidPath
+  IO.FS.removeDir lockDir
+
+private def withInstallLockTimeout
+    (lockDir : System.FilePath)
+    (timeoutMs : Nat)
+    (act : IO α) : IO α := do
+  let startedNanos ← IO.monoNanosNow
+  acquireInstallLockUntil lockDir startedNanos
+    (startedNanos + timeoutMs * 1000000) timeoutMs
+  try
+    act
+  finally
+    releaseInstallLock lockDir
+
 private def installPruneUsage : String :=
   "usage: lean-beam prune [--apply] [--bundles]"
 
@@ -249,7 +299,7 @@ def runInstallPrune (home : System.FilePath) (args : List String) : IO Unit := d
     IO.println installPruneHelp
     return
   let ctx ← resolveInstallPruneContext home
-  withLockTimeout (ctx.installRoot / ".install-lock") 1000 do
+  withInstallLockTimeout (ctx.installRoot / ".install-lock") 1000 do
     validateInstallPruneContext ctx
     let plan ← installPrunePlan ctx opts
     printInstallPrunePlan ctx opts plan

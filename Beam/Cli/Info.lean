@@ -10,6 +10,8 @@ import Beam.Cli.InstallLayout
 import Beam.Cli.Output
 import Beam.Cli.Project
 import Beam.Cli.RuntimeBundle
+import Beam.Daemon.Debug
+import Beam.Daemon.Paths
 import Beam.Version
 
 open Lean
@@ -143,8 +145,10 @@ private def printRocqDoctorInfo (home root : System.FilePath) : IO Unit := do
   IO.println s!"daemon binary: {paths.daemon}"
   IO.println s!"client binary: {paths.client}"
 
-def daemonFailureIncidentDoctorLines (root : System.FilePath) : IO (List String) := do
-  let incidents ← recentDaemonFailureIncidentPaths root
+def daemonFailureIncidentDoctorLines
+    (root : System.FilePath)
+    (explicitControlDir? : Option System.FilePath := none) : IO (List String) := do
+  let incidents ← Beam.Daemon.recentDaemonFailureIncidentPaths root 5 explicitControlDir?
   if incidents.isEmpty then
     pure ["daemon incidents: none"]
   else
@@ -152,8 +156,10 @@ def daemonFailureIncidentDoctorLines (root : System.FilePath) : IO (List String)
       s!"daemon incidents: {incidents.size} recent" ::
         (incidents.toList.map fun path => s!"daemon incident: {path}")
 
-private def printDaemonFailureIncidentDoctorInfo (root : System.FilePath) : IO Unit := do
-  for line in ← daemonFailureIncidentDoctorLines root do
+private def printDaemonFailureIncidentDoctorInfo
+    (root : System.FilePath)
+    (explicitControlDir? : Option System.FilePath := none) : IO Unit := do
+  for line in ← daemonFailureIncidentDoctorLines root explicitControlDir? do
     IO.println line
 
 def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO Unit := do
@@ -163,25 +169,32 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
   match backend with
   | .lean => printLeanDoctorInfo home root
   | .rocq => printRocqDoctorInfo home root
-  let registry ← registryPath root
+  let registry ← Beam.Daemon.registryPathFor root opts.explicitControlDir?
   IO.println s!"registry: {registry}"
-  match ← registryLiveFor root with
-  | some entry =>
+  match ← observeProjectRegistry root opts.explicitControlDir? with
+  | .live entry =>
       IO.println "daemon status: live"
       IO.println s!"daemon pid: {entry.pid}"
-      if let some pidNamespace := entry.pidNamespace? then
-        IO.println s!"daemon pid namespace: {pidNamespace}"
       if let some endpoint := Beam.Daemon.registryEndpoint? entry then
         IO.println s!"daemon endpoint: {Beam.Daemon.endpointSummary endpoint}"
       else
         IO.println "daemon endpoint: invalid"
       IO.println s!"daemon config hash: {entry.configHash}"
-  | none =>
-      if ← registry.pathExists then
-        IO.println "daemon status: stale"
-      else
-        IO.println "daemon status: absent"
-  printDaemonFailureIncidentDoctorInfo root
+  | .draining entry =>
+      IO.println "daemon status: draining"
+      IO.println s!"daemon generation: {entry.daemonId}"
+  | .absent => IO.println "daemon status: absent"
+  | .legacy => IO.println "daemon status: legacy registry"
+  | .unsupported schemaVersion =>
+      IO.println "daemon status: unsupported registry"
+      IO.println s!"registry schema version: {schemaVersion}"
+  | .malformed detail =>
+      IO.println "daemon status: malformed registry"
+      IO.println s!"registry error: {detail}"
+  | .unusable _ reason =>
+      IO.println "daemon status: unsafe"
+      IO.println s!"daemon safety error: {reason.message}"
+  printDaemonFailureIncidentDoctorInfo root opts.explicitControlDir?
 
 def printValidatedToolchains (home : System.FilePath) (backendName : String) : IO Unit := do
   match backendName with

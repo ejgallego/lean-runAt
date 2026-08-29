@@ -120,13 +120,13 @@ private def requestMethod (method : Except String String) : HandlerM String :=
   | .ok method => pure method
   | .error msg => throw <| responseFailureFor .invalidParams msg
 
-private def runHandler (act : HandlerM (Response × Bool)) : IO (Response × Bool) := do
+private def runHandler (act : HandlerM Response) : IO Response := do
   try
     match ← act.run with
     | .ok result => pure result
-    | .error failure => pure (failure.toResponse, false)
+    | .error failure => pure failure.toResponse
   catch e =>
-    pure (errorResponseFor .internalError e.toString, false)
+    pure <| errorResponseFor .internalError e.toString
 
 private def mkSessionToken : IO String := do
   let pid ← IO.Process.getPID
@@ -182,35 +182,30 @@ private partial def waitForProcessExitWithTimeout
           loop (remainingMs - min pollMs remainingMs)
   loop timeoutMs
 
-private def shutdownSession (session : Session) : IO Unit := do
-  try
-    writeLspRequest session.stdin ({ id := 0, method := "shutdown", param := Json.null : Lean.JsonRpc.Request Json })
-    let task ← IO.asTask (prio := Task.Priority.dedicated) session.stdout.readLspMessage
-    let _ ← waitForTaskWithTimeout task sessionShutdownReplyTimeoutMs
-    pure ()
-  catch _ =>
-    pure ()
-  try
-    writeLspNotification session.stdin ({ method := "exit", param := Json.null : Lean.JsonRpc.Notification Json })
-  catch _ =>
-    pure ()
-  unless ← waitForProcessExitWithTimeout session.proc sessionShutdownReplyTimeoutMs do
+private def terminateBackendProcess (proc : IO.Process.Child brokerStdio) : IO Unit := do
+  let running ←
     try
-      session.proc.kill
+      pure (← proc.tryWait).isNone
+    catch _ =>
+      pure true
+  if running then
+    try
+      proc.kill
     catch _ =>
       pure ()
-    try
-      if let some kill := ← killCommand? then
-        let _ ← IO.Process.output {
-          cmd := kill.toString
-          args := #["-9", toString session.proc.pid.toNat]
-        }
+    unless ← waitForProcessExitWithTimeout proc sessionShutdownReplyTimeoutMs do
+      try
+        if let some kill := ← killCommand? then
+          let _ ← IO.Process.output {
+            cmd := kill.toString
+            args := #["-9", toString proc.pid.toNat]
+          }
+          pure ()
+      catch _ =>
         pure ()
-    catch _ =>
-      pure ()
-    discard <| waitForProcessExitWithTimeout session.proc sessionShutdownReplyTimeoutMs
+      discard <| waitForProcessExitWithTimeout proc sessionShutdownReplyTimeoutMs
   try
-    discard <| session.proc.tryWait
+    discard <| proc.tryWait
   catch _ =>
     pure ()
 
@@ -404,18 +399,17 @@ private def startWaitDiagnosticsWatchdog
             s!"waitForDiagnostics watchdog after {timeoutMs}ms: {label}"
       pure ()
 
-private def awaitPending (promise : IO.Promise (Except ResponseFailure PendingResult)) :
-    HandlerM PendingResult := do
-  requestArg (← liftHandlerIO <| PendingRequest.awaitOutcome promise)
+private def awaitPending (pending : PendingRequest) : HandlerM PendingResult := do
+  requestArg (← liftHandlerIO pending.awaitOutcome)
 
 private def awaitWaitForDiagnosticsBarrier
     (label : String)
-    (promise : IO.Promise (Except ResponseFailure PendingResult)) : HandlerM PendingResult := do
+    (pending : PendingRequest) : HandlerM PendingResult := do
   let doneRef ← liftHandlerIO <| IO.mkRef false
   liftHandlerIO <| startWaitDiagnosticsWatchdog label doneRef
   let outcome ← liftHandlerIO <| do
     try
-      let outcome ← PendingRequest.awaitOutcome promise
+      let outcome ← pending.awaitOutcome
       doneRef.set true
       pure outcome
     catch e =>
@@ -463,14 +457,7 @@ partial def sessionReaderLoop (session : Session) : IO Unit := do
       code := .workerExited
       message := e.toString
     }
-    try
-      session.proc.kill
-    catch _ =>
-      pure ()
-    try
-      discard <| session.proc.tryWait
-    catch _ =>
-      pure ()
+    terminateBackendProcess session.proc
 
 private def startRequestJsonTrackedDetailed
     (session : Session)
@@ -483,14 +470,14 @@ private def startRequestJsonTrackedDetailed
     (diagnosticScope : DiagnosticScope := .errors)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none)
     (cancelRef? : Option (IO.Ref Bool) := none) :
-    IO (Session × IO.Promise (Except ResponseFailure PendingResult)) := do
+    IO (Session × PendingRequest) := do
   let (session, id) := nextRequestId session
   let progressRef ← IO.mkRef (initialProgress? <|> tracked.map (fun _ => {}))
   let diagnosticsRef ← IO.mkRef #[]
   let diagnosticsSeenRef ← IO.mkRef false
   let seenDiagnosticKeysRef ← IO.mkRef ({} : Std.TreeSet String compare)
   let promise ← IO.Promise.new
-  PendingRequestStore.insert session.pending id {
+  let pending : PendingRequest := {
       cancelRef? := cancelRef?
       promise := promise
       tracked? := tracked
@@ -503,12 +490,13 @@ private def startRequestJsonTrackedDetailed
       emitDiagnostic? := emitDiagnostic?
       : PendingRequest
     }
+  PendingRequestStore.insert session.pending id pending
   traceBroker
     s!"lsp request inserted id={id} method={method} clientRequestId={optionLabel clientRequestId?} tracked={tracked.isSome}"
   try
     writeLspRequest session.stdin ({ id, method, param : Lean.JsonRpc.Request Json })
     traceBroker s!"lsp request sent id={id} method={method}"
-    pure (session, promise)
+    pure (session, pending)
   catch e =>
     discard <| PendingRequestStore.remove session.pending id
     traceBroker s!"lsp request send failed id={id} method={method} error={e.toString}"
@@ -517,6 +505,29 @@ private def startRequestJsonTrackedDetailed
     catch _ =>
       pure ()
     throw e
+
+private def shutdownSession (session : Session) : IO Unit := do
+  let session ←
+    try
+      let (session, pending) ←
+        startRequestJsonTrackedDetailed session "shutdown" Json.null
+      let task ← IO.asTask (prio := Task.Priority.dedicated) pending.awaitOutcome
+      if (← waitForTaskWithTimeout task sessionShutdownReplyTimeoutMs).isNone then
+        PendingRequestStore.failAll session.pending <| BrokerFailure.toResponseFailure {
+          code := .workerExited
+          message := "backend session shutdown timed out"
+        }
+        discard <| waitForTaskWithTimeout task sessionShutdownReplyTimeoutMs
+      pure session
+    catch _ =>
+      pure session
+  try
+    writeLspNotification session.stdin
+      ({ method := "exit", param := Json.null : Lean.JsonRpc.Notification Json })
+  catch _ =>
+    pure ()
+  unless ← waitForProcessExitWithTimeout session.proc sessionShutdownReplyTimeoutMs do
+    terminateBackendProcess session.proc
 
 def sendRequestJsonTrackedDetailed
     (session : Session)
@@ -529,10 +540,10 @@ def sendRequestJsonTrackedDetailed
     (diagnosticScope : DiagnosticScope := .errors)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
     IO (Except ResponseFailure (Session × Json × Option SyncFileProgress × Array Diagnostic)) := do
-  let (session, promise) ←
+  let (session, pending) ←
     startRequestJsonTrackedDetailed session method param clientRequestId? tracked initialProgress?
       emitProgress? diagnosticScope emitDiagnostic?
-  match ← PendingRequest.awaitOutcome promise with
+  match ← pending.awaitOutcome with
   | .ok pending => pure <| .ok (session, pending.result, pending.progress?, pending.diagnostics)
   | .error failure => pure <| .error failure
 
@@ -555,6 +566,76 @@ private partial def awaitInitializeResponse (stdout : IO.FS.Stream) : IO Unit :=
   | .request .. =>
       throw <| IO.userError "unexpected server request before initialize completed"
 
+private def backendInitializeTimeoutMs : Nat :=
+  30000
+
+/--
+Acquire a fully initialized backend session or terminate the provisional child before failing.
+
+The caller adopts the returned session into broker state. No child ownership escapes this function
+until the initialization response and `initialized` notification have both completed.
+-/
+private def acquireBackendSession
+    (workspaceId : WorkspaceId)
+    (backend : Backend)
+    (config : BrokerConfig)
+    (epoch : Nat) : IO Session := do
+  let root := config.root
+  let (cmd, args, env) ← backendCommand config backend
+  let proc ← IO.Process.spawn {
+    toStdioConfig := brokerStdio
+    cmd := cmd
+    args := args
+    env := env
+    cwd := root.toString
+  }
+  let (session, initializeTask) ←
+    try
+      let stdin := IO.FS.Stream.ofHandle proc.stdin
+      let stdout := IO.FS.Stream.ofHandle proc.stdout
+      let pending ← PendingRequestStore.create
+      let sessionToken ← mkSessionToken
+      let session : Session := {
+        workspaceId
+        backend
+        root
+        epoch
+        sessionToken
+        proc
+        stdin
+        stdout
+        pending
+      }
+      writeLspRequest stdin
+        ({ id := 0, method := "initialize", param := initializeParams backend root
+          : Lean.JsonRpc.Request Json })
+      let initializeTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+        awaitInitializeResponse stdout
+      pure (session, initializeTask)
+    catch err =>
+      terminateBackendProcess proc
+      throw err
+  try
+    match ← waitForTaskWithTimeout initializeTask backendInitializeTimeoutMs with
+    | some (.ok ()) => pure ()
+    | some (.error err) => throw err
+    | none =>
+        throw <| IO.userError <|
+          s!"backend initialize timed out after {backendInitializeTimeoutMs} ms"
+    writeLspNotification session.stdin
+      ({ method := "initialized", param := Json.mkObj [] : Lean.JsonRpc.Notification Json })
+    let _ ← IO.asTask (prio := Task.Priority.dedicated) do
+      try
+        sessionReaderLoop session
+      catch e =>
+        IO.eprintln s!"broker session reader task failed: {e.toString}"
+    pure session
+  catch err =>
+    IO.cancel initializeTask
+    terminateBackendProcess proc
+    discard <| waitForTaskWithTimeout initializeTask sessionShutdownReplyTimeoutMs
+    throw err
+
 private def requireWorkspace (workspaceId : WorkspaceId) : M WorkspaceState := do
   let state ← get
   match getWorkspace? state workspaceId with
@@ -568,7 +649,6 @@ private def ensureSession (workspaceId : WorkspaceId) (backend : Backend) : M Se
     | some workspace => pure workspace
     | none => throw <| IO.userError s!"unknown Beam workspace '{workspaceId}'"
   let config := workspace.config
-  let root := config.root
   let backendState := getBackendState workspace backend
   let (backendState, restart) ← match backendState.session? with
     | some session =>
@@ -587,37 +667,8 @@ private def ensureSession (workspaceId : WorkspaceId) (backend : Backend) : M Se
         | none => st
       pure session
   | none =>
-      let (cmd, args, env) ← backendCommand config backend
-      let proc ← IO.Process.spawn {
-        toStdioConfig := brokerStdio
-        cmd := cmd
-        args := args
-        env := env
-        cwd := root.toString
-      }
-      let stdin := IO.FS.Stream.ofHandle proc.stdin
-      let stdout := IO.FS.Stream.ofHandle proc.stdout
-      let pending ← PendingRequestStore.create
-      let sessionToken ← mkSessionToken
-      let mut session : Session := {
-        workspaceId
-        backend
-        root
-        epoch := backendState.nextEpoch
-        sessionToken
-        proc
-        stdin
-        stdout
-        pending
-      }
-      writeLspRequest stdin ({ id := 0, method := "initialize", param := initializeParams backend root : Lean.JsonRpc.Request Json })
-      awaitInitializeResponse stdout
-      writeLspNotification stdin ({ method := "initialized", param := Json.mkObj [] : Lean.JsonRpc.Notification Json })
-      let _ ← IO.asTask (prio := Task.Priority.dedicated) do
-        try
-          sessionReaderLoop session
-        catch e =>
-          IO.eprintln s!"broker session reader task failed: {e.toString}"
+      let session ←
+        acquireBackendSession workspaceId backend config backendState.nextEpoch
       recordSessionSpawn workspaceId backend restart
       let backendState := { backendState with session? := some session }
       modify fun st =>
@@ -883,11 +934,33 @@ private def modifyCurrentSessionIfMatching
   | none =>
       pure ()
 
+inductive ServerMode where
+  /-- A separately managed broker, optionally carrying a public generation identity. -/
+  | standalone (identity? : Option DaemonIdentity)
+  /-- A wrapper-owned broker whose identity and request capability are inseparable. -/
+  | wrapper (identity : DaemonIdentity) (capability : String)
+
+def ServerMode.identity? : ServerMode → Option DaemonIdentity
+  | .standalone identity? => identity?
+  | .wrapper identity _ => some identity
+
+private def ServerMode.validate : ServerMode → Except String Unit
+  | .standalone none => pure ()
+  | .standalone (some identity) => do
+      unless !identity.daemonId.isEmpty && !identity.configHash.isEmpty do
+        throw "daemon identity values must be non-empty"
+  | .wrapper identity capability => do
+      unless !identity.daemonId.isEmpty && !identity.configHash.isEmpty do
+        throw "wrapper-owned daemon identity values must be non-empty"
+      unless !capability.isEmpty do
+        throw "wrapper-owned daemon capability must be non-empty"
+
 structure ServerRuntime where
   state : Std.Mutex State
-  endpoint : Transport.Endpoint
-  stop : IO.Ref Bool
+  private mode : ServerMode
   activeRequests : ActiveRequestRegistry
+  private closeMutex : Std.Mutex Bool
+  private closeDone : IO.Promise (Except IO.Error Unit)
 
 /--
 A cancellation capability bound to one active broker request admission.
@@ -906,19 +979,40 @@ def ServerRuntime.withState (server : ServerRuntime) (act : M α) : IO α := do
     set state
     pure a
 
+/-- Return the canonical root currently owned by `workspaceId`, if that workspace exists. -/
+def ServerRuntime.workspaceRoot?
+    (server : ServerRuntime)
+    (workspaceId : WorkspaceId) : IO (Option System.FilePath) := do
+  server.withState do
+    pure <| (getWorkspace? (← get) workspaceId).map (·.config.root)
+
+private def ServerRuntime.statsResponse
+    (server : ServerRuntime)
+    (workspaceId? : Option WorkspaceId := none) : IO Response := do
+  let payload ← server.withState <| statsPayload workspaceId?
+  let payload :=
+    match server.mode.identity? with
+    | some identity => payload.setObjVal! "daemonIdentity" (toJson identity)
+    | none => payload
+  pure <| Response.success payload
+
 def ServerRuntime.create
     (config : BrokerConfig)
     (workspaceId : WorkspaceId)
-    (endpoint : Transport.Endpoint := .tcp 0) : IO ServerRuntime := do
+    (mode : ServerMode := .standalone none) : IO ServerRuntime := do
   unless validWorkspaceId workspaceId do
     throw <| IO.userError "workspace id must be non-empty"
+  match mode.validate with
+  | .ok () => pure ()
+  | .error err => throw <| IO.userError err
   let startMonoNanos ← IO.monoNanosNow
   let state := mkInitialState config workspaceId startMonoNanos
   pure {
     state := ← Std.Mutex.new state
-    endpoint := endpoint
-    stop := ← IO.mkRef false
+    mode
     activeRequests := ← ActiveRequestRegistry.create
+    closeMutex := ← Std.Mutex.new false
+    closeDone := ← IO.Promise.new
   }
 
 private def brokerConfigSame (left right : BrokerConfig) : Bool :=
@@ -927,12 +1021,97 @@ private def brokerConfigSame (left right : BrokerConfig) : Bool :=
     left.leanPlugin? == right.leanPlugin? &&
     left.rocqCmd? == right.rocqCmd?
 
-private def shutdownWorkspaceSessions (workspace : WorkspaceState) : IO Unit := do
-  for session? in [workspace.lean.session?, workspace.rocq.session?] do
-    if let some session := session? then
-      shutdownSession session
+private def detachBackendSession
+    (backend : BackendState) : BackendState × Option Session :=
+  match backend.session? with
+  | none => (backend, none)
+  | some session =>
+      ({ backend with session? := none, nextEpoch := backend.nextEpoch + 1 }, some session)
 
-def workspaceInitResult
+private def collectSessions
+    (left? right? : Option Session) : Array Session :=
+  #[left?, right?].filterMap id
+
+private def detachWorkspaceSessions
+    (workspace : WorkspaceState) : WorkspaceState × Array Session :=
+  let (lean, leanSession?) := detachBackendSession workspace.lean
+  let (rocq, rocqSession?) := detachBackendSession workspace.rocq
+  ({ workspace with lean, rocq }, collectSessions leanSession? rocqSession?)
+
+private def detachRuntimeSessions (server : ServerRuntime) : IO (Array Session) := do
+  server.withState do
+    let state ← get
+    let (state, sessions) := state.workspaces.toList.foldl (init := (state, [])) fun
+        (state, sessions) (workspaceId, workspace) =>
+      let (workspace, detached) := detachWorkspaceSessions workspace
+      (setWorkspace state workspaceId workspace, detached.toList.reverse ++ sessions)
+    set state
+    pure sessions.reverse.toArray
+
+private def recordFirstCleanupError
+    (firstError? : Option IO.Error)
+    (phase : IO Unit) : IO (Option IO.Error) := do
+  try
+    phase
+    pure firstError?
+  catch err =>
+    pure (firstError? <|> some err)
+
+private def shutdownSessionsBestEffort :
+    List Session → Option IO.Error → IO Unit
+  | [], none => pure ()
+  | [], some err => throw err
+  | session :: sessions, firstError? => do
+      let firstError? ← recordFirstCleanupError firstError? <| shutdownSession session
+      shutdownSessionsBestEffort sessions firstError?
+
+private def shutdownRuntimeSessions (server : ServerRuntime) : IO Unit := do
+  shutdownSessionsBestEffort (← detachRuntimeSessions server).toList none
+
+private def awaitRuntimeClose
+    (promise : IO.Promise (Except IO.Error Unit)) : IO Unit := do
+  let some outcome ← IO.wait promise.result?
+    | throw <| IO.userError "broker runtime close promise dropped"
+  match outcome with
+  | .ok () => pure ()
+  | .error err => throw err
+
+private def ServerRuntime.closeStarted (server : ServerRuntime) : IO Bool :=
+  server.closeMutex.atomically get
+
+/--
+Close broker admission, cancel admitted requests, shut down every backend session, and wait for
+all admitted dispatch scopes to unregister. Concurrent and repeated callers wait for the same
+close result.
+-/
+def ServerRuntime.close (server : ServerRuntime) : IO Unit := do
+  let leadsClose ← server.closeMutex.atomically do
+    if ← get then
+      pure false
+    else
+      set true
+      pure true
+  if leadsClose then
+    -- Retain the first failure but run every teardown phase. In particular, a failed first session
+    -- sweep must not skip admission drain or the final sweep for sessions created during closure.
+    let firstError? ← recordFirstCleanupError none <|
+      ActiveRequestRegistry.closeAdmission server.activeRequests
+    let firstError? ← recordFirstCleanupError firstError? <| shutdownRuntimeSessions server
+    let firstError? ← recordFirstCleanupError firstError? <|
+      ActiveRequestRegistry.awaitDrained server.activeRequests
+    let firstError? ← recordFirstCleanupError firstError? <| shutdownRuntimeSessions server
+    let outcome :=
+      match firstError? with
+      | none => .ok ()
+      | some err => .error err
+    server.closeDone.resolve outcome
+    match outcome with
+    | .ok () => pure ()
+    | .error err => throw err
+  else
+    awaitRuntimeClose server.closeDone
+
+private def workspaceInitResult
     (workspaceId : WorkspaceId)
     (root : System.FilePath)
     (mode : Beam.Workspace.InitMode)
@@ -957,46 +1136,105 @@ private def duplicateRootWorkspace?
     else
       none
 
-def ServerRuntime.initWorkspaceWithConfig
-    (server : ServerRuntime)
+private structure WorkspaceTransition (α : Type) where
+  state : State
+  result : Except ResponseFailure α
+  detachedSessions : Array Session := #[]
+
+private def initWorkspaceTransition
+    (state : State)
     (workspaceId : WorkspaceId)
     (config : BrokerConfig)
-    (mode? : Option Beam.Workspace.InitMode := none) : IO Response := do
+    (mode? : Option Beam.Workspace.InitMode) : WorkspaceTransition Beam.Workspace.InitResult :=
   if !validWorkspaceId workspaceId then
-    return errorResponseFor .invalidParams "workspace id must be non-empty"
-  let mode := mode?.getD .set
-  server.withState do
-    let state ← get
+    { state, result := .error <| responseFailureFor .invalidParams
+        "workspace id must be non-empty" }
+  else
+    let mode := mode?.getD .set
     match getWorkspace? state workspaceId with
     | some current =>
         if mode == .reset then
           if let some otherId := duplicateRootWorkspace? state workspaceId config then
-            pure <| errorResponseFor .invalidParams <|
-              s!"workspace root {config.root} is already owned by workspace '{otherId}'"
+            { state, result := .error <| responseFailureFor .invalidParams <|
+                s!"workspace root {config.root} is already owned by workspace '{otherId}'" }
           else
-            shutdownWorkspaceSessions current
+            let (_, detachedSessions) := detachWorkspaceSessions current
             let replacement := mkWorkspaceState config
-            modify fun state => setWorkspace state workspaceId replacement
-            pure <| Response.success <| toJson <|
-              workspaceInitResult workspaceId config.root mode false true (some current.config.root)
+            {
+              state := setWorkspace state workspaceId replacement
+              result := .ok <|
+                workspaceInitResult workspaceId config.root mode false true
+                  (some current.config.root)
+              detachedSessions
+            }
         else if brokerConfigSame current.config config then
-          pure <| Response.success <| toJson <|
-            workspaceInitResult workspaceId current.config.root mode true false
+          { state, result := .ok <|
+              workspaceInitResult workspaceId current.config.root mode true false }
         else
-          pure <| errorResponseFor .invalidParams <|
-            s!"workspace '{workspaceId}' is already initialized for {current.config.root}; " ++
-            s!"use workspaceMode=reset to switch it explicitly to {config.root}"
+          { state, result := .error <| responseFailureFor .invalidParams <|
+              s!"workspace '{workspaceId}' is already initialized for {current.config.root}; " ++
+              s!"use workspaceMode=reset to switch it explicitly to {config.root}" }
     | none =>
         if mode == .verify then
-          pure <| errorResponseFor .invalidParams
-            s!"workspace '{workspaceId}' is not initialized; use workspaceMode=set first"
+          { state, result := .error <| responseFailureFor .invalidParams <|
+              s!"workspace '{workspaceId}' is not initialized; use workspaceMode=set first" }
         else if let some otherId := duplicateRootWorkspace? state workspaceId config then
-          pure <| errorResponseFor .invalidParams <|
-            s!"workspace root {config.root} is already owned by workspace '{otherId}'"
+          { state, result := .error <| responseFailureFor .invalidParams <|
+              s!"workspace root {config.root} is already owned by workspace '{otherId}'" }
         else
-          modify fun state => setWorkspace state workspaceId (mkWorkspaceState config)
-          pure <| Response.success <| toJson <|
-            workspaceInitResult workspaceId config.root mode false false
+          {
+            state := setWorkspace state workspaceId (mkWorkspaceState config)
+            result := .ok <| workspaceInitResult workspaceId config.root mode false false
+          }
+
+private def dropWorkspaceTransition
+    (state : State)
+    (workspaceId : WorkspaceId) : WorkspaceTransition Beam.Workspace.DropResult :=
+  if !validWorkspaceId workspaceId then
+    { state, result := .error <| responseFailureFor .invalidParams
+        "workspace id must be non-empty" }
+  else
+    match getWorkspace? state workspaceId with
+    | none =>
+        { state, result := .ok {
+            workspaceId
+            dropped := false
+            reason? := some "notFound"
+          } }
+    | some workspace =>
+        let (_, detachedSessions) := detachWorkspaceSessions workspace
+        {
+          state := { state with workspaces := state.workspaces.erase workspaceId }
+          result := .ok {
+            workspaceId
+            dropped := true
+            invalidatedHandles := true
+          }
+          detachedSessions
+        }
+
+private def ServerRuntime.runWorkspaceTransition
+    (server : ServerRuntime)
+    (transition : State → WorkspaceTransition α) : IO (Except ResponseFailure α) := do
+  let transition ← server.withState do
+    let transition := transition (← get)
+    set transition.state
+    pure transition
+  shutdownSessionsBestEffort transition.detachedSessions.toList none
+  pure transition.result
+
+/--
+Initialize, verify, or reset a workspace through a typed in-process boundary. Reset commits the new
+workspace ownership atomically, then drains any detached backend sessions outside the state mutex.
+-/
+def ServerRuntime.initWorkspaceWithConfig
+    (server : ServerRuntime)
+    (workspaceId : WorkspaceId)
+    (config : BrokerConfig)
+    (mode? : Option Beam.Workspace.InitMode := none) :
+    IO (Except ResponseFailure Beam.Workspace.InitResult) :=
+  server.runWorkspaceTransition fun state =>
+    initWorkspaceTransition state workspaceId config mode?
 
 private def workspaceListPayload (state : State) : Json :=
   toJson ({
@@ -1008,30 +1246,20 @@ private def workspaceListPayload (state : State) : Json :=
     } : Beam.Workspace.ListEntry)
   } : Beam.Workspace.ListResult)
 
+private def responseOfTypedResult [ToJson α] : Except ResponseFailure α → Response
+  | .ok result => Response.success (toJson result)
+  | .error failure => failure.toResponse
+
+/--
+Remove a workspace through a typed in-process boundary. The workspace is erased atomically before
+its detached backend sessions are drained outside the state mutex.
+-/
 def ServerRuntime.dropWorkspace
     (server : ServerRuntime)
-    (workspaceId : WorkspaceId) : IO Response := do
-  if !validWorkspaceId workspaceId then
-    return errorResponseFor .invalidParams "workspace id must be non-empty"
-  server.withState do
-    let state ← get
-    match getWorkspace? state workspaceId with
-    | none =>
-        pure <| Response.success <| toJson ({
-          workspaceId
-          dropped := false
-          reason? := some "notFound"
-        } : Beam.Workspace.DropResult)
-    | some workspace =>
-      shutdownWorkspaceSessions workspace
-      modify fun state => { state with workspaces := state.workspaces.erase workspaceId }
-      pure <| Response.success <| toJson ({
-        workspaceId
-        dropped := true
-        invalidatedHandles := true
-      } : Beam.Workspace.DropResult)
+    (workspaceId : WorkspaceId) : IO (Except ResponseFailure Beam.Workspace.DropResult) :=
+  server.runWorkspaceTransition fun state => dropWorkspaceTransition state workspaceId
 
-private def requestTracksActiveRequest : Op → Bool
+private def requestRecordsMetrics : Op → Bool
   | .cancel | .stats | .resetStats | .shutdown | .openDocs | .listWorkspaces => false
   | _ => true
 
@@ -1040,7 +1268,7 @@ private def recordDispatchMetrics
     (req : Request)
     (resp : Response)
     (startedAt : Nat) : IO Unit := do
-  if requestTracksActiveRequest req.op then
+  if requestRecordsMetrics req.op then
     let finishedAt ← IO.monoNanosNow
     let latencyMs := (finishedAt - startedAt) / 1000000
     if let some workspaceId := req.resolvedWorkspaceId? then
@@ -1054,8 +1282,11 @@ private def cancelRegisteredRequest
   | some active =>
     let sessions ← server.withState do
       let state ← get
-      pure <| state.workspaces.toList.flatMap fun (_, workspace) =>
-        [workspace.lean.session?, workspace.rocq.session?]
+      pure <| state.workspaces.toList.flatMap fun (workspaceId, workspace) =>
+        if active.workspaceId?.all (fun selected => selected == workspaceId) then
+          [workspace.lean.session?, workspace.rocq.session?]
+        else
+          []
     for session? in sessions do
       if let some session := session? then
         discard <| PendingRequestStore.cancelMatching session.pending session.stdin active.cancelRef
@@ -1064,9 +1295,10 @@ private def cancelRegisteredRequest
 
 private def cancelActiveRequest
     (server : ServerRuntime)
+    (workspaceId? : Option WorkspaceId)
     (clientRequestId : String) : IO Bool :=
   cancelRegisteredRequest server <|
-    ActiveRequestRegistry.markCancelled server.activeRequests clientRequestId
+    ActiveRequestRegistry.markCancelled server.activeRequests workspaceId? clientRequestId
 
 /--
 Cancel the exact active admission represented by `handle`.
@@ -1086,13 +1318,55 @@ private def propagatePendingCancellation
     (cancelRef? : Option (IO.Ref Bool)) : IO Unit := do
   PendingRequestStore.propagateCancellation session.pending session.stdin cancelRef?
 
-private def requestStop (server : ServerRuntime) : IO Unit := do
-  server.stop.set true
+private structure ClientPermits where
+  available : Std.Mutex Nat
+
+private def ClientPermits.create (count : Nat) : BaseIO ClientPermits := do
+  pure { available := ← Std.Mutex.new count }
+
+private def ClientPermits.tryAcquire (permits : ClientPermits) : BaseIO Bool := do
+  permits.available.atomically do
+    let available ← get
+    if available == 0 then
+      pure false
+    else
+      set (available - 1)
+      pure true
+
+private def ClientPermits.release (permits : ClientPermits) : BaseIO Unit := do
+  permits.available.atomically do
+    modify (· + 1)
+
+private structure DaemonTransport where
+  endpoint : Transport.Endpoint
+  listener : Transport.Listener
+  stop : IO.Ref Bool
+  clientPermits : ClientPermits
+
+private def maxDaemonClients : Nat :=
+  64
+
+private def DaemonTransport.create (endpoint : Transport.Endpoint) : IO DaemonTransport := do
+  let stop ← IO.mkRef false
+  let listener ← Transport.bindAndListen endpoint 16
+  pure { endpoint, listener, stop, clientPermits := ← ClientPermits.create maxDaemonClients }
+
+private def requestStop (transport : DaemonTransport) : IO Unit := do
+  transport.stop.set true
   try
-    let conn ← Transport.connect server.endpoint
-    Transport.closeConnection conn
+    -- Wake the blocking accept. Both ends are intentionally left to scope cleanup: performing a
+    -- graceful TCP shutdown on the wake-up pair can wait for its peer and deadlock daemon exit.
+    discard <| Transport.connect transport.endpoint
   catch _ =>
     pure ()
+
+private def closeAndRequestStop
+    (server : ServerRuntime)
+    (transport : DaemonTransport) : IO Unit := do
+  try
+    server.close
+  finally
+    requestStop transport
 
 private structure WorkspaceRequest extends Request where
   workspaceId : WorkspaceId
@@ -1171,7 +1445,7 @@ private structure StartedSyncedRequest where
   version : Nat
   priorProgress? : Option SyncFileProgress := none
   tracked : Option (DocumentUri × Nat) := none
-  promise : IO.Promise (Except ResponseFailure PendingResult)
+  pending : PendingRequest
 
 private def trackedDocumentVersion (uri : DocumentUri) (docState : DocState) :
     Option (DocumentUri × Nat) :=
@@ -1221,7 +1495,7 @@ private def startSyncedDocumentRequest
       pure ()
   let tracked := trackedFor uri docState
   let params := mkParams uri docState
-  let (session, promise) ←
+  let (session, pending) ←
     startRequestJsonTrackedDetailed session method params
       (clientRequestId? := clientRequestId?)
       (tracked := tracked)
@@ -1237,7 +1511,7 @@ private def startSyncedDocumentRequest
     version := docState.version
     priorProgress? := docState.fileProgress?
     tracked
-    promise
+    pending
   }
 
 private def awaitSyncedDocumentRequest
@@ -1245,7 +1519,7 @@ private def awaitSyncedDocumentRequest
     (started : StartedSyncedRequest)
     (cancelRef? : Option (IO.Ref Bool) := none) : HandlerM PendingResult := do
   liftHandlerIO <| propagatePendingCancellation started.session cancelRef?
-  let pending ← awaitPending started.promise
+  let pending ← awaitPending started.pending
   if started.tracked.isSome then
     withFailureProgress pending.progress? <|
       liftHandlerIO <| mergeFileProgressIfCurrent server started.session started.uri pending.progress?
@@ -1274,7 +1548,7 @@ private structure StartedTrackedBarrier where
   textMTime : Lake.MTime
   changed : Bool := false
   priorProgress? : Option SyncFileProgress := none
-  promise : IO.Promise (Except ResponseFailure PendingResult)
+  pending : PendingRequest
 
 private def startTrackedDiagnosticsBarrierIO
     (server : ServerRuntime)
@@ -1294,7 +1568,7 @@ private def startTrackedDiagnosticsBarrierIO
     let tracked := trackedDocumentVersion uri docState
     let params := toJson (WaitForDiagnosticsParams.mk uri docState.version)
     let method ← IO.ofExcept <| diagnosticsBarrierMethod session.backend
-    let (session, promise) ←
+    let (session, pending) ←
       startRequestJsonTrackedDetailed session method params
         (clientRequestId? := req.clientRequestId?)
         (tracked := tracked)
@@ -1313,7 +1587,7 @@ private def startTrackedDiagnosticsBarrierIO
       textMTime := docState.textMTime
       changed := synced.changed
       priorProgress? := docState.fileProgress?
-      promise
+      pending
     }
 
 private def finalizeSavedDoc
@@ -1464,7 +1738,7 @@ private def saveOleanCore
   liftHandlerIO <| propagatePendingCancellation started.session cancelRef?
   let barrier ← awaitWaitForDiagnosticsBarrier
     s!"save_olean sync barrier clientRequestId={optionLabel req.clientRequestId?} uri={started.uri} version={started.version}"
-    started.promise
+    started.pending
   let barrierResult : DiagnosticsBarrierResult ←
     withFailureProgress barrier.progress? <| liftHandlerIO <| decodeResponseAs barrier.result
   if barrierResult.version != started.version then
@@ -1532,18 +1806,18 @@ private def saveOleanCore
   -- Once artifact publication can begin, an older trace must not remain visible: it may have the
   -- same dependency hash while describing a different in-server artifact family.
   withFailureProgress barrierProgress? <| liftHandlerIO <| invalidateLeanSaveTrace spec
-  let (session, savePromise) ← withFailureProgress barrierProgress? <|
+  let (session, saveRequest) ← withFailureProgress barrierProgress? <|
     withCurrentMatchingSession server started.session fun current => do
-      let (current, savePromise) ← startRequestJsonTrackedDetailed current method params
+      let (current, saveRequest) ← startRequestJsonTrackedDetailed current method params
         (clientRequestId? := req.clientRequestId?)
         (cancelRef? := cancelRef?)
       updateSession current
-      pure (current, savePromise)
+      pure (current, saveRequest)
   withFailureProgress barrierProgress? <|
     liftHandlerIO <| propagatePendingCancellation session cancelRef?
   let savePending ←
     match ← withFailureProgress barrierProgress? <|
-        liftHandlerIO <| PendingRequest.awaitOutcome savePromise with
+        liftHandlerIO saveRequest.awaitOutcome with
     | .ok pending => pure pending
     | .error failure =>
         throw <| ({
@@ -1596,7 +1870,7 @@ private def handleSyncFileOp
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   if req.backend != .lean then
     throw <| responseFailureFor .invalidParams
       "sync_file diagnostics barrier is only supported for Lean"
@@ -1609,7 +1883,7 @@ private def handleSyncFileOp
   liftHandlerIO <| propagatePendingCancellation started.session cancelRef?
   let pending ← awaitWaitForDiagnosticsBarrier
     s!"sync_file clientRequestId={optionLabel req.clientRequestId?} uri={started.uri} version={started.version}"
-    started.promise
+    started.pending
   liftHandlerIO <| traceBroker
     s!"sync_file barrier completed clientRequestId={optionLabel req.clientRequestId?} progress={pending.progress?.isSome} diagnostics={pending.diagnostics.size} diagnosticsSeen={pending.diagnosticsSeen}"
   let barrierResult : DiagnosticsBarrierResult ←
@@ -1645,9 +1919,7 @@ private def handleSyncFileOp
     recordCompletedSync server started.session started.uri started.version
   liftHandlerIO <| traceBroker
     s!"sync_file response ready clientRequestId={optionLabel req.clientRequestId?} version={started.version} saveReady={saveReadiness.saveReady}"
-  pure (syncFileSuccessResponse
-    syncResult fileProgress?,
-    false)
+  pure <| syncFileSuccessResponse syncResult fileProgress?
 
 private def closeTrackedFileIfOpen
     (server : ServerRuntime)
@@ -1667,7 +1939,7 @@ private def handleRefreshFileOp
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let path ← requestArg req.pathArg
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   closeTrackedFileIfOpen server req path
@@ -1677,7 +1949,7 @@ private def handleUpdateFileOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let path ← requestArg req.pathArg
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req path
@@ -1686,11 +1958,11 @@ private def handleUpdateFileOp
     let synced ← syncFileSnapshotDetailed session snapshot
     updateSession synced.session
     pure synced
-  pure (Response.success (toJson ({
+  pure <| Response.success (toJson ({
     version := updated.version
     changed := updated.changed
     : UpdateFileResult
-  })), false)
+  }))
 
 private def handleCloseOp
     (server : ServerRuntime)
@@ -1698,21 +1970,21 @@ private def handleCloseOp
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let path ← requestArg req.pathArg
   if req.saveArtifacts?.getD false then
     let saved ← saveOlean server req path cancelRef? emitProgress? emitDiagnostic?
     finalizeSavedDoc server saved.session saved.uri saved.version true
-    pure (saveCompletedResponse saved true, false)
+    pure <| saveCompletedResponse saved true
   else
     liftHandlerIO <| server.withState do
       match ← currentSession? req.workspaceId req.backend with
       | some session =>
           let session ← closeFile session path
           updateSession session
-          pure (Response.success (Json.mkObj [("closed", toJson true)]), false)
+          pure <| Response.success (Json.mkObj [("closed", toJson true)])
       | none =>
-          pure (Response.success (Json.mkObj [("closed", toJson true)]), false)
+          pure <| Response.success (Json.mkObj [("closed", toJson true)])
 
 private def runAtSetupProgressEmitter?
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit)) :
@@ -1727,7 +1999,7 @@ private def handleRunAtOp
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.runAtArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
@@ -1749,11 +2021,10 @@ private def handleRunAtOp
       (emitDiagnostic? := runAtSetupProgressEmitter? emitDiagnostic?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (
+  pure <|
     Response.withOptionalFileProgress
       (Response.success (wrapResultHandle started.session pending.result))
-      pending.progress?,
-    false)
+      pending.progress?
 
 private def positionLspParams
     (args : PositionArgs)
@@ -1773,7 +2044,7 @@ private def handlePositionLspOp
     (extraFields : List (String × Json) := [])
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
   let started ← liftFailureIO <| server.withState do
@@ -1786,14 +2057,14 @@ private def handlePositionLspOp
       (emitProgress? := emitProgress?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
+  pure <| Response.withOptionalFileProgress (Response.success pending.result) pending.progress?
 
 private def handleHoverOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.hoverArgs
   handlePositionLspOp server req args.toPositionArgs args.method
     (cancelRef? := cancelRef?) (emitProgress? := emitProgress?)
@@ -1803,7 +2074,7 @@ private def handleSignatureHelpOp
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.signatureHelpArgs
   handlePositionLspOp server req args.toPositionArgs args.method
     (cancelRef? := cancelRef?) (emitProgress? := emitProgress?)
@@ -1813,7 +2084,7 @@ private def handleDefinitionOp
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.definitionArgs
   handlePositionLspOp server req args.toPositionArgs args.method
     (cancelRef? := cancelRef?) (emitProgress? := emitProgress?)
@@ -1823,7 +2094,7 @@ private def handleReferencesOp
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.referencesArgs
   handlePositionLspOp server req args.toPositionArgs args.method
     [("context", Json.mkObj [("includeDeclaration", toJson args.includeDeclaration)])]
@@ -1834,7 +2105,7 @@ private def handleDocumentSymbolsOp
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.documentSymbolsArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
@@ -1850,26 +2121,26 @@ private def handleDocumentSymbolsOp
       (emitProgress? := emitProgress?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
+  pure <| Response.withOptionalFileProgress (Response.success pending.result) pending.progress?
 
 private def handleWorkspaceSymbolsOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.workspaceSymbolsArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
-  let (session, promise) ← liftHandlerIO <| server.withState do
+  let (session, request) ← liftHandlerIO <| server.withState do
     let session ← ensureSession req.workspaceId req.backend
     let params := toJson ({ query := args.query : WorkspaceSymbolParams })
-    let (session, promise) ← startRequestJsonTrackedDetailed session args.method params
+    let (session, request) ← startRequestJsonTrackedDetailed session args.method params
       (clientRequestId? := req.clientRequestId?)
       (cancelRef? := cancelRef?)
     updateSession session
-    pure (session, promise)
+    pure (session, request)
   liftHandlerIO <| propagatePendingCancellation session cancelRef?
-  let pending ← awaitPending promise
-  pure (Response.success pending.result, false)
+  let pending ← awaitPending request
+  pure <| Response.success pending.result
 
 private def codeActionResolveSourceUri
     (action : CodeAction) : Except ResponseFailure DocumentUri := do
@@ -1888,7 +2159,7 @@ private def handleCodeActionResolveOp
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.codeActionResolveArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
@@ -1911,7 +2182,7 @@ private def handleCodeActionResolveOp
     version := started.version
     codeAction := resolved
   }
-  pure (Response.withOptionalFileProgress (Response.success (toJson payload)) pending.progress?, false)
+  pure <| Response.withOptionalFileProgress (Response.success (toJson payload)) pending.progress?
 
 private def handleSaveOleanOp
     (server : ServerRuntime)
@@ -1919,18 +2190,18 @@ private def handleSaveOleanOp
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let path ← requestArg req.pathArg
   let saved ← saveOlean server req path cancelRef? emitProgress? emitDiagnostic?
   finalizeSavedDoc server saved.session saved.uri saved.version false
-  pure (saveCompletedResponse saved false, false)
+  pure <| saveCompletedResponse saved false
 
 private def handleGoalsOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.goalsArgs
   if req.backend == .lean && req.text?.isSome then
     throw <| responseFailureFor .invalidParams
@@ -1967,14 +2238,14 @@ private def handleGoalsOp
       (emitProgress? := emitProgress?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
+  pure <| Response.withOptionalFileProgress (Response.success pending.result) pending.progress?
 
 private def handleTodoOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.todoArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let range : Lsp.Range := {
@@ -2001,14 +2272,14 @@ private def handleTodoOp
       (emitProgress? := emitProgress?)
       (cancelRef? := cancelRef?)
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
+  pure <| Response.withOptionalFileProgress (Response.success pending.result) pending.progress?
 
 private def handleRunWithOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.runWithArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
@@ -2041,18 +2312,17 @@ private def handleRunWithOp
           (cancelRef? := cancelRef?)
         pure startedResult
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (
+  pure <|
     Response.withOptionalFileProgress
       (Response.success (wrapResultHandle started.session pending.result))
-      pending.progress?,
-    false)
+      pending.progress?
 
 private def handleReleaseOp
     (server : ServerRuntime)
     (req : WorkspaceRequest)
     (cancelRef? : Option (IO.Ref Bool) := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none) :
-    HandlerM (Response × Bool) := do
+    HandlerM Response := do
   let args ← requestArg req.releaseArgs
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftHandlerIO <| readRequestSyncSnapshot server req args.path
@@ -2079,7 +2349,7 @@ private def handleReleaseOp
           (cancelRef? := cancelRef?)
         pure startedResult
   let pending ← awaitSyncedDocumentRequest server started cancelRef?
-  pure (Response.withOptionalFileProgress (Response.success pending.result) pending.progress?, false)
+  pure <| Response.withOptionalFileProgress (Response.success pending.result) pending.progress?
 
 private def initWorkspaceConfigFromRequest
     (server : ServerRuntime)
@@ -2114,70 +2384,66 @@ private def initWorkspaceConfigFromRequest
 private def handleRequestIO
     (server : ServerRuntime)
     (req : Request)
-    (cancelRef? : Option (IO.Ref Bool) := none)
+    (activeRequest? : Option ActiveRequest := none)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
-    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO (Response × Bool) := do
+    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO Response := do
+  let cancelRef? := activeRequest?.map (·.cancelRef)
   match req.op with
   | .shutdown =>
-      let resp ← server.withState do
-        let state ← get
-        for (_, workspace) in state.workspaces.toList do
-          shutdownWorkspaceSessions workspace
-        pure <| Response.success (Json.mkObj [("shutdown", toJson true)])
-      pure (resp, true)
+      server.close
+      pure <| Response.success (Json.mkObj [("shutdown", toJson true)])
   | .stats =>
       match req.workspaceId? with
-      | none => pure (Response.success (← server.withState statsPayload), false)
+      | none => server.statsResponse
       | some _ =>
           match ← validateRequestWorkspace server req with
-          | .error failure => pure (failure.toResponse, false)
+          | .error failure => pure failure.toResponse
           | .ok workspaceReq =>
-              pure (Response.success
-                (← server.withState <| statsPayload (some workspaceReq.workspaceId)), false)
+              server.statsResponse (some workspaceReq.workspaceId)
   | .listWorkspaces =>
       let payload ← server.withState do
         pure <| workspaceListPayload (← get)
-      pure (Response.success payload, false)
+      pure <| Response.success payload
   | .resetStats =>
       let now ← IO.monoNanosNow
       let resp ← server.withState do
         resetMetrics now
         pure <| Response.success (Json.mkObj [("reset", toJson true)])
-      pure (resp, false)
+      pure resp
   | .openDocs =>
       match req.workspaceId? with
-      | none => pure (Response.success (← server.withState openDocsPayload), false)
+      | none => pure <| Response.success (← server.withState openDocsPayload)
       | some _ =>
           match ← validateRequestWorkspace server req with
-          | .error failure => pure (failure.toResponse, false)
+          | .error failure => pure failure.toResponse
           | .ok workspaceReq =>
-              pure (Response.success
-                (← server.withState <| openDocsPayload (some workspaceReq.workspaceId)), false)
+              pure <| Response.success
+                (← server.withState <| openDocsPayload (some workspaceReq.workspaceId))
   | .initWorkspace =>
       match req.requireWorkspaceId with
-      | .error err => pure (errorResponseFor .invalidParams err, false)
+      | .error err => pure <| errorResponseFor .invalidParams err
       | .ok workspaceId =>
           match ← initWorkspaceConfigFromRequest server req with
-          | .error failure => pure (failure.toResponse, false)
+          | .error failure => pure failure.toResponse
           | .ok config =>
-              let resp ← server.initWorkspaceWithConfig workspaceId config req.workspaceMode?
-              pure (resp, false)
+              let result ← server.initWorkspaceWithConfig workspaceId config req.workspaceMode?
+              pure <| responseOfTypedResult result
   | .dropWorkspace =>
       match req.requireWorkspaceId with
-      | .error err => pure (errorResponseFor .invalidParams err, false)
+      | .error err => pure <| errorResponseFor .invalidParams err
       | .ok workspaceId =>
-          let resp ← server.dropWorkspace workspaceId
-          pure (resp, false)
+          let result ← server.dropWorkspace workspaceId
+          pure <| responseOfTypedResult result
   | .cancel =>
       let targetClientRequestId ←
         match req.cancelRequestIdArg with
         | .ok targetClientRequestId => pure targetClientRequestId
-        | .error failure => return (failure.toResponse, false)
-      let cancelled ← cancelActiveRequest server targetClientRequestId
-      pure (Response.success (Json.mkObj [("cancelled", toJson cancelled)]), false)
+        | .error failure => return failure.toResponse
+      let cancelled ← cancelActiveRequest server req.resolvedWorkspaceId? targetClientRequestId
+      pure <| Response.success (Json.mkObj [("cancelled", toJson cancelled)])
   | op =>
       match ← validateRequestWorkspace server req with
-      | .error failure => pure (failure.toResponse, false)
+      | .error failure => pure failure.toResponse
       | .ok workspaceReq =>
           match op with
           | .ensure =>
@@ -2194,7 +2460,7 @@ private def handleRequestIO
                     pure <| Response.success payload
                 catch e =>
                   pure <| errorResponseFor .internalError e.toString
-              pure (resp, false)
+              pure resp
           | .updateFile => runHandler <| handleUpdateFileOp server workspaceReq cancelRef?
           | .syncFile =>
               runHandler <| handleSyncFileOp server workspaceReq cancelRef? emitProgress? emitDiagnostic?
@@ -2230,36 +2496,49 @@ private def handleRequestIO
 private def ServerRuntime.withRequestAdmission
     (server : ServerRuntime)
     (req : Request)
-    (act : RequestHandle → IO (Response × Bool)) : IO (Response × Bool) := do
+    (act : RequestHandle → IO Response) : IO Response := do
   let startedAt ← IO.monoNanosNow
   traceBroker
     s!"dispatch start op={req.op.key} clientRequestId={optionLabel req.clientRequestId?}"
+  match server.mode with
+  | .standalone _ => pure ()
+  | .wrapper _ expected =>
+      unless req.daemonCapability? == some expected do
+        let resp := errorResponseFor .invalidParams "invalid Beam daemon capability"
+        recordDispatchMetrics server req resp startedAt
+        return resp
+      if req.op == .initWorkspace || req.op == .listWorkspaces || req.op == .dropWorkspace then
+        let resp := errorResponseFor .invalidParams
+          s!"broker op '{req.op.key}' is unavailable in wrapper-owned daemon mode"
+        recordDispatchMetrics server req resp startedAt
+        return resp
   match req.validateFields with
   | .error err =>
       let resp := errorResponseFor .invalidParams err
       traceBroker
         s!"dispatch rejected op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} error={err}"
       recordDispatchMetrics server req resp startedAt
-      return (resp, false)
+      return resp
   | .ok () => pure ()
   try
     let active? ←
-      if requestTracksActiveRequest req.op then
-        match ← ActiveRequestRegistry.register server.activeRequests req.clientRequestId? with
-        | .ok active? => pure active?
+      if req.op.tracksActiveRequest then
+        match ← ActiveRequestRegistry.register
+            server.activeRequests req.resolvedWorkspaceId? req.clientRequestId? with
+        | .ok active => pure (some active)
         | .error failure =>
             let resp := BrokerFailure.toResponse failure
             recordDispatchMetrics server req resp startedAt
-            return (resp, false)
+            return resp
       else
         pure none
     try
       let handle : RequestHandle := { runtime := server, active? }
-      let (resp, shouldStop) ← act handle
+      let resp ← act handle
       traceBroker
         s!"dispatch complete op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} ok={resp.ok}"
       recordDispatchMetrics server req resp startedAt
-      pure (resp, shouldStop)
+      pure resp
     finally
       ActiveRequestRegistry.unregister server.activeRequests active?
   catch e =>
@@ -2267,7 +2546,7 @@ private def ServerRuntime.withRequestAdmission
     traceBroker
       s!"dispatch exception op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} error={e.toString}"
     recordDispatchMetrics server req resp startedAt
-    pure (resp, false)
+    pure resp
 
 /--
 Admit `req`, expose its exact cancellation handle to `beforeDispatch`, and
@@ -2283,23 +2562,20 @@ def ServerRuntime.dispatchRequestWithHandle
     (req : Request)
     (beforeDispatch : RequestHandle → IO Bool)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
-    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO (Response × Bool) := do
+    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO Response := do
   server.withRequestAdmission req fun handle => do
     unless ← beforeDispatch handle do
-      return (
-        BrokerFailure.toResponse {
-          code := .requestCancelled
-          message := "request was cancelled before broker dispatch"
-        },
-        false
-      )
-    handleRequestIO server req (handle.active?.map (·.cancelRef)) emitProgress? emitDiagnostic?
+      return BrokerFailure.toResponse {
+        code := .requestCancelled
+        message := "request was cancelled before broker dispatch"
+      }
+    handleRequestIO server req handle.active? emitProgress? emitDiagnostic?
 
 def ServerRuntime.dispatchRequest
     (server : ServerRuntime)
     (req : Request)
     (emitProgress? : Option (SyncFileProgress → IO Unit) := none)
-    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO (Response × Bool) := do
+    (emitDiagnostic? : Option (StreamDiagnostic → IO Unit) := none) : IO Response := do
   server.dispatchRequestWithHandle req (fun _ => pure true) emitProgress? emitDiagnostic?
 
 private def rootWatchPollMs : UInt32 :=
@@ -2310,8 +2586,11 @@ A standalone daemon cannot rely on its registry after the project directory disa
 default registry lives below that directory and is removed with it. Stop the broker proactively so
 removing a git worktree does not strand either the daemon or its backend processes.
 -/
-private partial def watchRoot (server : ServerRuntime) (root : System.FilePath) : IO Unit := do
-  if ← server.stop.get then
+private partial def watchRoot
+    (server : ServerRuntime)
+    (transport : DaemonTransport)
+    (root : System.FilePath) : IO Unit := do
+  if ← transport.stop.get then
     pure ()
   else
     let rootAvailable ←
@@ -2321,13 +2600,36 @@ private partial def watchRoot (server : ServerRuntime) (root : System.FilePath) 
         pure false
     if !rootAvailable then
       IO.eprintln s!"Beam daemon root is no longer available; shutting down: {root}"
-      discard <| server.dispatchRequest { op := .shutdown }
-      requestStop server
+      closeAndRequestStop server transport
     else
       IO.sleep rootWatchPollMs
-      watchRoot server root
+      watchRoot server transport root
 
-private def handleClient (server : ServerRuntime) (client : Transport.Connection) : IO Unit := do
+private def watchSessionOwnerStdin
+    (server : ServerRuntime)
+    (transport : DaemonTransport) : IO Unit := do
+  try
+    discard <| (← IO.getStdin).readToEnd
+  catch _ =>
+    pure ()
+  unless ← transport.stop.get do
+    closeAndRequestStop server transport
+
+private def watchClientDisconnect
+    (client : Transport.Connection)
+    (handle : RequestHandle) : IO Unit := do
+  try
+    -- The daemon transport accepts one request per connection. A second receive therefore blocks
+    -- until the client closes or dies; either outcome should cancel an unfinished admission.
+    discard <| Transport.recvMsg client
+  catch _ =>
+    pure ()
+  discard <| handle.cancel
+
+private def handleClient
+    (server : ServerRuntime)
+    (transport : DaemonTransport)
+    (client : Transport.Connection) : IO Unit := do
   let clientRequestIdRef ← IO.mkRef (none : Option String)
   let terminalSentRef ← IO.mkRef false
   let sendResponse (clientRequestId? : Option String) (resp : Response) : IO Unit := do
@@ -2335,7 +2637,10 @@ private def handleClient (server : ServerRuntime) (client : Transport.Connection
       (toJson (StreamMessage.response clientRequestId? resp)).compress
     terminalSentRef.set true
   try
-    let msg ← Transport.recvMsg client
+    let initialRequestTimeoutMs := 5000
+    let deadlineNanos := (← IO.monoNanosNow) + initialRequestTimeoutMs * 1000000
+    let some msg ← Transport.recvMsgUntil client deadlineNanos
+      | throw <| IO.userError s!"Beam daemon initial request timed out after {initialRequestTimeoutMs} ms"
     let request : Except ResponseFailure Request ←
       match Json.parse msg with
       | .error err =>
@@ -2360,10 +2665,23 @@ private def handleClient (server : ServerRuntime) (client : Transport.Connection
         let emitDiagnostic : StreamDiagnostic → IO Unit := fun diagnostic =>
           Transport.sendMsg client
             (toJson (StreamMessage.diagnostic req.clientRequestId? diagnostic)).compress
-        let (resp, shouldStop) ← server.dispatchRequest req (some emitProgress) (some emitDiagnostic)
-        sendResponse req.clientRequestId? resp
-        if shouldStop then
-          requestStop server
+        let resp ← server.dispatchRequestWithHandle req (fun handle => do
+          let _ ← IO.asTask (prio := Task.Priority.dedicated) <| watchClientDisconnect client handle
+          pure true) (some emitProgress) (some emitDiagnostic)
+        -- Request validation alone does not grant shutdown authority. Only stop the listener once
+        -- dispatch has authenticated the capability and started runtime closure.
+        let stopsTransport ←
+          if req.op == .shutdown then server.closeStarted else pure false
+        if stopsTransport then
+          -- A successful send is the transport's flush boundary. Wake the listener only after the
+          -- terminal response has been handed off, but do so even when the caller disconnected so
+          -- a closed runtime cannot remain behind a live listener.
+          try
+            sendResponse req.clientRequestId? resp
+          finally
+            requestStop transport
+        else
+          sendResponse req.clientRequestId? resp
   catch e =>
     unless ← terminalSentRef.get do
       let clientRequestId? ← clientRequestIdRef.get
@@ -2375,25 +2693,38 @@ private def handleClient (server : ServerRuntime) (client : Transport.Connection
   finally
     Transport.closeConnection client
 
-private partial def acceptLoop (server : ServerRuntime) (listener : Transport.Listener) : IO Unit := do
-  if ← server.stop.get then
+private partial def acceptLoop
+    (server : ServerRuntime)
+    (transport : DaemonTransport) : IO Unit := do
+  if ← transport.stop.get then
     pure ()
   else
-    let client ← Transport.accept listener
-    if ← server.stop.get then
+    let client ← Transport.accept transport.listener
+    if ← transport.stop.get then
       Transport.closeConnection client
     else
-      let _ ← IO.asTask (prio := Task.Priority.dedicated) do
-        try
-          handleClient server client
-        catch e =>
-          IO.eprintln s!"broker client task failed: {e.toString}"
-      acceptLoop server listener
+      if ← transport.clientPermits.tryAcquire then
+        let serve := do
+          try
+            handleClient server transport client
+          catch e =>
+            IO.eprintln s!"broker client task failed: {e.toString}"
+        let _ ← IO.asTask (prio := Task.Priority.dedicated) do
+          try
+            serve
+          finally
+            transport.clientPermits.release
+      else
+        Transport.closeConnection client
+      acceptLoop server transport
 
 private structure CliOptions where
   endpoint : Transport.Endpoint := .tcp 8765
   root? : Option String := none
   workspaceId? : Option WorkspaceId := none
+  daemonId? : Option String := none
+  configHash? : Option String := none
+  sessionOwnerStdin : Bool := false
   leanCmd? : Option String := none
   leanPlugin? : Option String := none
   rocqCmd? : Option String := none
@@ -2419,6 +2750,12 @@ private partial def parseCliOptions (opts : CliOptions) : List String → Except
       parseCliOptions { opts with root? := some root } rest
   | "--workspace-id" :: workspaceId :: rest =>
       parseCliOptions { opts with workspaceId? := some workspaceId } rest
+  | "--daemon-id" :: daemonId :: rest =>
+      parseCliOptions { opts with daemonId? := some daemonId } rest
+  | "--config-hash" :: configHash :: rest =>
+      parseCliOptions { opts with configHash? := some configHash } rest
+  | "--session-owner-stdin" :: rest =>
+      parseCliOptions { opts with sessionOwnerStdin := true } rest
   | "--lean-cmd" :: leanCmd :: rest =>
       parseCliOptions { opts with leanCmd? := some leanCmd } rest
   | "--lean-plugin" :: leanPlugin :: rest =>
@@ -2428,6 +2765,96 @@ private partial def parseCliOptions (opts : CliOptions) : List String → Except
   | arg :: _ =>
       throw s!"unexpected Beam daemon argument '{arg}'"
 
+private abbrev DaemonWatcherTask := Task (Except IO.Error Unit)
+
+private structure DaemonResources where
+  runtime : ServerRuntime
+  transport : DaemonTransport
+  rootWatcher : DaemonWatcherTask
+  ownerWatcher? : Option DaemonWatcherTask
+
+private def closeDaemonParts
+    (runtime : ServerRuntime)
+    (transport : DaemonTransport)
+    (rootWatcher? ownerWatcher? : Option DaemonWatcherTask) : IO Unit := do
+  let firstError? ← recordFirstCleanupError none <| transport.stop.set true
+  let firstError? ← recordFirstCleanupError firstError? <|
+    Transport.closeListener transport.listener
+  let firstError? ←
+    match ownerWatcher? with
+    | none => pure firstError?
+    | some ownerWatcher =>
+        recordFirstCleanupError firstError? do
+          try
+            IO.cancel ownerWatcher
+          finally
+            discard <| IO.wait ownerWatcher
+  let firstError? ←
+    match rootWatcher? with
+    | none => pure firstError?
+    | some rootWatcher =>
+        recordFirstCleanupError firstError? do
+          discard <| IO.wait rootWatcher
+  let firstError? ← recordFirstCleanupError firstError? runtime.close
+  if let some err := firstError? then
+    throw err
+
+private def DaemonResources.close (resources : DaemonResources) : IO Unit :=
+  closeDaemonParts resources.runtime resources.transport (some resources.rootWatcher)
+    resources.ownerWatcher?
+
+private def throwAfterBestEffortCleanup
+    (err : IO.Error)
+    (cleanup : IO Unit) : IO α := do
+  try
+    cleanup
+  catch _ =>
+    pure ()
+  throw err
+
+private def acquireDaemonResources
+    (opts : CliOptions)
+    (config : BrokerConfig)
+    (workspaceId : WorkspaceId)
+    (mode : ServerMode)
+    (root : System.FilePath) : IO DaemonResources := do
+  let runtime ← ServerRuntime.create config workspaceId mode
+  let transport ←
+    try
+      DaemonTransport.create opts.endpoint
+    catch err =>
+      throwAfterBestEffortCleanup err runtime.close
+  let rootWatcher ←
+    try
+      IO.asTask (prio := Task.Priority.dedicated) <| watchRoot runtime transport root
+    catch err =>
+      throwAfterBestEffortCleanup err <| closeDaemonParts runtime transport none none
+  let ownerWatcher? ←
+    try
+      match mode with
+      | .wrapper _ _ =>
+          some <$> IO.asTask (prio := Task.Priority.dedicated)
+            (watchSessionOwnerStdin runtime transport)
+      | .standalone _ => pure none
+    catch err =>
+      throwAfterBestEffortCleanup err <|
+        closeDaemonParts runtime transport (some rootWatcher) none
+  pure { runtime, transport, rootWatcher, ownerWatcher? }
+
+/-- Acquire the daemon runtime, listener, and watcher tasks for exactly the dynamic extent of `act`. -/
+private def withDaemonResources
+    (opts : CliOptions)
+    (config : BrokerConfig)
+    (workspaceId : WorkspaceId)
+    (mode : ServerMode)
+    (root : System.FilePath)
+    (act : DaemonResources → IO α) : IO α := do
+  let resources ← acquireDaemonResources opts config workspaceId mode root
+  try
+    act resources
+  finally
+    resources.close
+
 def main (args : List String) : IO Unit := do
   let opts ← IO.ofExcept <| parseCliOptions {} args
   let some root := opts.root?
@@ -2436,6 +2863,28 @@ def main (args : List String) : IO Unit := do
     | throw <| IO.userError "missing Beam daemon --workspace-id ID"
   unless validWorkspaceId workspaceId do
     throw <| IO.userError "workspace id must be non-empty"
+  let daemonIdentity? ←
+    match opts.daemonId?, opts.configHash? with
+    | none, none => pure none
+    | some daemonId, some configHash =>
+        if daemonId.isEmpty || configHash.isEmpty then
+          throw <| IO.userError "daemon identity values must be non-empty"
+        pure <| some { daemonId, configHash }
+    | some _, none =>
+        throw <| IO.userError "--daemon-id requires --config-hash"
+    | none, some _ =>
+        throw <| IO.userError "--config-hash requires --daemon-id"
+  let mode : ServerMode ←
+    if opts.sessionOwnerStdin then
+      let some identity := daemonIdentity?
+        | throw <| IO.userError
+            "wrapper-owned Beam daemon identity and stdin capability must be supplied together"
+      let capability := (← (← IO.getStdin).getLine).trimAscii.toString
+      if capability.isEmpty then
+        throw <| IO.userError "wrapper-owned Beam daemon received an empty capability"
+      pure <| .wrapper identity capability
+    else
+      pure <| .standalone daemonIdentity?
   let root ← Beam.resolveExistingPath <| System.FilePath.mk root
   let leanPlugin? ← opts.leanPlugin?.mapM (fun path => Beam.resolveExistingPath <| System.FilePath.mk path)
   let config : BrokerConfig := {
@@ -2444,20 +2893,7 @@ def main (args : List String) : IO Unit := do
     leanPlugin? := leanPlugin?
     rocqCmd? := opts.rocqCmd?
   }
-  let listener ← Transport.bindAndListen opts.endpoint 16
-  let startMonoNanos ← IO.monoNanosNow
-  let runtime : ServerRuntime := {
-    state := ← Std.Mutex.new (mkInitialState config workspaceId startMonoNanos)
-    endpoint := opts.endpoint
-    stop := ← IO.mkRef false
-    activeRequests := ← ActiveRequestRegistry.create
-  }
-  let rootWatcher ← IO.asTask (prio := Task.Priority.dedicated) <| watchRoot runtime root
-  try
-    acceptLoop runtime listener
-  finally
-    runtime.stop.set true
-    Transport.closeListener listener
-    discard <| IO.wait rootWatcher
+  withDaemonResources opts config workspaceId mode root fun resources =>
+    acceptLoop resources.runtime resources.transport
 
 end Beam.Broker

@@ -12,137 +12,82 @@ open Lean
 
 namespace Beam.Cli
 
-def trimLine (text : String) : String :=
-  Beam.trimLine text
-
-def readCmdTrim (cmd : String) (args : Array String := #[]) (cwd? : Option System.FilePath := none) : IO String := do
-  Beam.readCmdTrim cmd args cwd?
-
-def commandAvailable (cmd : String) (args : Array String := #["--help"]) : IO Bool := do
-  Beam.commandAvailable cmd args
-
-def killCommand : IO String := do
-  Beam.killCommand
-
-def pidAlive (pid : Nat) : IO Bool := do
-  Beam.pidAlive pid
-
 private def lockPollMs : Nat :=
   100
 
-private def readLockPid? (lockDir : System.FilePath) : IO (Option Nat) := do
-  try
-    let pidPath := lockDir / "pid"
-    if ← Beam.regularNonSymlinkFile pidPath then
-      let text ← IO.FS.readFile pidPath
-      pure <| trimLine text |>.toNat?
-    else
-      pure none
-  catch _ =>
-    pure none
-
-private def lockOwnerDescription : Option Nat → String
-  | some pid => s!"pid {pid}"
-  | none => "unknown owner"
+private structure LockDeadline where
+  timeoutMs : Nat
+  startedNanos : Nat
+  deadlineNanos : Nat
 
 private def lockTimeoutMessage
-    (lockDir : System.FilePath)
-    (ownerPid? : Option Nat)
+    (lockPath : System.FilePath)
     (waitedMs timeoutMs : Nat) : String :=
-  s!"timed out after {waitedMs} ms waiting for Beam lock {lockDir}; " ++
-    s!"lock owner: {lockOwnerDescription ownerPid?}; timeout: {timeoutMs} ms"
+  s!"timed out after {waitedMs} ms waiting for Beam lock {lockPath}; " ++
+    s!"timeout: {timeoutMs} ms"
 
-private def removeStaleLock? (lockDir : System.FilePath) (ownerPid? : Option Nat) : IO Bool := do
-  match ownerPid? with
-  | some ownerPid =>
-      if !(← pidAlive ownerPid) then
-        if ← lockDir.pathExists then
-          IO.FS.removeDirAll lockDir
-        pure true
-      else
-        pure false
-  | none =>
-      pure false
-
-private partial def acquireLockCore
-    (lockDir : System.FilePath)
-    (timeoutMs? : Option Nat)
-    (waitedMs : Nat := 0) : IO Unit := do
-  if let some parent := lockDir.parent then
+/-- Ensure the stable lock file can be opened without replacing its inode. -/
+private def ensureLockParent (lockPath : System.FilePath) : IO Unit := do
+  if let some parent := lockPath.parent then
     IO.FS.createDirAll parent
-  let selfPid ← IO.Process.getPID
-  let acquired ←
-    try
-      IO.FS.createDir lockDir
-      pure true
-    catch
-    | .alreadyExists .. =>
-      pure false
-    | error =>
-      throw error
-  if acquired then
-    try
-      IO.FS.writeFile (lockDir / "pid") s!"{selfPid}\n"
-      return
-    catch error =>
-      try
-        if ← lockDir.pathExists then
-          IO.FS.removeDirAll lockDir
-      catch cleanupError =>
-        throw <| IO.userError <|
-          s!"failed to publish Beam lock owner at {lockDir}: {error}; " ++
-            s!"also failed to remove the acquired lock: {cleanupError}"
-      throw error
-  else
-    let ownerPid? ← readLockPid? lockDir
-    if ← removeStaleLock? lockDir ownerPid? then
-      acquireLockCore lockDir timeoutMs? waitedMs
-    else
-      match timeoutMs? with
-      | some timeoutMs =>
-          if waitedMs >= timeoutMs then
-            throw <| IO.userError (lockTimeoutMessage lockDir ownerPid? waitedMs timeoutMs)
-      | none =>
-          pure ()
-      IO.sleep lockPollMs.toUInt32
-      acquireLockCore lockDir timeoutMs? (waitedMs + lockPollMs)
 
-def acquireLock (lockDir : System.FilePath) : IO Unit :=
-  acquireLockCore lockDir none
+private def withAcquiredLock
+    (lockPath : System.FilePath)
+    (mode : IO.FS.Mode)
+    (acquire : IO.FS.Handle → IO Unit)
+    (act : IO α) : IO α := do
+  IO.FS.withFile lockPath mode fun handle => do
+    acquire handle
+    try
+      act
+    finally
+      handle.unlock
+
+private partial def acquireLockUntil
+    (handle : IO.FS.Handle)
+    (lockPath : System.FilePath)
+    (deadline : LockDeadline) : IO Unit := do
+  if ← handle.tryLock then
+    return
+  let now ← IO.monoNanosNow
+  if now >= deadline.deadlineNanos then
+    let waitedMs := (now - deadline.startedNanos) / 1000000
+    throw <| IO.userError <|
+      lockTimeoutMessage lockPath waitedMs deadline.timeoutMs
+  IO.sleep lockPollMs.toUInt32
+  acquireLockUntil handle lockPath deadline
+
+/-- Run `act` while holding an unbounded kernel-backed file lock. -/
+def withLock (lockPath : System.FilePath) (act : IO α) : IO α := do
+  ensureLockParent lockPath
+  withAcquiredLock lockPath .append (·.lock) act
+
+/-- Run `act` while holding a kernel-backed file lock until an absolute monotonic deadline. -/
+def withLockTimeout (lockPath : System.FilePath) (timeoutMs : Nat) (act : IO α) : IO α := do
+  ensureLockParent lockPath
+  let startedNanos ← IO.monoNanosNow
+  let deadline := {
+    timeoutMs
+    startedNanos
+    deadlineNanos := startedNanos + timeoutMs * 1000000
+  }
+  withAcquiredLock lockPath .append (fun handle => acquireLockUntil handle lockPath deadline) act
 
 /--
-Acquire a directory lock, but fail with lock owner diagnostics after `timeoutMs`.
+Run `act` under a kernel-backed lock without creating the lock's parent directory.
 
-The unbounded `acquireLock` remains available for long-running build/install locks. This bounded
-variant is for short project-control critical sections where silent infinite waiting hides daemon
-or wrapper failures.
+This is reserved for teardown after an owned project root may have disappeared.
 -/
-def acquireLockTimeout (lockDir : System.FilePath) (timeoutMs : Nat) : IO Unit :=
-  acquireLockCore lockDir (some timeoutMs)
-
-def releaseLock (lockDir : System.FilePath) : IO Unit := do
-  if ← lockDir.pathExists then
-    IO.FS.removeDirAll lockDir
-
-def withLock (lockDir : System.FilePath) (act : IO α) : IO α := do
-  acquireLock lockDir
-  try
-    act
-  finally
-    releaseLock lockDir
-
-/-- Run `act` while holding a bounded directory lock. -/
-def withLockTimeout (lockDir : System.FilePath) (timeoutMs : Nat) (act : IO α) : IO α := do
-  acquireLockTimeout lockDir timeoutMs
-  try
-    act
-  finally
-    releaseLock lockDir
-
-def currentPidNamespace? : IO (Option String) := do
-  Beam.currentPidNamespace?
-
-def utcTimestamp : IO String := do
-  Beam.utcTimestamp
+def withExistingLockTimeout
+    (lockPath : System.FilePath)
+    (timeoutMs : Nat)
+    (act : IO α) : IO α := do
+  let startedNanos ← IO.monoNanosNow
+  let deadline := {
+    timeoutMs
+    startedNanos
+    deadlineNanos := startedNanos + timeoutMs * 1000000
+  }
+  withAcquiredLock lockPath .readWrite (fun handle => acquireLockUntil handle lockPath deadline) act
 
 end Beam.Cli

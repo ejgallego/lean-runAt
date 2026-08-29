@@ -8,8 +8,19 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-bash tests/test-beam-wrapper-probe.sh
-bash tests/test-beam-wrapper-runtime.sh
-bash tests/test-beam-wrapper-sync-save.sh
-bash tests/test-beam-wrapper-handle.sh
-bash tests/test-beam-wrapper-diagnostics.sh
+run_wrapper_slice() {
+  local label="$1"
+  local script="$2"
+  echo "[beam-wrapper] starting $label"
+  if ! bash "$script"; then
+    echo "[beam-wrapper] failed: $label ($script)" >&2
+    return 1
+  fi
+  echo "[beam-wrapper] passed: $label"
+}
+
+run_wrapper_slice "probe" tests/test-beam-wrapper-probe.sh
+run_wrapper_slice "runtime" tests/test-beam-wrapper-runtime.sh
+run_wrapper_slice "sync/save" tests/test-beam-wrapper-sync-save.sh
+run_wrapper_slice "handles" tests/test-beam-wrapper-handle.sh
+run_wrapper_slice "diagnostics" tests/test-beam-wrapper-diagnostics.sh

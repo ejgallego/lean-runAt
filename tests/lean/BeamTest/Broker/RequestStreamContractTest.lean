@@ -5,6 +5,7 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Beam.Broker.Protocol
+import Beam.Daemon.Protocol
 import BeamTest.Broker.RequestStreamUtil
 import BeamTest.Broker.TestUtil
 import BeamTest.Fixtures.TodoFixture
@@ -55,14 +56,83 @@ private def syncVersion
   let result ← requireSyncFileResult s!"sync version for {path}" (← expectOk resp)
   pure result.version
 
+private partial def waitForBrokerExit
+    (broker : IO.Process.Child nullBrokerStdio)
+    (tries : Nat := 200) : IO Unit := do
+  if (← broker.tryWait).isSome then
+    pure ()
+  else if tries == 0 then
+    throw <| IO.userError "daemon remained alive after shutdown"
+  else
+    IO.sleep 25
+    waitForBrokerExit broker (tries - 1)
+
+private def sendShutdownAndResetConnection (port : UInt16) : IO Unit := do
+  let payload := (toJson ({ op := .shutdown } : Beam.Broker.Request)).compress
+  let script := String.intercalate ";" [
+    "import socket,struct,sys",
+    "s=socket.create_connection(('127.0.0.1',int(sys.argv[1])))",
+    "s.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0))",
+    "p=sys.argv[2].encode('utf-8')",
+    "s.sendall(str(len(p)).encode('ascii')+b'\\n'+p)",
+    "s.close()"
+  ]
+  let out ← IO.Process.output {
+    cmd := "python3"
+    args := #["-c", script, toString port.toNat, payload]
+  }
+  if out.exitCode != 0 then
+    throw <| IO.userError s!"failed to reset shutdown connection\n{out.stderr}"
+
+private def checkShutdownResponseBeforeExit (root : System.FilePath) : IO Unit := do
+  let port ← freshTcpPort
+  let endpoint : Beam.Broker.Endpoint := .tcp port
+  let broker ← spawnLeanBroker endpoint root
+  try
+    waitForBrokerReadyForRoot endpoint root
+    discard <| expectOk (← runClient endpoint { op := .shutdown })
+    waitForBrokerExit broker
+  finally
+    try
+      broker.kill
+    catch _ =>
+      pure ()
+    try
+      discard <| broker.tryWait
+    catch _ =>
+      pure ()
+
 def main : IO Unit := do
   let port ← freshTcpPort
   let endpoint : Beam.Broker.Endpoint := .tcp port
   let root ← mkTempProjectRoot "beam-daemon-request-stream"
   copySaveProjectFixture root
-  let broker ← spawnLeanBroker endpoint root
+  let identity : Beam.Broker.DaemonIdentity := {
+    daemonId := "request-stream-generation"
+    configHash := "request-stream-config"
+  }
+  let broker ← spawnLeanBroker endpoint root (identity? := some identity)
   try
     waitForBrokerReadyForRoot endpoint root
+    match ← Beam.Daemon.daemonGenerationStatus endpoint testWorkspaceId root identity "test-capability" with
+    | .exact => pure ()
+    | status =>
+        throw <| IO.userError
+          s!"daemon did not report its expected generation identity: {repr status}"
+    for mismatched in #[
+        { identity with daemonId := identity.daemonId ++ "-other" },
+        { identity with configHash := identity.configHash ++ "-other" }
+      ] do
+      match ← Beam.Daemon.daemonGenerationStatus endpoint testWorkspaceId root mismatched "test-capability" with
+      | .wrongGeneration _ => pure ()
+      | status =>
+          throw <| IO.userError s!"daemon generation mismatch was classified as {repr status}"
+    let otherRoot := root / "other-root"
+    IO.FS.createDirAll otherRoot
+    match ← Beam.Daemon.daemonGenerationStatus endpoint testWorkspaceId otherRoot identity "test-capability" with
+    | .wrongRoot _ => pure ()
+    | status =>
+        throw <| IO.userError s!"daemon root mismatch was classified as {repr status}"
     discard <| expectOk (← runClient endpoint { op := .ensure, root? := some root.toString })
 
     let todoVersion ← syncVersion endpoint root BeamTest.Fixtures.TodoFixture.brokerPath
@@ -244,13 +314,22 @@ def main : IO Unit := do
     expectErrorCode "stale trace save_olean" Beam.Broker.saveTraceStaleCode staleTraceSaveResp
     discard <| expectOk (← runClient endpoint { op := .stats })
 
-    discard <| expectOk (← runClient endpoint { op := .shutdown })
+    sendShutdownAndResetConnection port
+    waitForBrokerExit broker
+    match ← Beam.Daemon.daemonGenerationStatus endpoint testWorkspaceId root identity "test-capability" with
+    | .unavailable => pure ()
+    | status =>
+        throw <| IO.userError s!"stopped daemon was classified as {repr status}"
+    checkShutdownResponseBeforeExit root
   finally
     try
       broker.kill
     catch _ =>
       pure ()
-    discard <| broker.tryWait
+    try
+      discard <| broker.tryWait
+    catch _ =>
+      pure ()
     try
       IO.FS.removeDirAll root
     catch _ =>

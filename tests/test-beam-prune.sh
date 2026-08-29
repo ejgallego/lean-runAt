@@ -56,6 +56,19 @@ write_runtime_manifest() {
   "$beam_cli" install-manifest "$payload" - fixture-toolchain >"$path"
 }
 
+write_lock_owner() {
+  local lock_dir="$1"
+  local pid="$2"
+  printf '%s\n' "$pid" >"$lock_dir/pid"
+}
+
+assert_lock_timeout() {
+  local path="$1"
+  assert_contains_literal "$path" 'timed out after '
+  assert_contains_literal "$path" ' ms waiting for Beam lock'
+  assert_contains_literal "$path" 'timeout: 1000 ms'
+}
+
 mkdir -p \
   "$current_runtime/bin" \
   "$current_runtime/libexec" \
@@ -212,15 +225,17 @@ race_lock_held="$tmp_root/race-lock-held"
 race_lock_release="$tmp_root/race-lock-release"
 race_err="$tmp_root/race.err"
 (
+  mkdir "$race_lock"
   touch "$race_lock_held"
   while [ ! -e "$race_lock_release" ]; do
     sleep 0.05
   done
+  rm -f "$race_lock/pid"
+  rmdir "$race_lock"
 ) &
 lock_writer_pid="$!"
 wait_for_file "$race_lock_held" "prune install-lock holder" 10
-mkdir "$race_lock"
-printf '%s\n' "$lock_writer_pid" >"$race_lock/pid"
+write_lock_owner "$race_lock" "$lock_writer_pid"
 BEAM_HOME="$current_runtime" "$beam_cli" install-prune --apply > /dev/null 2>"$race_err" &
 race_pid="$!"
 sleep 0.3
@@ -244,13 +259,13 @@ rm -f "$install_root/current"
 ln -s "$current_runtime" "$install_root/current"
 
 mkdir "$install_root/.install-lock"
-printf '%s\n' "$$" >"$install_root/.install-lock/pid"
+write_lock_owner "$install_root/.install-lock" "$$"
 install_lock_err="$tmp_root/install-lock.err"
 if "$install_root/current/bin/lean-beam" prune --apply > /dev/null 2>"$install_lock_err"; then
   echo "expected prune to respect the active install lock" >&2
   exit 1
 fi
-assert_contains_literal "$install_lock_err" 'timed out after 1000 ms waiting for Beam lock'
+assert_lock_timeout "$install_lock_err"
 rm -f "$install_root/.install-lock/pid"
 rmdir "$install_root/.install-lock"
 assert_file "$old_runtime/manifest.json"
@@ -286,8 +301,24 @@ PY
 resolved_partial_runtime="$(beam_test_realpath "$partial_runtime")"
 
 stale_bundle_lock="$bundle_root/.locks/200"
-mkdir -p "$stale_bundle_lock"
-printf '%s\n' "$$" >"$stale_bundle_lock/pid"
+bundle_lock_held="$tmp_root/bundle-lock-held"
+bundle_lock_release="$tmp_root/bundle-lock-release"
+mkdir -p "$(dirname "$stale_bundle_lock")"
+python3 - "$stale_bundle_lock" "$bundle_lock_held" "$bundle_lock_release" <<'PY' &
+import fcntl
+import pathlib
+import sys
+import time
+
+lock_path, held_path, release_path = map(pathlib.Path, sys.argv[1:])
+with lock_path.open("a", encoding="utf-8") as lock_file:
+    fcntl.flock(lock_file, fcntl.LOCK_EX)
+    held_path.touch()
+    while not release_path.exists():
+        time.sleep(0.05)
+PY
+lock_writer_pid="$!"
+wait_for_file "$bundle_lock_held" "prune bundle-lock holder" 10
 bundle_lock_out="$tmp_root/bundle-lock.out"
 bundle_lock_err="$tmp_root/bundle-lock.err"
 if "$install_root/current/bin/lean-beam" prune --apply --bundles \
@@ -296,15 +327,16 @@ if "$install_root/current/bin/lean-beam" prune --apply --bundles \
   exit 1
 fi
 assert_contains_literal "$bundle_lock_out" "removed runtime: $resolved_partial_runtime"
-assert_contains_literal "$bundle_lock_err" 'timed out after 1000 ms waiting for Beam lock'
+assert_lock_timeout "$bundle_lock_err"
 assert_contains_literal "$bundle_lock_err" \
   'prune stopped before completing the displayed plan; any removals reported above were applied'
 # shellcheck disable=SC2016
 assert_contains_literal "$bundle_lock_err" \
   'rerun `lean-beam prune --bundles` to preview the remaining paths'
 assert_not_exists "$partial_runtime"
-rm -f "$stale_bundle_lock/pid"
-rmdir "$stale_bundle_lock"
+touch "$bundle_lock_release"
+wait "$lock_writer_pid"
+lock_writer_pid=""
 assert_file "$stale_bundle/metadata.json"
 
 apply_bundle_out="$("$install_root/current/bin/lean-beam" prune --apply --bundles)"

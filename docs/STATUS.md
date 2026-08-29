@@ -131,14 +131,23 @@ saved accepted text, the intended future direction is for `lean-beam update` or 
 reuse matching speculative execution rather than replaying it from scratch. Beam would still not
 apply the source edit.
 
-For programmatic local consumers, the preferred machine-readable surface is the JSON stream exposed
-by `beam-client request-stream`; wrapper stderr should be treated as human-facing. Broker responses
-require an explicit top-level `ok` boolean, giving projection layers an unambiguous success/error
-discriminator. A successful response always includes `result`; response and stream envelopes reject
-undeclared fields, and typed save/close-save results reject incomplete or extended artifact shapes.
-All raw stream variants use the same `kind`, `payload`, and optional outer `clientRequestId` fields;
-the terminal response payload does not duplicate transport correlation. Exact event ordering and
-examples live in [SYNC_AND_DIAGNOSTICS.md](SYNC_AND_DIAGNOSTICS.md#raw-broker-stream).
+For programmatic local consumers of a wrapper session, the supported machine-readable surface is
+`lean-beam --root ROOT [--control-dir DIR] request-stream <json|->`. The request JSON contains the
+operation, its arguments, and a nonempty `clientRequestId`; it cannot select a workspace, root, or
+capability, and it cannot issue workspace-administration or process-wide control operations. The
+wrapper canonicalizes the explicit root, selects its static workspace binding from the session
+descriptor, and injects routing and authentication. Wrapper stderr is human-facing.
+The port-oriented `beam-client request-stream` remains maintainer/debug tooling for separately
+managed brokers. A wrapper daemon exists only while its foreground `lean-beam ensure --hold` owner
+is alive. Attaching requests do not acquire daemon ownership. A separately launched standalone
+daemon has its own explicit process owner. Broker
+responses require an explicit top-level `ok` boolean, giving projection layers an unambiguous
+success/error discriminator. A successful response always includes `result`; response and stream
+envelopes reject undeclared fields, and typed save/close-save results reject incomplete or extended
+artifact shapes. All raw stream variants use the same `kind`, `payload`, and optional outer
+`clientRequestId` fields; the terminal response payload does not duplicate transport correlation.
+Exact event ordering and examples live in
+[SYNC_AND_DIAGNOSTICS.md](SYNC_AND_DIAGNOSTICS.md#machine-broker-stream).
 
 `lean-beam-mcp` is the experimental stdio MCP entry point. User setup lives in
 [SETUP.md](SETUP.md#mcp-setup); implementation, protocol, tool-list, and conformance notes live in
@@ -177,11 +186,58 @@ examples live in [SYNC_AND_DIAGNOSTICS.md](SYNC_AND_DIAGNOSTICS.md#raw-broker-st
 
 - In sandboxed agent environments, Beam daemon startup itself may require elevated permissions even
   when the installed bundle and project-local `.beam` paths resolve correctly.
+- Wrapper sessions use explicit ownership. `lean-beam ensure --hold` is the only wrapper command that
+  starts a project daemon; it passes the daemon an inherited pipe and remains alive as the owner.
+  Ordinary wrapper calls, including plain `lean-beam ensure`, only attach to that generation and
+  fail with the exact owner-start command when none is live. The optional `--port` override belongs
+  only to `ensure --hold`; attaching commands reject it. Owner EOF shuts down request admission,
+  marks admitted requests for cancellation, and closes backend sessions and the daemon after those
+  requests drain; a backend success that completed before cancellation remains successful. This
+  happens without heartbeat timeouts or filesystem leases and works across PID namespaces because
+  authority does not depend on observing persisted PIDs. Endpoint, root, and generation-identity
+  validation are authoritative. Each wrapper request carries a random per-generation capability
+  from a mode-`0600` registry inside a mode-`0700` control directory. A paused owner retains the
+  session; a killed owner closes the pipe; explicit
+  `lean-beam shutdown` changes the descriptor to `draining`, and that fence remains until normal
+  owner cleanup has reaped the daemon leader after graceful or process-group teardown.
+  Ordinary lookups take no mutation lock, create no control files, use the frozen workspace
+  configuration, and preserve unsafe session state. A competing owner computes its proposed
+  configuration but cannot replace a mismatched live owner.
+- Abnormal or ambiguous state is never reclaimed automatically. The descriptor remains as a fence
+  after an unexpected broker/owner exit. Once the operator has established that the matching
+  session is no longer authoritative, `lean-beam --root ROOT recover --generation ID` quarantines
+  that exact descriptor without signalling persisted PIDs. Legacy, unsupported, or malformed
+  descriptor state requires the deliberately broader `recover --force` form. Current-descriptor
+  recovery additionally requires a root recorded in that descriptor, so a wrong-root caller using
+  the same control directory cannot quarantine the session.
+- The default authoritative descriptor is `<root>/.beam/beam-daemon.json`, which keeps discovery
+  available inside project-scoped agent sandboxes. `--control-dir DIR` selects one exact alternate
+  control directory; callers must repeat the same selection for every owner, request, diagnostic,
+  shutdown, and recovery command. `BEAM_CONTROL_ROOT` is the sandbox convenience that derives a
+  per-root subdirectory below an absolute writable base. Beam requires every selected control
+  directory to be account-private (`0700`) before creating its lock or capability descriptor: it
+  creates and privatizes a missing leaf, but accepts an existing path only when it is a real,
+  non-symlinked mode-`0700` directory. It rejects broader existing permissions without changing
+  them. A stable
+  explicit control directory is also the intended future boundary for a statically configured
+  multi-workspace CLI session; dynamic
+  workspace mutation remains unavailable in wrapper mode.
+- Deleting the project tree also deletes its default project-local fence. Workflows that may remove
+  and immediately recreate the same canonical path, and need exclusion to survive that operation,
+  should select a stable external `--control-dir`; this tradeoff keeps the default usable from
+  project-scoped agent sandboxes without assuming access to a host-global runtime directory.
+- Wrapper-owned brokers currently use authenticated loopback TCP. The supported trust boundary is
+  one local OS account with a private control directory and registry-file permissions; another user who can only discover
+  the port cannot issue requests without the generation capability. A manually launched standalone
+  `beam-daemon` has no wrapper registry capability and is maintainer tooling, not a shared-host
+  service. Unix-domain/per-user native IPC remains a possible later transport improvement.
 - A startup failure that reports `operation not permitted` through `.beam/beam-daemon-startup.log` is
   usually an environment restriction, not a bundle-resolution mismatch.
-- Beam daemon disappearance errors include registry/log context and write a JSON incident record under
-  `.beam/daemon-failures/` or the per-root subdirectory of `BEAM_CONTROL_DIR`. Beam keeps the latest
-  50 incident records and `lean-beam doctor` lists recent incident paths.
+- Typed broker transport, invalid-response, and response-timeout failures include registry/log
+  context and write a JSON incident record below the selected control directory. Incident kinds are `brokerTransportFailure`,
+  `invalidBrokerResponse`, and `brokerResponseTimeout`; callback/display failures do not create
+  daemon incidents. Beam keeps the latest 50 incident records, and `lean-beam doctor` lists recent
+  incident paths.
 - A standalone Beam daemon watches its canonical project root. If a git worktree or project
   directory is removed while the daemon is active, it shuts down its backend sessions and exits
   instead of remaining undiscoverable after its project-local registry disappears. A later wrapper
@@ -238,8 +294,8 @@ examples live in [SYNC_AND_DIAGNOSTICS.md](SYNC_AND_DIAGNOSTICS.md#raw-broker-st
   worker has already applied them; batch-only `moreLeanArgs` fail with `saveUnsupportedSetup`.
 - Beam does not detect Lake workspace configuration changes during a running Lean session. After
   editing a lakefile, manifest, package override, `lean-toolchain`, Lean options, plugins, or dynamic
-  libraries, run `lean-beam shutdown` before the next command that uses the Lean server;
-  `lean-beam refresh` does not restart the server.
+  libraries, run `lean-beam shutdown`, then start a new `lean-beam ensure --hold` owner before the
+  next wrapper command that uses the Lean server; `lean-beam refresh` does not restart the server.
 - A Beam checkpoint contains the Lean server's accepted environment. Elaborators can
   distinguish server execution from batch execution, so exceptional custom elaboration can produce
   an artifact that differs from a fresh `lake build` artifact. Successful checkpoints are normally

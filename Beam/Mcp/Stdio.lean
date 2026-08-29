@@ -10,9 +10,10 @@ open Lean
 
 namespace Beam.Mcp.Stdio
 
-def isBrokenPipeError (err : IO.Error) : Bool :=
-  let msg := err.toString
-  msg.contains "broken pipe" || msg.contains "Broken pipe" || msg.contains "EPIPE"
+/-- Whether writing failed because the output resource has disappeared, including POSIX `EPIPE`. -/
+def isClosedOutputError : IO.Error → Bool
+  | .resourceVanished _ _ => true
+  | _ => false
 
 def stripLineEnding (line : String) : String :=
   let line :=
@@ -25,16 +26,8 @@ def stripLineEnding (line : String) : String :=
   else
     line
 
-def writeJsonLineToStream (stream : IO.FS.Stream) (json : Json) : IO Unit := do
-  stream.putStr (json.compress ++ "\n")
-  stream.flush
-
 def writeJsonLineToHandle (handle : IO.FS.Handle) (json : Json) : IO Unit := do
   handle.putStr (json.compress ++ "\n")
   handle.flush
-
-def writeStdoutJsonLine (json : Json) : IO Unit := do
-  let stdout ← IO.getStdout
-  writeJsonLineToStream stdout json
 
 end Beam.Mcp.Stdio

@@ -104,14 +104,36 @@ Additional Beam lanes:
 
 Current Beam coverage includes:
 
-- fast Beam daemon smoke, request-stream, save-stream, startup-handshake, tracked-diagnostic dedup,
-  exact broker request-handle lifetime, protocol tests, and validated-toolchain/release-line CI
-  policy consistency through
+- fast Beam daemon smoke, request-stream, save-stream, startup-handshake with failed provisional
+  backend cleanup, tracked-diagnostic dedup,
+  exact broker request-handle lifetime, identity-matched daemon-generation probes, terminal shutdown
+  response delivery, shutdown after the requesting TCP client resets its connection, protocol tests,
+  and validated-toolchain/release-line CI policy consistency through
   [tests/test-beam-fast.sh](../tests/test-beam-fast.sh)
-- wrapper coverage through [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh), which aggregates focused probe, runtime, sync/save, handle, and diagnostic slices
+- wrapper coverage through [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh), which reports
+  focused probe, runtime, sync/save, handle, and diagnostic slices independently
 - focused daemon lifecycle coverage in [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh),
-  including self-termination after the project worktree disappears
-- Linux-only PID-isolated sandbox wrapper coverage in [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)
+  including the no-implicit-start contract, duplicate-owner rejection, Beam and non-Beam endpoint
+  collision safety without cross-project disclosure, authenticated generation probes, mode-`0700`
+  control-directory and mode-`0600` registry publication, rejection of symlinked or non-private
+  existing control paths without mutating their targets, wrong-root recovery rejection with
+  byte-for-byte descriptor preservation, unauthorized-shutdown rejection without listener teardown, oversized-frame
+  and first-message limits, a bounded identity probe against a silent non-Beam listener, cross-root
+  unsafe-registry preservation that does not affect the daemon
+  serving the other root, configuration-drift preservation of the owner and active request,
+  explicit shutdown, cancellation of requests active during shutdown or owner loss,
+  exact-generation cleanup that preserves a replacement registry, a published draining fence while
+  a daemon is paused, rejection of attachment or replacement while that generation remains
+  published, forced process-group cleanup of the daemon and its backend,
+  holder reporting after an unexpected daemon crash, abrupt owner death through inherited-pipe EOF,
+  read-only crash-fence lookup, exact-generation non-signalling recovery, explicit control-directory
+  selection, root-aware machine request routing, and self-termination after the project worktree
+  disappears without recreating it
+- Linux-only PID-isolated sandbox wrapper coverage in [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh),
+  including cross-namespace endpoint attachment, duplicate-owner rejection, a paused owner without
+  time-based expiry, explicit shutdown, killed-owner EOF cleanup, fail-closed preservation of an
+  unavailable foreign-domain descriptor before explicit recovery, distinct generation identity,
+  and the absence of legacy lease/retirement artifacts
 - zero-build save replay, structured-setup support, batch-only-argument rejection, and stale-save
   race coverage in
   [tests/test-beam-save-olean.sh](../tests/test-beam-save-olean.sh)
@@ -218,13 +240,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 tests/test-mcp-stdio.py \
 ```
 
 This scenario covers out-of-order tool responses, exact string/numeric request-ID separation,
-duplicate active-ID suppression, exact modern and legacy broker cancellation, per-request progress
-ordering, deterministic overlap between a gated request in one workspace and a fast request in
-another, single-flight first use, simultaneous cold first use of distinct roots, stateless
-multi-root isolation, non-cancellable cache eviction with ordering on both sides of the global
-fence, lazy recreation, and EOF cancellation and teardown. The full stdio suite also checks modern
-request-ID reuse after a terminal response and rejects a proof handle carried across an MCP process
-restart. The slow Beam suite runs
+duplicate active-ID suppression, repeated asynchronous request-ID reuse after terminal responses,
+exact modern and legacy broker cancellation, per-request progress ordering, deterministic overlap
+between a gated request in one workspace and a fast request in another, single-flight first use,
+simultaneous cold first use of distinct roots, stateless multi-root isolation, non-cancellable cache
+eviction with ordering on both sides of the global fence, lazy recreation, and EOF cancellation and
+teardown. The full stdio suite also checks modern request-ID reuse, synchronous and workspace-control
+closed-output teardown, and rejects a proof handle carried across an MCP process restart. The slow
+Beam suite runs
 `--scenario multi-toolchain-workspaces` after installing both fixture toolchains and verifies that
 one MCP process keeps both project-specific Lean sessions active.
 

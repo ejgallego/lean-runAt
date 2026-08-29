@@ -14,6 +14,12 @@ namespace Beam.Broker
 
 abbrev WorkspaceId := Beam.Workspace.WorkspaceId
 
+/-- Identity of one wrapper-owned daemon generation. -/
+structure DaemonIdentity where
+  daemonId : String
+  configHash : String
+  deriving BEq, Repr, FromJson, ToJson
+
 instance : Repr Lsp.DiagnosticSeverity where
   reprPrec severity _ :=
     match severity with
@@ -207,6 +213,7 @@ structure Request where
   workspaceId? : Option WorkspaceId := none
   workspaceMode? : Option Beam.Workspace.InitMode := none
   clientRequestId? : Option String := none
+  daemonCapability? : Option String := none
   cancelRequestId? : Option String := none
   root? : Option String := none
   path? : Option String := none
@@ -243,15 +250,24 @@ inductive WorkspaceScope where
 
 /-- Describe whether a broker operation is process-wide or resolves one workspace. -/
 def Op.workspaceScope : Op → WorkspaceScope
-  | .cancel | .listWorkspaces | .resetStats | .shutdown => .none
+  | .listWorkspaces | .resetStats | .shutdown => .none
   | .openDocs | .stats => .optional
+  | .cancel
   | .ensure | .updateFile | .syncFile | .refreshFile | .close | .runAt | .hover
   | .signatureHelp | .definition | .references | .documentSymbols | .workspaceSymbols
   | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release
   | .initWorkspace | .dropWorkspace => .required
 
+/-- Whether an operation participates in active-request tracking and exact cancellation. -/
+def Op.tracksActiveRequest : Op → Bool
+  | .cancel | .shutdown => false
+  | .ensure | .openDocs | .updateFile | .syncFile | .refreshFile | .close | .runAt | .hover
+  | .signatureHelp | .definition | .references | .documentSymbols | .workspaceSymbols
+  | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release | .initWorkspace
+  | .listWorkspaces | .dropWorkspace | .stats | .resetStats => true
+
 private def Op.optionalRequestFields (op : Op) : Array String :=
-  #["clientRequestId"] ++
+  #["clientRequestId", "daemonCapability"] ++
   (match op.workspaceScope with
   | .none => #[]
   | .optional | .required => #["workspaceId"]) ++
@@ -306,6 +322,7 @@ private def Request.optionalJsonFields (req : Request) : List (String × Json) :
   optionalJsonField "workspaceId" req.workspaceId? ++
   optionalJsonField "workspaceMode" req.workspaceMode? ++
   optionalJsonField "clientRequestId" req.clientRequestId? ++
+  optionalJsonField "daemonCapability" req.daemonCapability? ++
   optionalJsonField "cancelRequestId" req.cancelRequestId? ++
   optionalJsonField "root" req.root? ++
   optionalJsonField "path" req.path? ++
@@ -383,6 +400,7 @@ instance : FromJson Request where
     let workspaceId? ← optionalField? (α := WorkspaceId) j "workspaceId"
     let workspaceMode? ← optionalField? (α := Beam.Workspace.InitMode) j "workspaceMode"
     let clientRequestId? ← optionalField? (α := String) j "clientRequestId"
+    let daemonCapability? ← optionalField? (α := String) j "daemonCapability"
     let cancelRequestId? ← optionalField? (α := String) j "cancelRequestId"
     let root? ← optionalField? (α := String) j "root"
     let path? ← optionalField? (α := String) j "path"
@@ -410,7 +428,8 @@ instance : FromJson Request where
     let handle? ← optionalField? (α := Handle) j "handle"
     let codeAction? ← optionalField? (α := Lsp.CodeAction) j "codeAction"
     let request : Request := {
-      op, backend, workspaceId?, workspaceMode?, clientRequestId?, cancelRequestId?,
+      op, backend, workspaceId?, workspaceMode?, clientRequestId?, daemonCapability?,
+      cancelRequestId?,
       root?, path?, version?, line?, character?, endLine?, endCharacter?,
       text?, query?, includeDeclaration?, kinds?, suggest?, storeHandle?,
       linear?, mode?, compact?, ppFormat?, diagnosticScope?, diagnosticsInResult?,
@@ -418,6 +437,73 @@ instance : FromJson Request where
     }
     request.validateFields
     pure request
+
+/--
+A semantic request accepted by the supported project-session client.
+
+Session routing and authority are supplied by the selected session descriptor, not by caller JSON.
+The generic `Request` remains the internal broker protocol used by maintenance tooling.
+-/
+structure ProjectRequest where
+  private request : Request
+  private requestId : String
+
+private def projectRequestForbiddenFields : Array String :=
+  #["workspaceId", "workspaceMode", "daemonCapability", "root", "leanCmd", "leanPlugin", "rocqCmd"]
+
+private def ProjectRequest.supportedOp : Op → Bool
+  | .ensure | .openDocs | .cancel | .updateFile | .syncFile | .refreshFile | .close | .runAt
+  | .hover | .signatureHelp | .definition | .references | .documentSymbols | .workspaceSymbols
+  | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release | .stats => true
+  | .initWorkspace | .listWorkspaces | .dropWorkspace | .resetStats | .shutdown => false
+
+def ProjectRequest.ofRequest (request : Request) : Except String ProjectRequest := do
+  unless ProjectRequest.supportedOp request.op do
+    throw s!"broker op '{request.op.key}' is not available through a project session"
+  if request.workspaceId?.isSome || request.workspaceMode?.isSome ||
+      request.daemonCapability?.isSome || request.root?.isSome || request.leanCmd?.isSome ||
+      request.leanPlugin?.isSome || request.rocqCmd?.isSome then
+    throw "project requests cannot select session routing, authority, or executable configuration"
+  let some clientRequestId := request.clientRequestId?
+    | throw "project requests require a non-empty clientRequestId"
+  if clientRequestId.isEmpty then
+    throw "project requests require a non-empty clientRequestId"
+  request.validateFields
+  pure { request, requestId := clientRequestId }
+
+instance : FromJson ProjectRequest where
+  fromJson? json := do
+    match json with
+    | .obj fields =>
+        let forbidden := projectRequestForbiddenFields.filter fields.contains
+        unless forbidden.isEmpty do
+          throw s!"project request contains session-owned fields: {String.intercalate ", " forbidden.toList}"
+    | _ => pure ()
+    ProjectRequest.ofRequest (← fromJson? json)
+
+def ProjectRequest.op (request : ProjectRequest) : Op :=
+  request.request.op
+
+def ProjectRequest.clientRequestId (request : ProjectRequest) : String :=
+  request.requestId
+
+/-- Attach one semantic request to a selected, authenticated workspace session. -/
+def ProjectRequest.attach
+    (request : ProjectRequest)
+    (workspaceId : WorkspaceId)
+    (root capability : String) : Request :=
+  let request := request.request
+  let request := { request with daemonCapability? := some capability }
+  match request.op.workspaceScope with
+  | .none => request
+  | .optional | .required =>
+    let request := { request with workspaceId? := some workspaceId }
+    if request.op == .cancel then
+      request
+    else {
+      request with
+      root? := some root
+    }
 
 structure Error where
   code : String

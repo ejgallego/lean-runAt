@@ -10,6 +10,7 @@ client=""
 beam_wrapper_tmp_root=""
 declare -a beam_wrapper_managed_roots=()
 declare -a beam_wrapper_managed_pids=()
+beam_wrapper_last_owner_pid=""
 
 # shellcheck source=tests/lib/wait.sh
 . tests/lib/wait.sh
@@ -438,7 +439,7 @@ beam_wrapper_cleanup() {
   local pid root
 
   for pid in ${beam_wrapper_managed_pids[@]+"${beam_wrapper_managed_pids[@]}"}; do
-    kill "$pid" > /dev/null 2>&1 || true
+    kill -INT "$pid" > /dev/null 2>&1 || true
     wait "$pid" 2>/dev/null || true
   done
 
@@ -456,6 +457,7 @@ beam_wrapper_init() {
   beam_wrapper_tmp_root="$(mktemp -d /tmp/beam-wrapper-suite-XXXXXX)"
   beam_wrapper_managed_roots=()
   beam_wrapper_managed_pids=()
+  beam_wrapper_last_owner_pid=""
   trap beam_wrapper_cleanup EXIT
 }
 
@@ -467,6 +469,41 @@ beam_wrapper_register_pid() {
   beam_wrapper_managed_pids+=("$1")
 }
 
+beam_wrapper_unregister_pid() {
+  local target="$1"
+  local pid
+  local -a kept_pids=()
+  for pid in ${beam_wrapper_managed_pids[@]+"${beam_wrapper_managed_pids[@]}"}; do
+    if [ "$pid" != "$target" ]; then
+      kept_pids+=("$pid")
+    fi
+  done
+  beam_wrapper_managed_pids=(${kept_pids[@]+"${kept_pids[@]}"})
+}
+
+beam_wrapper_start_owner() {
+  local root="$1"
+  local backend="${2:-lean}"
+  local out="$root/.beam/test-owner.out"
+  local err="$root/.beam/test-owner.err"
+  local registry="$root/.beam/beam-daemon.json"
+
+  "$beam_script" --root "$root" ensure "$backend" --hold >"$out" 2>"$err" &
+  beam_wrapper_last_owner_pid="$!"
+  beam_wrapper_register_pid "$beam_wrapper_last_owner_pid"
+  if ! wait_for_file "$registry" "Beam session owner registry" 60 ||
+      ! wait_for_file_text "$err" "owning Beam session" "Beam session owner readiness" 600 0.1; then
+    echo "expected explicit Beam session owner to become ready for $root" >&2
+    if [ -f "$out" ]; then
+      cat "$out" >&2
+    fi
+    if [ -f "$err" ]; then
+      cat "$err" >&2
+    fi
+    exit 1
+  fi
+}
+
 beam_wrapper_prepare_project_root() {
   local name="$1"
   local root="$beam_wrapper_tmp_root/$name"
@@ -475,6 +512,7 @@ beam_wrapper_prepare_project_root() {
   rsync -a --exclude='.beam/' tests/save_olean_project/ "$root"/
   rm -rf -- "$root/.beam"
   mkdir -p "$root/.beam"
+  chmod 700 "$root/.beam"
   beam_wrapper_register_root "$root"
   printf '%s\n' "$root"
 }

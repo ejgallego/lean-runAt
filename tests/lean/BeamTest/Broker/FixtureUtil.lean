@@ -19,7 +19,9 @@ def copySaveProjectFixture (dest : System.FilePath) : IO Unit := do
   IO.FS.createDirAll dest
   let out ← IO.Process.output {
     cmd := "rsync"
-    args := #["-a", s!"{src.toString}/", s!"{dest.toString}/"]
+    -- Local wrapper/install tests may leave an ignored runtime cache in this source fixture. It is
+    -- neither fixture input nor safe to duplicate into every isolated broker test project.
+    args := #["-a", "--exclude", ".beam/", s!"{src.toString}/", s!"{dest.toString}/"]
   }
   if out.exitCode != 0 then
     throw <| IO.userError s!"failed to copy save_olean_project fixture\n{out.stderr}"

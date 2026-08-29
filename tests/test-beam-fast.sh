@@ -248,7 +248,8 @@ env ${mcp_stdio_env[@]+"${mcp_stdio_env[@]}"} \
     --restart-cycles 1 \
     --timeout "$mcp_stdio_timeout" \
     > /dev/null
-python3 tests/test-mcp-http-bridge.py > /dev/null
+mcp_http_timeout="${BEAM_MCP_HTTP_TIMEOUT:-60}"
+python3 tests/test-mcp-http-bridge.py --timeout "$mcp_http_timeout" > /dev/null
 mcp_self_check_timeout="${BEAM_MCP_SELF_CHECK_TIMEOUT_MS:-120000}"
 (cd tests/save_olean_project && \
   LEAN_BEAM_MCP_SELF_CHECK_TIMEOUT_MS="$mcp_self_check_timeout" \
@@ -352,15 +353,45 @@ wrapper_todo_update_out="$(mktemp /tmp/lean-beam-wrapper-todo-update-out-XXXXXX)
 wrapper_todo_update_err="$(mktemp /tmp/lean-beam-wrapper-todo-update-err-XXXXXX)"
 wrapper_todo_out="$(mktemp /tmp/lean-beam-wrapper-todo-out-XXXXXX)"
 wrapper_todo_err="$(mktemp /tmp/lean-beam-wrapper-todo-err-XXXXXX)"
+wrapper_todo_owner_out="$(mktemp /tmp/lean-beam-wrapper-todo-owner-out-XXXXXX)"
+wrapper_todo_owner_err="$(mktemp /tmp/lean-beam-wrapper-todo-owner-err-XXXXXX)"
+wrapper_todo_owner_pid=""
 wrapper_todo_cleanup() {
-  BEAM_CONTROL_DIR="$wrapper_todo_control_dir" \
-    scripts/lean-beam --root tests/save_olean_project shutdown > /dev/null 2>&1 || true
+  scripts/lean-beam --root tests/save_olean_project \
+    --control-dir "$wrapper_todo_control_dir" shutdown > /dev/null 2>&1 || true
+  if [ -n "$wrapper_todo_owner_pid" ]; then
+    wait "$wrapper_todo_owner_pid" 2>/dev/null || true
+  fi
   rm -rf -- "$wrapper_todo_control_dir"
-  rm -f "$wrapper_todo_update_out" "$wrapper_todo_update_err" "$wrapper_todo_out" "$wrapper_todo_err"
+  rm -f "$wrapper_todo_update_out" "$wrapper_todo_update_err" "$wrapper_todo_out" "$wrapper_todo_err" \
+    "$wrapper_todo_owner_out" "$wrapper_todo_owner_err"
 }
 
-if ! BEAM_CONTROL_DIR="$wrapper_todo_control_dir" \
-    scripts/lean-beam --root tests/save_olean_project \
+scripts/lean-beam --root tests/save_olean_project \
+  --control-dir "$wrapper_todo_control_dir" ensure --hold \
+  >"$wrapper_todo_owner_out" 2>"$wrapper_todo_owner_err" &
+wrapper_todo_owner_pid="$!"
+for _ in $(seq 1 600); do
+  if grep -Fq "owning Beam session" "$wrapper_todo_owner_err"; then
+    break
+  fi
+  if ! kill -0 "$wrapper_todo_owner_pid" 2>/dev/null; then
+    echo "expected lean-beam todo wrapper owner to remain alive" >&2
+    cat "$wrapper_todo_owner_err" >&2
+    wrapper_todo_cleanup
+    exit 1
+  fi
+  sleep 0.1
+done
+if ! grep -Fq "owning Beam session" "$wrapper_todo_owner_err"; then
+  echo "timed out waiting for lean-beam todo wrapper owner" >&2
+  cat "$wrapper_todo_owner_err" >&2
+  wrapper_todo_cleanup
+  exit 1
+fi
+
+if ! scripts/lean-beam --root tests/save_olean_project \
+      --control-dir "$wrapper_todo_control_dir" \
       update TodoSmoke.lean \
     > "$wrapper_todo_update_out" 2>"$wrapper_todo_update_err"; then
   echo "expected lean-beam update wrapper smoke to succeed before todo" >&2
@@ -390,8 +421,8 @@ PY
   exit 1
 fi
 
-if ! BEAM_CONTROL_DIR="$wrapper_todo_control_dir" \
-    scripts/lean-beam --root tests/save_olean_project \
+if ! scripts/lean-beam --root tests/save_olean_project \
+      --control-dir "$wrapper_todo_control_dir" \
       todo TodoSmoke.lean "$wrapper_todo_version" 13 0 14 0 --kind sorry --suggest none \
     > "$wrapper_todo_out" 2>"$wrapper_todo_err"; then
   echo "expected lean-beam todo wrapper smoke to succeed" >&2

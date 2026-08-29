@@ -29,7 +29,7 @@ Use this reference as a short checklist of what not to assume in Lean `beam` wor
 - use `lean-beam run-at-handle` plus `lean-beam run-with` / `lean-beam run-with-linear` for exact speculative chaining
 - use a real edit, save, then `lean-beam sync` when the speculative result should become source
 - use `lean-beam save` only for a synced workspace module
-- use `beam-client request-stream` for machine-readable streaming diagnostics or progress
+- use `lean-beam --root ROOT request-stream` for machine-readable streaming diagnostics or progress
 - use `lake build` when the task has become dependency freshness
 - rely on successful Beam checkpoints for ordinary local development, ensure CI runs `lake build`
   from clean artifacts, and use local `lean-beam shutdown`, `lake clean`, and `lake build` once only
