@@ -303,11 +303,13 @@ fi
 stats_json="$("$beam_script" --root "$tmp1" stats)"
 assert_json_field_equals "owned stats response" "$stats_json" ok true
 status_json="$("$beam_script" --root "$tmp1" status)"
+resolved_tmp1="$(beam_test_realpath "$tmp1")"
 assert_json_field_equals "running session status response" "$status_json" ok true
 assert_json_field_equals "running session status state" "$status_json" result.state running
 assert_json_field_equals "running session status generation" "$status_json" result.generation "$daemon1_id"
-assert_json_field_equals "running session status workspace" "$status_json" result.workspace "$tmp1"
-assert_json_field_equals "running session status directory" "$status_json" result.sessionDir "$tmp1/.beam"
+assert_json_field_equals "running session status workspace" "$status_json" result.workspace "$resolved_tmp1"
+assert_json_field_equals \
+  "running session status directory" "$status_json" result.sessionDir "$resolved_tmp1/.beam"
 
 machine_stats_json="$("$beam_script" --root "$tmp1" request-stream \
   '{"op":"stats","clientRequestId":"machine-stats"}')"
