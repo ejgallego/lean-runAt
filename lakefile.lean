@@ -10,6 +10,8 @@ open Lake DSL
 open System
 
 package "beam" where
+  enableArtifactCache := true
+  restoreAllArtifacts := true
 
 target beamControlDirObj (pkg) : FilePath := do
   let srcFile := pkg.dir / "Beam" / "Native" / "control_dir.c"
