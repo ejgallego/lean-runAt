@@ -19,11 +19,11 @@ beam_wrapper_start_owner "$standalone_root"
 
 (
   cd "$lifecycle_root"
-  "$beam_script" ensure lean > /dev/null
+  "$beam_script" stats > /dev/null
 
   stats_out="$("$beam_script" stats)"
   if [ "$(BEAM_JSON_PAYLOAD="$stats_out" read_json_text_field result.sessions.lean.openDocCount)" != "0" ]; then
-    echo "expected ensure lean to start with zero open Beam daemon documents" >&2
+    echo "expected a newly served Lean session to start with zero open documents" >&2
     printf '%s\n' "$stats_out" >&2
     exit 1
   fi
@@ -256,7 +256,7 @@ beam_wrapper_start_owner "$standalone_root"
 
 (
   cd "$standalone_root"
-  "$beam_script" ensure lean > /dev/null
+  "$beam_script" stats > /dev/null
 
   cat > StandaloneSaveSmoke.lean <<'EOF'
 import SaveSmoke.B

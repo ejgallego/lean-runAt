@@ -16,7 +16,7 @@ namespace Beam.Daemon
 open Beam.Broker
 
 def registrySchemaVersion : Nat :=
-  2
+  3
 
 inductive RegistryLifecycle where
   | live
@@ -38,7 +38,6 @@ instance : FromJson RegistryLifecycle where
 structure WorkspaceBinding where
   workspaceId : WorkspaceId
   root : String
-  configHash : String
   leanCmd? : Option String := none
   plugin? : Option String := none
   rocqCmd? : Option String := none
@@ -49,9 +48,8 @@ structure WorkspaceBinding where
 /--
 The private descriptor for one wrapper-owned CLI session.
 
-The descriptor is deliberately shaped as a session with a nonempty workspace collection even
-while the public owner command creates one workspace. This keeps session identity separate from
-workspace routing and leaves static multi-workspace ownership as an additive CLI feature.
+Wrapper sessions deliberately own exactly one workspace. Standalone broker and MCP runtimes retain
+their independent multi-workspace models.
 -/
 structure SessionDescriptor where
   schemaVersion : Nat
@@ -61,7 +59,7 @@ structure SessionDescriptor where
   pid : Nat
   ownerPid : Nat
   port? : Option Nat := none
-  workspaces : Array WorkspaceBinding
+  workspace : WorkspaceBinding
   /-- Hash of the complete frozen session configuration. -/
   configHash : String
   clientBin? : Option String := none
@@ -69,9 +67,6 @@ structure SessionDescriptor where
   startedAt : String
   requestedPort? : Option Nat := none
   deriving FromJson, ToJson
-
-def SessionDescriptor.rootSummary (entry : SessionDescriptor) : String :=
-  String.intercalate ", " <| entry.workspaces.toList.map (·.root)
 
 def SessionDescriptor.identity (entry : SessionDescriptor) : DaemonIdentity := {
   daemonId := entry.daemonId
@@ -104,7 +99,7 @@ def endpointFromEntry (entry : SessionDescriptor) : IO Transport.Endpoint := do
   | some endpoint => pure endpoint
   | none =>
       let message :=
-        s!"invalid Beam daemon transport data for session {entry.daemonId} ({entry.rootSummary})"
+        s!"invalid Beam daemon transport data for session {entry.daemonId} ({entry.workspace.root})"
       throw (IO.userError message)
 
 def endpointSummary (endpoint : Transport.Endpoint) : String :=

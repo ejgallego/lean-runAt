@@ -409,7 +409,11 @@ private def checkCliRootParsing : IO Unit := do
   expectIoErrorContains
     "missing explicit CLI root should use the workspace error boundary"
     "workspace root does not resolve"
-    (Beam.Cli.parseCliOptions {} ["--root", missingRoot.toString, "ensure", "lean"])
+    (Beam.Cli.parseCliOptions {} ["--root", missingRoot.toString, "serve", "lean"])
+  expectIoErrorContains
+    "relative session directory should be rejected"
+    "--session-dir requires an absolute path"
+    (Beam.Cli.parseCliOptions {} ["--session-dir", "relative-session", "status"])
   let root := System.FilePath.mk s!"/tmp/beam-cli-root-{← IO.monoNanosNow}"
   let control := root / "shared-control"
   try
@@ -418,13 +422,38 @@ private def checkCliRootParsing : IO Unit := do
     let expectedControl ← Beam.resolveExistingPath control
     let opts ← Beam.Cli.parseCliOptions {} [
       "--root", root.toString,
-      "--control-dir", control.toString,
+      "--session-dir", control.toString,
       "stats"
     ]
     require "explicit CLI root should be canonicalized" (opts.explicitRoot? == some expectedRoot)
-    require "explicit control directory should remain an exact selection"
+    require "explicit session directory should remain an exact selection"
       (opts.explicitControlDir? == some expectedControl)
     require "global selectors should not leak into command arguments" (opts.args == ["stats"])
+  finally
+    if ← root.pathExists then
+      IO.FS.removeDirAll root
+
+private def checkProjectRootAmbiguity : IO Unit := do
+  let root := System.FilePath.mk s!"/tmp/beam-cli-root-selection-{← IO.monoNanosNow}"
+  let leanRoot := root / "lean"
+  let rocqRoot := leanRoot / "rocq"
+  let nested := rocqRoot / "src"
+  try
+    IO.FS.createDirAll nested
+    IO.FS.writeFile (leanRoot / "lean-toolchain") "leanprover/lean4:stable\n"
+    IO.FS.writeFile (rocqRoot / "_RocqProject") "\n"
+    expectIoErrorContains
+      "backend-neutral root inference should reject mixed-root ambiguity"
+      "project root is ambiguous"
+      (Beam.Cli.inferProjectRootAny nested)
+    let explicitLean ← Beam.resolveExistingPath leanRoot
+    require "an explicit root should resolve mixed-root ambiguity"
+      ((← Beam.Cli.projectRootAny { explicitRoot? := some explicitLean }) == explicitLean)
+
+    IO.FS.writeFile (rocqRoot / "lean-toolchain") "leanprover/lean4:stable\n"
+    let sharedRoot ← Beam.resolveExistingPath rocqRoot
+    require "one directory containing both project markers should be one root candidate"
+      ((← Beam.Cli.inferProjectRootAny rocqRoot) == sharedRoot)
   finally
     if ← root.pathExists then
       IO.FS.removeDirAll root
@@ -442,15 +471,13 @@ private def checkLeanOperationRequests : IO Unit := do
     text := "exact h"
   }
   requireRequestJson "runAt request should share the Lean operation adapter"
-    (Beam.Cli.leanRunAtRequest root path 12 4 2 (some "exact h"))
+    (Beam.Cli.leanRunAtRequest root path 12 4 2 "exact h")
     (runAtInput.toBrokerRequest rootText)
   requireRequestJson "runAt handle request should share the Lean operation adapter"
-    (Beam.Cli.leanRunAtRequest root path 12 4 2 (some "exact h") (storeHandle := true))
+    (Beam.Cli.leanRunAtRequest root path 12 4 2 "exact h" (storeHandle := true))
     (runAtInput.toBrokerRequest rootText (storeHandle := true))
-  let missingRunAtText := Beam.Cli.leanRunAtRequest root path 12 4 2 none
-  require "runAt missing text should remain a broker validation error" missingRunAtText.text?.isNone
-  require "runAt missing text should still target run_at" (missingRunAtText.op == .runAt)
-  require "runAt missing text should carry version" (missingRunAtText.version? == some 12)
+  expectIoErrorContains "runAt missing text should fail at the CLI boundary"
+    "usage: beam" (Beam.Cli.parseTextArg "lean-run-at Demo.lean 12 4 2" [])
 
   let positionInput : Beam.Lean.PositionInput := {
     path
@@ -500,19 +527,13 @@ private def checkLeanOperationRequests : IO Unit := do
     text := "simp"
   }
   requireRequestJson "runWith request should share the Lean operation adapter"
-    (Beam.Cli.leanRunWithRequest root path sampleBrokerHandle (some "simp"))
+    (Beam.Cli.leanRunWithRequest root path sampleBrokerHandle "simp")
     (runWithInput.toBrokerRequest rootText)
   requireRequestJson "runWith linear request should share the Lean operation adapter"
-    (Beam.Cli.leanRunWithRequest root path sampleBrokerHandle (some "simp") (linear := true))
+    (Beam.Cli.leanRunWithRequest root path sampleBrokerHandle "simp" (linear := true))
     (runWithInput.toBrokerRequest rootText (linear := true))
-  let missingRunWithText := Beam.Cli.leanRunWithRequest root path sampleBrokerHandle none
-  require "runWith missing text should remain a broker validation error" missingRunWithText.text?.isNone
-  require "runWith missing text should keep successor-handle semantics"
-    (missingRunWithText.storeHandle? == some true)
-  require "runWith missing text should keep linear flag explicit"
-    (missingRunWithText.linear? == some false)
-  require "runWith missing text should keep the supplied handle"
-    missingRunWithText.handle?.isSome
+  expectIoErrorContains "runWith missing text should fail at the CLI boundary"
+    "usage: beam" (Beam.Cli.parseTextArg "lean-run-with Demo.lean HANDLE" [])
 
   requireRequestJson "release request should share the Lean operation adapter"
     (Beam.Cli.leanReleaseRequest root path sampleBrokerHandle)
@@ -597,13 +618,12 @@ private def checkDaemonFailureContext : IO Unit := do
       pid := 999999999
       ownerPid := 999999999
       port? := some 42424
-      workspaces := #[{
+      workspace := {
         workspaceId := Beam.Cli.projectDaemonWorkspaceId
         root := root.toString
-        configHash := "config-test"
         toolchain? := some "leanprover/lean4:test"
         bundleId? := some "bundle-test"
-      }]
+      }
       configHash := "config-test"
       startedAt := "2026-07-02T00:00:00Z"
     }
@@ -741,13 +761,12 @@ private def writeTestRegistryEntry
     pid := 999999999
     ownerPid := 999999999
     port?
-    workspaces := #[{
+    workspace := {
       workspaceId := Beam.Cli.projectDaemonWorkspaceId
       root := root.toString
-      configHash := "config-test"
       toolchain? := some "leanprover/lean4:test"
       bundleId? := some "bundle-test"
-    }]
+    }
     configHash := "config-test"
     startedAt := "2026-07-05T00:00:00Z"
   }
@@ -774,6 +793,11 @@ private def checkTypedRegistryReads : IO Unit := do
     match ← Beam.Daemon.readRegistry root with
     | .unsupported 999 => pure ()
     | state => throw <| IO.userError s!"unsupported registry was classified as {state.status}"
+
+    IO.FS.writeFile registryPath "{\"schemaVersion\":2}\n"
+    match ← Beam.Daemon.readRegistry root with
+    | .unsupported 2 => pure ()
+    | state => throw <| IO.userError s!"superseded multi-workspace registry was classified as {state.status}"
 
     IO.FS.writeFile registryPath "{\"schemaVersion\":\"one\"}\n"
     match ← Beam.Daemon.readRegistry root with
@@ -806,11 +830,11 @@ private def checkTypedRegistryReads : IO Unit := do
     let validText ← IO.FS.readFile registryPath
     let validJson ← IO.ofExcept <| Json.parse validText
     IO.FS.writeFile registryPath <|
-      (validJson.setObjVal! "workspaces" (toJson (#[] : Array Beam.Daemon.WorkspaceBinding))).compress
+      (validJson.setObjVal! "workspace" (Json.mkObj [])).compress
     match ← Beam.Daemon.readRegistry root with
     | .malformed detail =>
-        require "empty workspace descriptors should fail the typed boundary"
-          (detail.contains "at least one workspace")
+        require "incomplete workspace descriptors should fail the typed boundary"
+          (detail.contains "invalid registry schema")
     | state => throw <| IO.userError s!"empty workspace descriptor was classified as {state.status}"
 
     IO.FS.writeFile registryPath validText
@@ -1003,14 +1027,41 @@ private def checkPathCanonicalization : IO Unit := do
   let stamp ← IO.monoNanosNow
   let root := System.FilePath.mk s!"/tmp/beam-path-canonical-root-{stamp}"
   let alias := System.FilePath.mk s!"/tmp/beam-path-canonical-alias-{stamp}"
+  let dotdotAlias := System.FilePath.mk s!"/tmp/beam-path-dotdot-alias-{stamp}"
+  let missingUnderRoot := root / "missing" / "session"
+  let missingUnderAlias := alias / "missing" / "session"
   try
     IO.FS.createDirAll root
     createSymlink "path canonicalization fixture" root alias
+    IO.FS.createDir (root / "existing")
+    createSymlink "path dotdot canonicalization fixture" (root / "existing") dotdotAlias
     require "canonical path equality should treat symlinked workspace roots as the same path"
       (← Beam.sameFilePath root alias)
     require "missing paths should fall back to exact text equality"
-      (!(← Beam.sameFilePath (root / "missing") (alias / "missing")))
+      (!(← Beam.sameFilePath missingUnderRoot missingUnderAlias))
+    let resolvedBeforeCreation ← Beam.resolvePathForCreation missingUnderAlias
+    let expectedBeforeCreation := (← Beam.resolveExistingPath root) / "missing" / "session"
+    require "creation-path resolution should canonicalize the longest existing ancestor"
+      (resolvedBeforeCreation == expectedBeforeCreation)
+    IO.FS.createDirAll missingUnderAlias
+    let resolvedAfterCreation ← Beam.resolveExistingPath missingUnderAlias
+    require "creation-path identity should remain stable after creating the missing suffix"
+      (resolvedAfterCreation == resolvedBeforeCreation)
+    let missingAfterSymlinkDotdot := dotdotAlias / ".." / "dotdot-missing" / "session"
+    let resolvedAfterSymlinkDotdot ← Beam.resolvePathForCreation missingAfterSymlinkDotdot
+    let expectedAfterSymlinkDotdot :=
+      ((← Beam.resolveExistingPath root) / "dotdot-missing" / "session").normalize
+    require "creation-path resolution should preserve filesystem semantics for symlink followed by dotdot"
+      (resolvedAfterSymlinkDotdot == expectedAfterSymlinkDotdot)
+    IO.FS.createDirAll missingAfterSymlinkDotdot
+    require "symlink-dotdot path identity should remain stable after creation"
+      ((← Beam.resolveExistingPath missingAfterSymlinkDotdot) == resolvedAfterSymlinkDotdot)
   finally
+    try
+      if ← dotdotAlias.pathExists then
+        IO.FS.removeFile dotdotAlias
+    catch _ =>
+      pure ()
     try
       if ← alias.pathExists then
         IO.FS.removeFile alias
@@ -1327,6 +1378,7 @@ def main : IO Unit := do
   checkSyncWaitSpecs
   checkCancelAcknowledgementDecoding
   checkCliRootParsing
+  checkProjectRootAmbiguity
   checkLeanOperationRequests
   checkDiagnosticScopeArgs
   checkStartupRetryPolicy

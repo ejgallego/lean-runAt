@@ -115,23 +115,27 @@ Current Beam coverage includes:
 - focused daemon lifecycle coverage in [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh),
   including the no-implicit-start contract, duplicate-owner rejection, Beam and non-Beam endpoint
   collision safety without cross-project disclosure, authenticated generation probes, mode-`0700`
-  control-directory and mode-`0600` registry publication, rejection of symlinked or non-private
-  existing control paths without mutating their targets, wrong-root recovery rejection with
+  session-directory and mode-`0600` descriptor publication, rejection of symlinked or non-private
+  existing session paths without mutating their targets, stable missing-path canonicalization,
+  wrong-root status classification and recovery rejection with
   byte-for-byte descriptor preservation, unauthorized-shutdown rejection without listener teardown, oversized-frame
   and first-message limits, a bounded identity probe against a silent non-Beam listener, cross-root
   unsafe-registry preservation that does not affect the daemon
   serving the other root, configuration-drift preservation of the owner and active request,
-  explicit shutdown, cancellation of requests active during shutdown or owner loss,
-  exact-generation cleanup that preserves a replacement registry, a published draining fence while
+  explicit stop, committed-state reporting after shutdown delivery failure, cancellation of requests
+  active during shutdown or owner loss, exact-generation cleanup that preserves a replacement
+  registry, idempotent repeated stop, a published draining fence while
   a daemon is paused, rejection of attachment or replacement while that generation remains
   published, forced process-group cleanup of the daemon and its backend,
-  holder reporting after an unexpected daemon crash, abrupt owner death through inherited-pipe EOF,
-  read-only crash-fence lookup, exact-generation non-signalling recovery, explicit control-directory
+  holder reporting and recovery-required projection after an unexpected daemon crash, abrupt owner
+  death through inherited-pipe EOF,
+  read-only crash-fence lookup, four-state status projection, ambiguity-safe human root inference,
+  explicit-root lifecycle commands, exact-generation non-signalling recovery, exact session-directory
   selection, root-aware machine request routing, and self-termination after the project worktree
   disappears without recreating it
 - Linux-only PID-isolated sandbox wrapper coverage in [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh),
   including cross-namespace endpoint attachment, duplicate-owner rejection, a paused owner without
-  time-based expiry, explicit shutdown, killed-owner EOF cleanup, fail-closed preservation of an
+  time-based expiry, explicit stop, killed-owner EOF cleanup, fail-closed preservation of an
   unavailable foreign-domain descriptor before explicit recovery, distinct generation identity,
   and the absence of legacy lease/retirement artifacts
 - zero-build save replay, structured-setup support, batch-only-argument rejection, and stale-save

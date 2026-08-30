@@ -141,6 +141,11 @@ def beamVersionDescription : String :=
 def beamStatsDescription : String :=
   "Return process-wide debug Beam broker runtime statistics for lazily cached workspaces."
 
+private def progressDiscovery (delayedActivity : String) : String :=
+  "For detailed live updates, clients can pass `tools/call` `_meta.progressToken`; without one, " ++
+    s!"Beam emits one status log when {delayedActivity} and the request's logging policy admits " ++
+    "notice-level events."
+
 def beamFeedbackReportDescription : String :=
   String.intercalate " " [
     "Beam does not upload or submit feedback. This tool creates and returns a pasteable feedback report for one explicit workspace.",
@@ -148,8 +153,7 @@ def beamFeedbackReportDescription : String :=
     "Set confidential for non-public workspaces; confidential results retain caller-authored narrative",
     "except for HOME-path redaction and do not scan it for other secrets; never post them publicly.",
     "A local evidence bundle is optional.",
-    "For detailed live updates, clients can pass `tools/call` `_meta.progressToken`; without one,",
-    "Beam emits one status log when collection is delayed and the request's logging policy admits notice-level events."
+    progressDiscovery "collection is delayed"
   ]
 
 open Beam.JsonSchema in
@@ -217,7 +221,11 @@ def feedbackReportInputSchema : Json :=
   ] (Beam.Feedback.requiredInputFields.push "workspace")
 
 def dropWorkspaceDescription : String :=
-  "Evict one local Lean workspace cache and invalidate its retained proof handles. A later request recreates it lazily. For detailed live updates, clients can pass `tools/call` `_meta.progressToken`; without one, Beam emits one status log when eviction is delayed and the request's logging policy admits notice-level events."
+  String.intercalate " " [
+    "Evict one local Lean workspace cache and invalidate its retained proof handles.",
+    "A later request recreates it lazily.",
+    progressDiscovery "eviction is delayed"
+  ]
 
 open Beam.JsonSchema in
 def dropWorkspaceInputSchema : Json :=
@@ -246,7 +254,12 @@ def ToolName.descriptor (tool : ToolName) : ToolDescriptor :=
     | .beamVersion => (beamVersionDescription, emptyInputSchema)
     | .beamStats => (beamStatsDescription, emptyInputSchema)
     | .beamFeedbackReport => (beamFeedbackReportDescription, feedbackReportInputSchema)
-    | .leanOperation op => (op.description, schemaWithWorkspace op.inputSchema)
+    | .leanOperation op =>
+        (String.intercalate " " [
+          op.behaviorDescription,
+          progressDiscovery "setup or a long-running request is detected",
+          Beam.Lean.sourceFileInvariant
+        ], schemaWithWorkspace op.inputSchema)
     | .leanDropWorkspace => (dropWorkspaceDescription, dropWorkspaceInputSchema)
   { name := tool, description, inputSchema, annotations := tool.annotations }
 

@@ -208,7 +208,7 @@ process, ask questions against saved Lean files in that project:
 
 ```bash
 # terminal/session 1
-lean-beam ensure --hold
+lean-beam serve
 
 # terminal/session 2
 update_json="$(lean-beam update "Foo.lean")"
@@ -220,45 +220,74 @@ lean-beam goals before "Foo.lean" "$version" 10 2
 lean-beam run-at "Foo.lean" "$version" 10 2 "exact trivial"
 ```
 
-`lean-beam ensure --hold` is the only wrapper command that starts the per-project daemon. Its
+`lean-beam serve` is the only wrapper command that starts a project session. Its
 inherited ownership pipe defines the session lifetime: interrupt the holder, or run
-`lean-beam shutdown`, to close the daemon and its backend processes. Plain `lean-beam ensure` and
-all other wrapper commands attach to an existing owner and fail with a recovery command when none
+`lean-beam --root ROOT stop`, to close the daemon and its backend processes. All other wrapper
+commands attach to an existing owner and fail with a recovery command when none
 is live. Attaching commands use the owner's frozen configuration and do not rebuild a competing
 desired configuration. A second owner does resolve its proposed configuration and reports any
-mismatch while preserving the old owner. During shutdown the registry reports `draining` and a
-replacement owner is refused until the old process tree has exited. MCP clients do not need a
-separate holder; the stdio MCP process owns its runtime session.
+mismatch while preserving the old owner. During stopping the descriptor reports `draining` and a
+replacement owner is refused until owned cleanup completes after graceful or process-group
+teardown and daemon-leader reaping. MCP clients do not need a separate holder; the stdio MCP
+process owns its runtime session.
+
+`lean-beam status` reports the public session state as `absent`, `running`, `stopping`, or
+`recoveryRequired`, together with the resolved workspace and session directory. Human-facing
+commands may infer a root only when the result is unique. If Lean and Rocq markers identify
+different candidate roots, Beam lists the ambiguity and requires `--root`. Machine requests,
+`stop`, and `recover` always require an explicit root.
+
+Successful `serve`, `status`, `stop`, and `recover` commands emit the same top-level
+`{"ok": true, "result": ...}` shape. `serve` reports the public running session rather than its
+private backend warm-up request. `stop` reports whether it committed the transition to `stopping`;
+repeating it while already stopping returns `changed: false`. If the transition commits but its
+immediate authenticated shutdown delivery fails, the successful stopping result includes a typed
+warning. Recovery reports `state: "absent"` and whether it changed the selected session fence.
 
 The default session descriptor and lock live in `<root>/.beam`. This is intentional for
 project-scoped agent sandboxes: clients that can access the same workspace can discover the same
-session. Before creating a lock or capability-bearing descriptor, Beam makes the selected control
+session. Before creating a lock or capability-bearing descriptor, Beam makes the selected session
 directory account-private (`0700`) when the leaf does not exist; the published descriptor is
 `0600`. An existing selection must already be a real, non-symlinked directory with mode `0700`, or
 Beam refuses it without changing its permissions. This permits coordination between sandboxes and
-agents running as the same local account, but a group-shared or traversable control directory is
+agents running as the same local account, but a group-shared or traversable session directory is
 not a supported authentication boundary. Use an exact alternate directory when the project is
 read-only or several same-account clients need another stable control plane:
 
 ```bash
-lean-beam --root /workspace/a --control-dir /workspace/control ensure --hold
-lean-beam --root /workspace/a --control-dir /workspace/control stats
+lean-beam --root /workspace/a --session-dir /workspace/control serve
+lean-beam --root /workspace/a --session-dir /workspace/control stats
 ```
 
-Every participant must supply the same `--root` and `--control-dir`; Beam does not search alternate
-control directories. If the exact directory already exists, prepare its `0700` mode explicitly;
-Beam will not adopt it by silently changing permissions. `BEAM_CONTROL_ROOT=/writable/base` is the
-sandbox convenience form and must be absolute: Beam derives a separate hashed directory for each
-canonical root below that base. An
-explicit control directory is also the intended future location for a statically configured
-multi-workspace CLI session. The current public owner command still publishes one frozen workspace,
-and wrapper mode does not allow runtime `init_workspace`, `list_workspaces`, or `drop_workspace` requests. The
+The session selector is the canonical workspace root plus the resolved session directory. Beam
+admits at most one owner for that selector; choosing another session directory deliberately chooses
+another namespace. A shared `BEAM_SESSION_ROOT` can coordinate several workspaces without sharing
+their broker processes: each canonical root receives its own derived session directory and owner.
+
+Every participant must supply the same `--root` and an absolute `--session-dir`; Beam does not
+search alternate session directories. If the exact directory already exists, prepare its `0700` mode explicitly;
+Beam will not adopt it by silently changing permissions. `BEAM_SESSION_ROOT=/writable/base` is the
+sandbox convenience form and must be absolute: Beam canonicalizes the base, then derives a separate
+hashed directory for each canonical root below it.
+
+For a missing explicit session directory, Beam canonicalizes its longest existing ancestor before
+retaining the missing suffix. The selector therefore has the same spelling before and after Beam
+creates it, including through platform aliases such as macOS `/tmp`.
+
+Beam rejects an explicit symbolic-link leaf before canonicalizing `--session-dir` and revalidates
+the selected leaf without following links before every status or attachment operation. Permission
+drift therefore fails closed instead of silently weakening an already published session boundary.
+
+Each wrapper session publishes exactly one frozen workspace. Wrapper mode does not allow runtime
+`init_workspace`, `list_workspaces`, or `drop_workspace` requests. The
 supported semantic `request-stream` also excludes process-wide `shutdown` and `reset_stats`; use
-the dedicated `lean-beam shutdown` command for lifecycle control.
-Use a stable external control directory when ownership must remain fenced while the project path is
+the dedicated `lean-beam --root ROOT stop` command for lifecycle control.
+
+Use a stable external session directory when ownership must remain fenced while the project path is
 deleted and recreated; deleting a project-local `.beam` necessarily deletes its default fence.
 
-An abnormal owner or broker exit leaves the descriptor as a safety fence. After independently
+An abnormal owner or broker exit, including a nonzero broker exit after stopping begins, leaves the
+descriptor as a safety fence. After independently
 establishing that the recorded generation is no longer authoritative, quarantine that exact record
 without signalling its recorded PIDs:
 
@@ -266,12 +295,13 @@ without signalling its recorded PIDs:
 lean-beam --root /workspace/a recover --generation GENERATION_ID
 ```
 
-Use the same `--control-dir` selection when applicable. `recover --force` is reserved for opaque
+Use the same `--session-dir` selection when applicable. `recover --force` is reserved for opaque
 legacy, unsupported, or malformed descriptors. Recovery preserves the old file under a
 `beam-daemon.recovered-*.json` name for diagnosis.
 
-For a current descriptor, the selected `--root` must be one of its recorded workspace bindings;
-using the same control directory with an unrelated root cannot quarantine the session.
+For a current descriptor, the selected `--root` must match its recorded workspace;
+using the same session directory with an unrelated root cannot quarantine the session. `status`
+reports this as `sessionSelectorMismatch`, not as a lifecycle state or recovery requirement.
 
 Machine clients should avoid root auto-detection and raw port/session fields:
 
@@ -334,8 +364,8 @@ checks.
 
 The running Lean server and existing file workers are not guaranteed to pick up Lake workspace
 configuration changes. After editing a lakefile, manifest, package override, `lean-toolchain`, Lean
-options, plugins, or dynamic libraries, run `lean-beam shutdown`, then start a new
-`lean-beam ensure --hold` owner before the next wrapper command that uses the Lean server.
+options, plugins, or dynamic libraries, run `lean-beam --root ROOT stop`, then start a new
+`lean-beam serve` owner before the next wrapper command that uses the Lean server.
 `lean-beam refresh` reopens a file within the current server and is not sufficient for this case.
 
 ### Final Batch Validation
@@ -353,7 +383,7 @@ If no successful clean CI result is available, or when investigating code that m
 mode, validate the project once from clean local Lake artifacts:
 
 ```bash
-lean-beam shutdown
+lean-beam --root ROOT stop
 lake clean
 lake build
 ```

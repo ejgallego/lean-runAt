@@ -134,6 +134,10 @@ private def collectDaemonPayload
       pure (Json.null, Json.null, warnings.push "the Beam daemon registry schema is unsupported")
   | .malformed detail =>
       pure (Json.null, Json.null, warnings.push s!"the Beam daemon registry is malformed: {detail}")
+  | .selectorMismatch entry =>
+      let controlDir ← Beam.Daemon.controlDirFor root explicitControlDir?
+      pure (Json.null, Json.null, warnings.push <|
+        sessionSelectorMismatchMessage root controlDir entry)
   | .unusable _ reason =>
       pure (Json.null, Json.null, warnings.push s!"the Beam daemon registry is unsafe: {reason.message}")
 

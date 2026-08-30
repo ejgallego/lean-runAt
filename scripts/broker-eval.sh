@@ -21,7 +21,7 @@ usage:
   scripts/broker-eval.sh case-a <lean-root>
   scripts/broker-eval.sh report <root>
   scripts/broker-eval.sh reset <root>
-  scripts/broker-eval.sh shutdown <root>
+  scripts/broker-eval.sh stop <root>
 EOF
 }
 
@@ -41,11 +41,11 @@ case "${1:-}" in
       exit 1
     fi
     lean_root="$(ensure_abs_dir "$2")"
-    "$beam" --root "$lean_root" ensure lean > /dev/null
+    "$beam" --root "$lean_root" stats > /dev/null
     "$beam" --root "$lean_root" reset-stats > /dev/null
     cat <<EOF
 Beam daemon stats reset.
-Lean backend ensured at:
+Beam session active at:
   $lean_root
 
 Run your workflow now, then collect stats with:
@@ -68,13 +68,13 @@ EOF
     root="$(ensure_abs_dir "$2")"
     "$beam" --root "$root" reset-stats
     ;;
-  shutdown)
+  stop)
     if [ $# -ne 2 ]; then
       usage >&2
       exit 1
     fi
     root="$(ensure_abs_dir "$2")"
-    "$beam" --root "$root" shutdown
+    "$beam" --root "$root" stop
     ;;
   *)
     usage >&2

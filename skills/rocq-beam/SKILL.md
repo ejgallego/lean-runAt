@@ -52,8 +52,8 @@ mutation.
 
 Supported command families:
 
-- start and own a Rocq wrapper session: `lean-beam ensure rocq --hold`
-- check and warm an already-owned Rocq session: `lean-beam ensure rocq`
+- start and own a Rocq wrapper session: `lean-beam serve rocq`
+- inspect the selected session state: `lean-beam status`
 - inspect goals after an existing sentence: `lean-beam rocq-goals-after`
 - inspect goals before a sentence or after speculative sentence text within that basis:
   `lean-beam rocq-goals-prev`
@@ -68,8 +68,8 @@ What to treat as the current agent workflow surface:
 Core workflow contract:
 
 - use `lean-beam`, not raw JSON and not raw LSP
-- before issuing wrapper probes, start one foreground `lean-beam ensure rocq --hold` process and
-  keep it running; interrupt it or run `lean-beam shutdown` when finished
+- before issuing wrapper probes, start one foreground `lean-beam serve rocq` process and
+  keep it running; interrupt it or run `lean-beam --root ROOT stop` when finished
 - save the `.v` file before every new probe after a real edit
 - `lean-beam` only sees the on-disk file, not unsaved editor buffers
 - treat `<line> <character>` as LSP-style coordinates for the saved file: line `0` is the first
@@ -86,13 +86,14 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 `lean-beam` for Rocq:
 
 - infers the target project root from the current directory or `--root`
-- keeps one Beam daemon per project root and records it in `<root>/.beam/beam-daemon.json`
-  - in sandboxed or read-only project trees, set `BEAM_CONTROL_ROOT` to a writable directory
-  - for an exact stable alternate location, pass the same `--control-dir DIR` to the owner and every
-    attaching command; Beam does not search alternate control directories
-- gives daemon startup authority only to `lean-beam ensure rocq --hold`; ordinary commands attach
+- keeps one owner per resolved workspace and session-directory selector; the default descriptor is
+  `<root>/.beam/beam-daemon.json`
+  - in sandboxed or read-only project trees, set `BEAM_SESSION_ROOT` to a writable directory
+  - for an exact stable alternate location, pass the same absolute path with `--session-dir DIR` to
+    the owner and every attaching command; Beam does not search alternate session directories
+- gives daemon startup authority only to `lean-beam serve rocq`; ordinary commands attach
   to its registry generation and never start a daemon implicitly
-- owns shutdown and registry handling
+- owns stopping and descriptor handling
 - preserves ambiguous crash state until explicit `recover --generation ID`; recovery does not
   signal persisted PIDs
 - resolves `coq-lsp` from the target project's local `_opam` when available
@@ -102,7 +103,8 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 - in Codex-style sandboxes, Beam daemon startup may still require elevated permissions even when all paths resolve correctly
 - in the same environments, localhost TCP bind/connect for the Beam daemon and client may also require elevated permissions
 - if startup fails with `operation not permitted`, treat that as a sandbox capability problem first, not as a missing install
-- `lean-beam shutdown`, `lean-beam stats`, and `lean-beam reset-stats` apply to the current project only
+- `lean-beam --root ROOT stop` requires an explicit root; `lean-beam status`, `lean-beam stats`, and
+  `lean-beam reset-stats` may infer a unique root
 
 Default rules:
 
@@ -121,7 +123,7 @@ from another:
 
 ```bash
 # terminal/session 1: keep running
-lean-beam ensure rocq --hold
+lean-beam serve rocq
 
 # terminal/session 2
 lean-beam stats
@@ -164,7 +166,7 @@ Execution model:
 Default loop:
 
 ```bash
-# with `lean-beam ensure rocq --hold` running in another process
+# with `lean-beam serve rocq` running in another process
 lean-beam rocq-goals-after "Demo.v" 12 4
 
 # make a real edit, save the file
@@ -176,14 +178,14 @@ Use cases:
 1. Inspect the current proof state after a sentence
 
 ```bash
-# with `lean-beam ensure rocq --hold` running in another process
+# with `lean-beam serve rocq` running in another process
 lean-beam rocq-goals-after "Demo.v" 12 4
 ```
 
 2. Inspect an intermediate tactic state inside one sentence
 
 ```bash
-# with `lean-beam ensure rocq --hold` running in another process
+# with `lean-beam serve rocq` running in another process
 lean-beam rocq-goals-prev "Demo.v" 12 4 "intro x."
 lean-beam rocq-goals-prev "Demo.v" 12 4 "split."
 ```
@@ -193,7 +195,7 @@ lean-beam rocq-goals-prev "Demo.v" 12 4 "split."
 Save the file first, then probe again from the saved document.
 
 ```bash
-# with `lean-beam ensure rocq --hold` running in another process
+# with `lean-beam serve rocq` running in another process
 lean-beam rocq-goals-after "Demo.v" 12 4
 
 # make a real edit in Demo.v and save it

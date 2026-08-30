@@ -44,21 +44,20 @@ def annotateRunatMessage (clientRequestId? : Option String) (msg : String) : Str
 private def debugTextEnabled : IO Bool := do
   pure <| (← envFlag? "BEAM_DEBUG_TEXT").getD false
 
-def maybeEmitTextDebug (clientRequestId? : Option String) (action source : String) (text? : Option String) : IO Unit := do
+def maybeEmitTextDebug
+    (clientRequestId? : Option String)
+    (action source text : String) : IO Unit := do
   if !(← debugTextEnabled) then
     pure ()
   else
-    match text? with
-    | none => pure ()
-    | some text =>
-        let bytes := text.toUTF8
-        let containsLiteralBackslashN := hasSubstring text "\\n"
-        IO.eprintln <| annotateRunatMessage clientRequestId?
-          s!"beam: debug text for {action}: source={source} utf8Bytes={bytes.size} containsNewline={boolText (text.contains '\n')} containsLiteralBackslashN={boolText containsLiteralBackslashN}"
-        IO.eprintln <| annotateRunatMessage clientRequestId?
-          s!"beam: debug text escaped={(Json.str text).compress}"
-        IO.eprintln <| annotateRunatMessage clientRequestId?
-          s!"beam: debug text utf8Hex={utf8Hex bytes}"
+    let bytes := text.toUTF8
+    let containsLiteralBackslashN := hasSubstring text "\\n"
+    IO.eprintln <| annotateRunatMessage clientRequestId?
+      s!"beam: debug text for {action}: source={source} utf8Bytes={bytes.size} containsNewline={boolText (text.contains '\n')} containsLiteralBackslashN={boolText containsLiteralBackslashN}"
+    IO.eprintln <| annotateRunatMessage clientRequestId?
+      s!"beam: debug text escaped={(Json.str text).compress}"
+    IO.eprintln <| annotateRunatMessage clientRequestId?
+      s!"beam: debug text utf8Hex={utf8Hex bytes}"
 
 def decodeRunAtResult? (resp : Response) : Option Beam.LSP.RunAt.Result :=
   match resp.result? with

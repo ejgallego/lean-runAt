@@ -5,13 +5,14 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Lean
+import Beam.Path
 
 namespace Beam.Daemon
 
 private def beamStateDir (root : System.FilePath) : System.FilePath :=
   root / ".beam"
 
-/-- Stable FNV-1a tag used only for deterministic `BEAM_CONTROL_ROOT` discovery. -/
+/-- Stable FNV-1a tag used only for deterministic `BEAM_SESSION_ROOT` discovery. -/
 private def controlRootTag (root : System.FilePath) : String :=
   let hash := root.toString.toUTF8.foldl
     (fun acc byte => (acc ^^^ byte.toUInt64) * 1099511628211)
@@ -24,12 +25,13 @@ def controlDirFor
   match explicitControlDir? with
   | some dir => pure dir
   | none =>
-      match ← IO.getEnv "BEAM_CONTROL_ROOT" with
+      match ← IO.getEnv "BEAM_SESSION_ROOT" with
       | some base =>
           let base := System.FilePath.mk base
           unless base.isAbsolute do
             throw <| IO.userError
-              s!"BEAM_CONTROL_ROOT must be an absolute path, got '{base}'"
+              s!"BEAM_SESSION_ROOT must be an absolute path, got '{base}'"
+          let base ← Beam.resolvePathForCreation base
           pure (base / controlRootTag root)
       | none =>
           pure (beamStateDir root)

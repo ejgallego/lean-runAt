@@ -444,7 +444,7 @@ beam_wrapper_cleanup() {
   done
 
   for root in ${beam_wrapper_managed_roots[@]+"${beam_wrapper_managed_roots[@]}"}; do
-    "$beam_script" --root "$root" shutdown > /dev/null 2>&1 || true
+    "$beam_script" --root "$root" stop > /dev/null 2>&1 || true
   done
 
   if [ -n "${beam_wrapper_tmp_root:-}" ] && [ -d "$beam_wrapper_tmp_root" ]; then
@@ -488,11 +488,11 @@ beam_wrapper_start_owner() {
   local err="$root/.beam/test-owner.err"
   local registry="$root/.beam/beam-daemon.json"
 
-  "$beam_script" --root "$root" ensure "$backend" --hold >"$out" 2>"$err" &
+  "$beam_script" --root "$root" serve "$backend" >"$out" 2>"$err" &
   beam_wrapper_last_owner_pid="$!"
   beam_wrapper_register_pid "$beam_wrapper_last_owner_pid"
   if ! wait_for_file "$registry" "Beam session owner registry" 60 ||
-      ! wait_for_file_text "$err" "owning Beam session" "Beam session owner readiness" 600 0.1; then
+      ! wait_for_file_text "$err" "serving Beam session" "Beam session owner readiness" 600 0.1; then
     echo "expected explicit Beam session owner to become ready for $root" >&2
     if [ -f "$out" ]; then
       cat "$out" >&2

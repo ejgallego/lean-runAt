@@ -108,14 +108,13 @@ def daemonRegistryContext?
     | .malformed detail =>
         pure <| some s!"Beam daemon registry ({path}):\n  status: malformed\n  detail: {detail}"
     | .current entry =>
-        let workspaceLines := entry.workspaces.toList.flatMap fun workspace =>
-          ([
-            s!"  workspace: {workspace.workspaceId}",
-            s!"    root: {workspace.root}",
-            s!"    configHash: {workspace.configHash}"
-          ] ++
-            (optionLine "  toolchain" workspace.toolchain?).toList ++
-            (optionLine "  bundleId" workspace.bundleId?).toList)
+        let workspace := entry.workspace
+        let workspaceLines := [
+          s!"  workspace: {workspace.workspaceId}",
+          s!"    root: {workspace.root}"
+        ] ++
+          (optionLine "  toolchain" workspace.toolchain?).toList ++
+          (optionLine "  bundleId" workspace.bundleId?).toList
         let lines := ([
           s!"Beam daemon registry ({path}):",
           s!"  schemaVersion: {entry.schemaVersion}",

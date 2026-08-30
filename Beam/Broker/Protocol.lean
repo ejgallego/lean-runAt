@@ -446,16 +446,15 @@ The generic `Request` remains the internal broker protocol used by maintenance t
 -/
 structure ProjectRequest where
   private request : Request
-  private requestId : String
 
 private def projectRequestForbiddenFields : Array String :=
   #["workspaceId", "workspaceMode", "daemonCapability", "root", "leanCmd", "leanPlugin", "rocqCmd"]
 
 private def ProjectRequest.supportedOp : Op → Bool
-  | .ensure | .openDocs | .cancel | .updateFile | .syncFile | .refreshFile | .close | .runAt
+  | .openDocs | .cancel | .updateFile | .syncFile | .refreshFile | .close | .runAt
   | .hover | .signatureHelp | .definition | .references | .documentSymbols | .workspaceSymbols
   | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release | .stats => true
-  | .initWorkspace | .listWorkspaces | .dropWorkspace | .resetStats | .shutdown => false
+  | .ensure | .initWorkspace | .listWorkspaces | .dropWorkspace | .resetStats | .shutdown => false
 
 def ProjectRequest.ofRequest (request : Request) : Except String ProjectRequest := do
   unless ProjectRequest.supportedOp request.op do
@@ -469,7 +468,7 @@ def ProjectRequest.ofRequest (request : Request) : Except String ProjectRequest 
   if clientRequestId.isEmpty then
     throw "project requests require a non-empty clientRequestId"
   request.validateFields
-  pure { request, requestId := clientRequestId }
+  pure { request }
 
 instance : FromJson ProjectRequest where
   fromJson? json := do
@@ -483,9 +482,6 @@ instance : FromJson ProjectRequest where
 
 def ProjectRequest.op (request : ProjectRequest) : Op :=
   request.request.op
-
-def ProjectRequest.clientRequestId (request : ProjectRequest) : String :=
-  request.requestId
 
 /-- Attach one semantic request to a selected, authenticated workspace session. -/
 def ProjectRequest.attach

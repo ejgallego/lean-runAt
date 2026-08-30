@@ -49,7 +49,6 @@ live but stuck wrapper process. Longer bundle build locks intentionally use the 
 unbounded lock helper.
 -/
 private structure ProjectControl where
-  root : System.FilePath
   dir : System.FilePath
   registry : System.FilePath
 
@@ -57,98 +56,35 @@ private def projectControl
     (root : System.FilePath)
     (explicitControlDir? : Option System.FilePath := none) : IO ProjectControl := do
   let dir ← controlDirFor root explicitControlDir?
-  pure { root, dir, registry := dir / "beam-daemon.json" }
-
-private def privateControlDirRights : IO.FileRight := {
-  user := { read := true, write := true, execution := true }
-}
-
-private def privateControlDirMode : UInt32 :=
-  privateControlDirRights.flags
-
-private def invalidControlDirMessage (dir detail : String) : String :=
-  s!"unsafe Beam control directory {dir}: {detail}. Select a dedicated directory that is a real " ++
-    "directory with mode 0700; Beam does not change permissions on existing paths"
-
-private def permissionModeText (mode : UInt32) : String :=
-  let value := mode.toNat
-  s!"0{value / 64}{(value / 8) % 8}{value % 8}"
-
-private inductive ControlDirObservation where
-  | absent
-  | privateDir
-  | symlink
-  | nonPrivate (mode : UInt32)
-  | notDirectory
-
-/-- Inspect the exact control leaf without following a final symbolic link. -/
-private def observeControlDir (dir : System.FilePath) : IO ControlDirObservation := do
-  try
-    let metadata ← dir.symlinkMetadata
-    match metadata.type with
-    | .dir =>
-        let mode ← Beam.fileModeNoFollow dir
-        if mode == privateControlDirMode then
-          pure .privateDir
-        else
-          pure <| .nonPrivate mode
-    | .symlink => pure .symlink
-    | .file | .other => pure .notDirectory
-  catch
-  | .noFileOrDirectory .. => pure .absent
-  | err => throw err
+  pure { dir, registry := dir / "beam-daemon.json" }
 
 private def rejectControlDirObservation
-    (dir : System.FilePath) : ControlDirObservation → IO Unit
-  | .symlink =>
-      throw <| IO.userError <|
-        invalidControlDirMessage dir.toString "symbolic links are not accepted"
-  | .nonPrivate mode =>
-      throw <| IO.userError <|
-        invalidControlDirMessage dir.toString
-          s!"existing mode is {permissionModeText mode}, expected 0700"
-  | .notDirectory =>
-      throw <| IO.userError <|
-        invalidControlDirMessage dir.toString "the path is not a directory"
-  | .absent =>
-      throw <| IO.userError <|
-        invalidControlDirMessage dir.toString "the path disappeared during control preparation"
-  | .privateDir => pure ()
+    (dir : System.FilePath)
+    (observation : Beam.PrivateDirObservation) : IO Unit := do
+  Beam.requirePrivateDir "Beam session directory" dir observation
 
-/-- Accept an existing control path only when it is a real, account-private directory. -/
-private def validatePrivateControlDir (dir : System.FilePath) : IO Unit := do
-  rejectControlDirObservation dir (← observeControlDir dir)
+/-- Validate an existing session selection without creating it; absence remains observable. -/
+private def validateControlDirForObservation (dir : System.FilePath) : IO Unit := do
+  match ← Beam.observePrivateDir dir with
+  | .absent | .privateDir => pure ()
+  | observation => rejectControlDirObservation dir observation
+
+/-- Recognize absence without creating a session directory or accepting an unsafe existing leaf. -/
+private def sessionDescriptorAbsent (control : ProjectControl) : IO Bool := do
+  match ← Beam.observePrivateDir control.dir with
+  | .absent => pure true
+  | .privateDir =>
+      match ← readRegistryAt control.registry with
+      | .absent => pure true
+      | .legacy | .unsupported _ | .malformed _ | .current _ => pure false
+  | .symlink | .nonPrivate _ | .notDirectory => pure false
 
 /--
 Create a missing dedicated control leaf as private, or validate an existing path without mutating
 it. The directory is ready before Beam creates its lock or any capability-bearing descriptor.
 -/
 private def preparePrivateControlDir (dir : System.FilePath) : IO Unit := do
-  match ← observeControlDir dir with
-  | .privateDir => return
-  | .absent => pure ()
-  | observation => rejectControlDirObservation dir observation
-  if let some parent := dir.parent then
-    IO.FS.createDirAll parent
-  try
-    IO.FS.createDir dir
-  catch
-  | .alreadyExists .. =>
-      -- A concurrent owner may have created the leaf after our absent observation. Never adopt it
-      -- implicitly: apply the same read-only validation as any other existing path.
-      validatePrivateControlDir dir
-      return
-  | err => throw err
-  try
-    -- This chmod is restricted to the leaf created successfully by this invocation.
-    IO.setAccessRights dir privateControlDirRights
-    validatePrivateControlDir dir
-  catch err =>
-    try
-      IO.FS.removeDir dir
-    catch _ =>
-      pure ()
-    throw err
+  Beam.ensurePrivateDir "Beam session directory" dir
 
 /-- Supply project registry mutation only for the dynamic extent of the project control lock. -/
 private def withProjectControl
@@ -169,8 +105,9 @@ private def withExistingProjectControl
     (act : ProjectControl → IO Unit)
     (explicitControlDir? : Option System.FilePath := none) : IO Unit := do
   let control ← projectControl root explicitControlDir?
-  unless ← control.dir.isDir do
-    return
+  match ← Beam.observePrivateDir control.dir with
+  | .privateDir => pure ()
+  | .absent | .symlink | .nonPrivate _ | .notDirectory => return
   try
     withExistingLockTimeout (control.dir / "lock") (← projectControlLockTimeoutMs) do
       act control
@@ -271,7 +208,6 @@ def requestDaemonShutdown
 
 inductive RegistryUnsafeReason where
   | invalidIdentity
-  | wrongRegistryRoot (recordedRoot : String)
   | invalidEndpoint
   | endpointUnavailable
   | endpointUnrecognized (detail : String)
@@ -286,16 +222,17 @@ inductive RegistryObservation where
   | malformed (detail : String)
   | live (entry : SessionDescriptor)
   | draining (entry : SessionDescriptor)
+  | selectorMismatch (entry : SessionDescriptor)
   | unusable (entry : SessionDescriptor) (reason : RegistryUnsafeReason)
 
 /-- Select the unique descriptor binding for a canonical or filesystem-equivalent project root. -/
 def sessionWorkspaceForRoot?
     (entry : SessionDescriptor)
     (root : System.FilePath) : IO (Option WorkspaceBinding) := do
-  for workspace in entry.workspaces do
-    if ← Beam.sameFilePath (System.FilePath.mk workspace.root) root then
-      return some workspace
-  pure none
+  if ← Beam.sameFilePath (System.FilePath.mk entry.workspace.root) root then
+    pure (some entry.workspace)
+  else
+    pure none
 
 private def observeProjectRegistryAt
     (root registry : System.FilePath) : IO RegistryObservation := do
@@ -308,7 +245,7 @@ private def observeProjectRegistryAt
       if entry.daemonId.isEmpty || entry.capability.isEmpty then
         return .unusable entry .invalidIdentity
       let some workspace ← sessionWorkspaceForRoot? entry root
-        | return .unusable entry (.wrongRegistryRoot entry.rootSummary)
+        | return .selectorMismatch entry
       if entry.lifecycle == .draining then
         return .draining entry
       let some endpoint := registryEndpoint? entry
@@ -324,10 +261,16 @@ private def observeProjectRegistryAt
       | .wrongGeneration daemonRoot =>
           pure <| .unusable entry (.wrongGeneration daemonRoot)
 
+private def observeProjectControl
+    (root : System.FilePath)
+    (control : ProjectControl) : IO RegistryObservation := do
+  validateControlDirForObservation control.dir
+  observeProjectRegistryAt root control.registry
+
 def observeProjectRegistry
     (root : System.FilePath)
     (explicitControlDir? : Option System.FilePath := none) : IO RegistryObservation := do
-  observeProjectRegistryAt root (← registryPathFor root explicitControlDir?)
+  observeProjectControl root (← projectControl root explicitControlDir?)
 
 private def requestedPortNat? (opts : CliOptions) : Option Nat :=
   opts.requestedPort?.map (·.toNat)
@@ -665,16 +608,15 @@ private def registryEntryFor
     pid
     ownerPid := ownerPid.toNat
     port?
-    workspaces := #[{
+    workspace := {
       workspaceId := projectDaemonWorkspaceId
       root := desired.root.toString
-      configHash := desired.configHash
       leanCmd? := desired.leanCmd?
       plugin? := desired.plugin?.map (·.toString)
       rocqCmd? := desired.rocqCmd?
       toolchain? := desired.toolchain?
       bundleId? := some desired.bundleId
-    }]
+    }
     configHash := desired.configHash
     clientBin? := some desired.clientBin.toString
     daemonBin? := some desired.daemonBin.toString
@@ -811,7 +753,6 @@ structure SelectedProjectDaemon where
 
 def RegistryUnsafeReason.message : RegistryUnsafeReason → String
   | .invalidIdentity => "registry identity or capability is empty"
-  | .wrongRegistryRoot recordedRoot => s!"registry records another root: {recordedRoot}"
   | .invalidEndpoint => "registry endpoint is invalid"
   | .endpointUnavailable => "the recorded daemon endpoint is unavailable"
   | .endpointUnrecognized detail => s!"the recorded endpoint is not a recognized Beam generation: {detail}"
@@ -819,87 +760,143 @@ def RegistryUnsafeReason.message : RegistryUnsafeReason → String
   | .wrongGeneration daemonRoot =>
       s!"the recorded endpoint serves another Beam generation for {daemonRoot}"
 
-private def activeOwnerMessage (root : System.FilePath) (entry : SessionDescriptor) : String :=
-  s!"Beam session for {root} is already owned by wrapper pid {entry.ownerPid}; " ++
-    "interrupt that 'lean-beam ensure --hold' process before starting another owner"
+private def activeOwnerMessage (root : System.FilePath) : String :=
+  s!"Beam session for {root} is already owned by a foreground process; " ++
+    "interrupt that 'lean-beam serve' process before starting another owner"
 
 private def configMismatchMessage
     (root : System.FilePath)
+    (sessionDir : System.FilePath)
     (entry : SessionDescriptor)
-    (expectedHash : String) : String :=
+    (expectedHash : String)
+    (backend : Backend) : String :=
   s!"the live Beam session for {root} uses configuration {entry.configHash}, " ++
     s!"but this command requires {expectedHash}; the current owner was preserved. " ++
-    "Interrupt its 'lean-beam ensure --hold' process, then start a new owner with the desired configuration"
+    "Interrupt its foreground owner, then start a new one with the desired configuration:\n" ++
+    wrapperSessionCommand root sessionDir (.serve backend)
 
 private def drainingOwnerMessage (root : System.FilePath) (entry : SessionDescriptor) : String :=
   s!"Beam session {entry.daemonId} for {root} is draining; " ++
     "wait for its foreground owner to exit before starting or attaching to another session"
 
-private def registryRecoveryMessage (root : System.FilePath) (detail : String) : String :=
+def sessionSelectorMismatchMessage
+    (root sessionDir : System.FilePath)
+    (entry : SessionDescriptor) : String :=
+  let recordedRoot := entry.workspace.root
+  s!"sessionSelectorMismatch: selected workspace {root}, but Beam session {entry.daemonId} " ++
+    s!"in {sessionDir} belongs to workspace {recordedRoot}. Use the recorded exact selector:\n" ++
+    wrapperSessionCommand (System.FilePath.mk recordedRoot) sessionDir .status
+
+private def registryRecoveryMessage
+    (root : System.FilePath)
+    (detail : String) : String :=
   s!"Beam cannot safely use or replace the daemon registry for {root}: {detail}. " ++
     "The session remains fenced; preserve its descriptor and use explicit recovery with the same " ++
-    "--root and --control-dir selection after stopping the matching owner or daemon"
+    "--root and --session-dir selection after stopping the matching owner or daemon"
 
 private def generationRecoveryMessage
     (root : System.FilePath)
+    (sessionDir : System.FilePath)
     (entry : SessionDescriptor)
     (reason : RegistryUnsafeReason) : String :=
   let message := registryRecoveryMessage root reason.message
-  match reason with
-  | .wrongRegistryRoot recordedRoots =>
-      message ++ "; recovery must select one of the descriptor's recorded workspace roots " ++
-        s!"({recordedRoots}) with the same --control-dir; the selected root {root} cannot recover " ++
-        s!"session {entry.daemonId}"
-  | _ =>
-      message ++ "; run " ++
-        s!"'lean-beam --root {root} recover --generation {entry.daemonId}' when recovery is safe"
+  let recovery := wrapperSessionCommand root sessionDir
+    (.recoverGeneration entry.daemonId)
+  message ++ s!"; when recovery is safe, run:\n{recovery}"
 
 private def registryReadRecoveryMessage
     (root : System.FilePath)
+    (sessionDir : System.FilePath)
     (registryRead : RegistryRead) : String :=
   registryRecoveryMessage root
-      (registryRead.detail?.getD s!"unexpected registry state '{registryRead.status}'") ++
-    "; opaque state can be quarantined explicitly with " ++
-    "'lean-beam --root ROOT recover --force'"
+    (registryRead.detail?.getD s!"unexpected registry state '{registryRead.status}'") ++
+    "; opaque state can be quarantined explicitly with:\n" ++
+    wrapperSessionCommand root sessionDir .recoverForce
 
-private def markRegistryDraining (control : ProjectControl) (entry : SessionDescriptor) : IO Unit := do
+private inductive RegistryDrainTransition where
+  | committed
+  | alreadyDraining
+  | changedUnderfoot
+
+private def markRegistryDraining
+    (control : ProjectControl)
+    (entry : SessionDescriptor) : IO RegistryDrainTransition := do
   match ← readRegistryAt control.registry with
   | .current current =>
-      if sameRegistryGeneration current entry && current.lifecycle == .live then
+      if !sameRegistryGeneration current entry then
+        pure .changedUnderfoot
+      else if current.lifecycle == .draining then
+        pure .alreadyDraining
+      else
         writeExistingRegistry control { current with lifecycle := .draining }
-  | .absent | .legacy | .unsupported _ | .malformed _ => pure ()
+        pure .committed
+  | .absent | .legacy | .unsupported _ | .malformed _ => pure .changedUnderfoot
 
 private inductive ShutdownPlan where
   | none
-  | request (entry : SessionDescriptor)
+  | alreadyStopping
+  | committed (entry : SessionDescriptor)
+
+/-- Delivery of the authenticated shutdown request after the draining fence was committed. -/
+inductive ProjectDaemonStopDelivery where
+  | acknowledged
+  | rejected (failure : ResponseFailure)
+  | failed (failure : BrokerClientFailure)
+
+/-- Authoritative state committed by an explicit wrapper-session stop operation. -/
+inductive ProjectDaemonStopResult where
+  | absent
+  | alreadyStopping
+  | stopping (delivery : ProjectDaemonStopDelivery)
 
 /-- Fence and request shutdown of the exact wrapper-owned generation without PID signalling. -/
 def shutdownRegisteredProjectDaemon
     (root : System.FilePath)
     (explicitControlDir? : Option System.FilePath := none) :
-    IO (Except BrokerClientFailure (Option Response)) := do
+    IO ProjectDaemonStopResult := do
+  let selected ← projectControl root explicitControlDir?
+  if ← sessionDescriptorAbsent selected then
+    return .absent
   let plan : ShutdownPlan ← withProjectControl root
       (explicitControlDir? := explicitControlDir?) fun control => do
     match ← observeProjectRegistryAt root control.registry with
     | .absent => pure ShutdownPlan.none
     | .live entry =>
-        markRegistryDraining control entry
-        pure <| ShutdownPlan.request entry
-    | .draining entry => pure <| ShutdownPlan.request entry
+        match ← markRegistryDraining control entry with
+        | .committed => pure <| ShutdownPlan.committed entry
+        | .alreadyDraining => pure ShutdownPlan.alreadyStopping
+        | .changedUnderfoot =>
+            throw <| IO.userError <|
+              "Beam session descriptor changed while committing its draining fence; " ++
+                "the shutdown request was not sent"
+    | .draining _ => pure ShutdownPlan.alreadyStopping
     | .legacy =>
-        throw <| IO.userError <| registryReadRecoveryMessage root .legacy
+        throw <| IO.userError <| registryReadRecoveryMessage root control.dir .legacy
     | .unsupported schemaVersion =>
-        throw <| IO.userError <| registryReadRecoveryMessage root (.unsupported schemaVersion)
+        throw <| IO.userError <|
+          registryReadRecoveryMessage root control.dir (.unsupported schemaVersion)
     | .malformed detail =>
-        throw <| IO.userError <| registryReadRecoveryMessage root (.malformed detail)
+        throw <| IO.userError <| registryReadRecoveryMessage root control.dir (.malformed detail)
+    | .selectorMismatch entry =>
+        throw <| IO.userError <|
+          sessionSelectorMismatchMessage root control.dir entry
     | .unusable entry reason =>
-        throw <| IO.userError <| generationRecoveryMessage root entry reason
+        throw <| IO.userError <| generationRecoveryMessage root control.dir entry reason
   match plan with
-  | ShutdownPlan.none => pure <| .ok none
-  | ShutdownPlan.request entry =>
-      let some endpoint := registryEndpoint? entry
-        | return .error <| .invalidResponse "draining Beam registry has no valid endpoint"
-      pure <| (← requestDaemonShutdown endpoint entry.capability).map some
+  | .none => pure .absent
+  | .alreadyStopping => pure .alreadyStopping
+  | .committed entry =>
+      let delivery ←
+        match registryEndpoint? entry with
+        | none =>
+            pure <| ProjectDaemonStopDelivery.failed <|
+              .invalidResponse "draining Beam session descriptor has no valid endpoint"
+        | some endpoint =>
+            match ← requestDaemonShutdown endpoint entry.capability with
+            | .ok (.successResult ..) => pure .acknowledged
+            | .ok (.errorResult failure) => pure <| .rejected failure
+            | .error failure => pure <| .failed failure
+      pure <| .stopping delivery
 
 structure RecoveryResult where
   recovered : Bool
@@ -933,6 +930,9 @@ def recoverProjectDaemon
     (generation? : Option String)
     (forceOpaque : Bool)
     (explicitControlDir? : Option System.FilePath := none) : IO RecoveryResult := do
+  let selected ← projectControl root explicitControlDir?
+  if ← sessionDescriptorAbsent selected then
+    return { recovered := false, reason? := some "absent" }
   withProjectControl root (explicitControlDir? := explicitControlDir?) fun control => do
     match ← readRegistryAt control.registry with
     | .absent =>
@@ -947,7 +947,7 @@ def recoverProjectDaemon
         let some workspace ← sessionWorkspaceForRoot? entry root
           | throw <| IO.userError <|
               s!"selected root {root} is not a workspace in session {entry.daemonId}; " ++
-              s!"recorded workspace roots: {entry.rootSummary}"
+              s!"recorded workspace root: {entry.workspace.root}"
         if ← registeredGenerationResponds root workspace entry then
           throw <| IO.userError <|
             s!"Beam session {entry.daemonId} still responds; stop its foreground owner or use authenticated shutdown"
@@ -995,6 +995,9 @@ def ProjectDaemonOwner.exitCode? (owner : ProjectDaemonOwner) : IO (Option UInt3
         owner.exitCodeRef.set (some exitCode)
       pure exitCode?
 
+def ProjectDaemonOwner.generation (owner : ProjectDaemonOwner) : String :=
+  owner.daemonId
+
 /-- Whether this owner generation is still the one published for its project. -/
 def ProjectDaemonOwner.registered (owner : ProjectDaemonOwner) : IO Bool := do
   match ← readRegistryAt (owner.controlDir / "beam-daemon.json") with
@@ -1003,35 +1006,45 @@ def ProjectDaemonOwner.registered (owner : ProjectDaemonOwner) : IO Bool := do
         current.capability == owner.client.capability && current.lifecycle == .live)
   | .absent | .legacy | .unsupported _ | .malformed _ => pure false
 
-private def missingOwnerCommand : Option Backend → String
-  | some .rocq => "lean-beam ensure rocq --hold"
-  | some .lean | none => "lean-beam ensure --hold"
+private def missingOwnerCommand : Option Backend → WrapperSessionCommand
+  | some .rocq => .serve .rocq
+  | some .lean | none => .serve .lean
 
-private def missingOwnerMessage (root : System.FilePath) (backend? : Option Backend) : String :=
+private def missingOwnerMessage
+    (root sessionDir : System.FilePath)
+    (backend? : Option Backend) : String :=
+  let command := wrapperSessionCommand root sessionDir (missingOwnerCommand backend?)
   s!"no live Beam session owner is registered for {root}; " ++
-    s!"start '{missingOwnerCommand backend?}' for this project and keep it running while using wrapper commands"
+    s!"start this foreground owner and keep it running while using wrapper commands:\n{command}"
 
 private def startOwnedProjectDaemon
     (control : ProjectControl)
     (desired : DesiredConfig)
+    (backend : Backend)
     (opts : CliOptions) : IO OwnedProjectDaemon := do
   match ← observeProjectRegistryAt desired.root control.registry with
   | .absent => pure ()
   | .live entry =>
       if entry.configHash == desired.configHash then
-        throw <| IO.userError (activeOwnerMessage desired.root entry)
+        throw <| IO.userError (activeOwnerMessage desired.root)
       else
-        throw <| IO.userError (configMismatchMessage desired.root entry desired.configHash)
+        throw <| IO.userError
+          (configMismatchMessage desired.root control.dir entry desired.configHash backend)
   | .draining entry => throw <| IO.userError (drainingOwnerMessage desired.root entry)
   | .legacy =>
-      throw <| IO.userError <| registryReadRecoveryMessage desired.root .legacy
+      throw <| IO.userError <| registryReadRecoveryMessage desired.root control.dir .legacy
   | .unsupported schemaVersion =>
       throw <| IO.userError <|
-        registryReadRecoveryMessage desired.root (.unsupported schemaVersion)
+        registryReadRecoveryMessage desired.root control.dir (.unsupported schemaVersion)
   | .malformed detail =>
-      throw <| IO.userError <| registryReadRecoveryMessage desired.root (.malformed detail)
+      throw <| IO.userError <|
+        registryReadRecoveryMessage desired.root control.dir (.malformed detail)
+  | .selectorMismatch entry =>
+      throw <| IO.userError <|
+        sessionSelectorMismatchMessage desired.root control.dir entry
   | .unusable entry reason =>
-      throw <| IO.userError <| generationRecoveryMessage desired.root entry reason
+      throw <| IO.userError <|
+        generationRecoveryMessage desired.root control.dir entry reason
   let (endpoint, entry, child) ← startDaemonEntry desired opts control.dir
   try
     writeRegistry control entry
@@ -1083,28 +1096,69 @@ private def attemptCleanup (act : IO Unit) : IO Unit := do
   catch _ =>
     pure ()
 
+private inductive OwnedDaemonFinish where
+  | exitedCleanly
+  | forcedReaped
+  | exitedAbnormally (exitCode : UInt32)
+  | unreaped
+
+private def classifyOwnedDaemonExit (exitCode : UInt32) : OwnedDaemonFinish :=
+  if exitCode == 0 then .exitedCleanly else .exitedAbnormally exitCode
+
+private def forceOwnedDaemonChild
+    {cfg : IO.Process.StdioConfig}
+    (child : IO.Process.Child cfg)
+    (exitCodeRef : IO.Ref (Option UInt32)) : IO OwnedDaemonFinish := do
+  let killSent ←
+    try
+      child.kill
+      pure true
+    catch _ =>
+      pure false
+  attemptCleanup <| waitForOwnedDaemonExit child exitCodeRef 20
+  match ← exitCodeRef.get with
+  | some exitCode =>
+      if killSent then pure .forcedReaped else pure <| classifyOwnedDaemonExit exitCode
+  | none => pure .unreaped
+
 private def finishOwnedDaemonChild
     (owned : OwnedProjectDaemon)
-    (exitCodeRef : IO.Ref (Option UInt32)) : IO Bool := do
+    (exitCodeRef : IO.Ref (Option UInt32)) : IO OwnedDaemonFinish := do
+  if let some exitCode ← exitCodeRef.get then
+    return classifyOwnedDaemonExit exitCode
   try
     let child ← closeDaemonOwnerPipe owned.child
     attemptCleanup <| waitForOwnedDaemonExit child exitCodeRef 100
-    if (← exitCodeRef.get).isNone then
-      -- `startDaemon` uses `setsid`; Lean's retained child handle therefore kills the complete
-      -- daemon process group rather than only the broker PID.
-      attemptCleanup child.kill
-      attemptCleanup <| waitForOwnedDaemonExit child exitCodeRef 20
+    match ← exitCodeRef.get with
+    | some exitCode => pure <| classifyOwnedDaemonExit exitCode
+    | none =>
+        -- `startDaemon` uses `setsid`; Lean's retained child handle therefore kills the complete
+        -- daemon process group rather than only the broker PID.
+        forceOwnedDaemonChild child exitCodeRef
   catch _ =>
-    attemptCleanup owned.child.kill
-    attemptCleanup <| waitForOwnedDaemonExit owned.child exitCodeRef 20
-  pure (← exitCodeRef.get).isSome
+    forceOwnedDaemonChild owned.child exitCodeRef
 
 private def markOwnedRegistryDraining
     (root controlDir : System.FilePath)
     (entry : SessionDescriptor) : IO Unit := do
   try
     withExistingProjectControl root (explicitControlDir? := some controlDir) fun control =>
-      markRegistryDraining control entry
+      discard <| markRegistryDraining control entry
+  catch _ =>
+    pure ()
+
+private def restoreOwnedRegistryRecoveryFence
+    (root controlDir : System.FilePath)
+    (entry : SessionDescriptor) : IO Unit := do
+  try
+    withExistingProjectControl root (explicitControlDir? := some controlDir) fun control => do
+      match ← readRegistryAt control.registry with
+      | .current current =>
+          if sameRegistryGeneration current entry && current.lifecycle == .draining then
+            -- A current `live` descriptor whose endpoint no longer responds projects to the public
+            -- `recoveryRequired` state. Restore that conservative fence after a failed drain.
+            writeExistingRegistry control { current with lifecycle := .live }
+      | .absent | .legacy | .unsupported _ | .malformed _ => pure ()
   catch _ =>
     pure ()
 
@@ -1127,13 +1181,19 @@ private def finishOwnedProjectDaemon
     | .current current =>
         pure (sameRegistryGeneration current owned.entry && current.lifecycle == .draining)
     | .absent | .legacy | .unsupported _ | .malformed _ => pure false
-  markOwnedRegistryDraining root controlDir owned.entry
   if exitedBeforeOwnerCleanup && !registryWasDraining then
     -- An unexpected daemon exit is not evidence that its complete process tree disappeared. Keep
-    -- the exact generation fenced for explicit, non-signalling recovery.
+    -- the exact live generation fenced so observation projects it to recovery-required state.
     pure ()
-  else if ← finishOwnedDaemonChild owned exitCodeRef then
-      removeOwnedRegistry root controlDir owned.entry
+  else
+    markOwnedRegistryDraining root controlDir owned.entry
+    match ← finishOwnedDaemonChild owned exitCodeRef with
+    | .exitedCleanly | .forcedReaped =>
+        removeOwnedRegistry root controlDir owned.entry
+    | .exitedAbnormally _ =>
+        restoreOwnedRegistryRecoveryFence root controlDir owned.entry
+    | .unreaped =>
+        pure ()
 
 def withProjectDaemonOwner
     (home root : System.FilePath)
@@ -1146,7 +1206,7 @@ def withProjectDaemonOwner
   preparePrivateControlDir controlDir
   let desired ← desiredConfig home root backend
   let owned ← withProjectControl root (explicitControlDir? := some controlDir) fun control =>
-    startOwnedProjectDaemon control desired opts
+    startOwnedProjectDaemon control desired backend opts
   let exitCodeRef ← IO.mkRef (none : Option UInt32)
   try
     act {
@@ -1165,21 +1225,25 @@ private def lookupProjectDaemon
     (backend? : Option Backend := none)
     (explicitControlDir? : Option System.FilePath := none) : IO SelectedProjectDaemon := do
   let control ← projectControl root explicitControlDir?
-  match ← observeProjectRegistryAt root control.registry with
+  match ← observeProjectControl root control with
   | .live entry =>
       let workspace ← selectWorkspaceBackend root entry backend?
       pure { client := ← projectDaemonClient entry workspace control.dir, workspace }
   | .absent =>
-      throw <| IO.userError (missingOwnerMessage root backend?)
+      throw <| IO.userError (missingOwnerMessage root control.dir backend?)
   | .draining entry => throw <| IO.userError (drainingOwnerMessage root entry)
   | .legacy =>
-      throw <| IO.userError <| registryReadRecoveryMessage root .legacy
+      throw <| IO.userError <| registryReadRecoveryMessage root control.dir .legacy
   | .unsupported schemaVersion =>
-      throw <| IO.userError <| registryReadRecoveryMessage root (.unsupported schemaVersion)
+      throw <| IO.userError <|
+        registryReadRecoveryMessage root control.dir (.unsupported schemaVersion)
   | .malformed detail =>
-      throw <| IO.userError <| registryReadRecoveryMessage root (.malformed detail)
+      throw <| IO.userError <| registryReadRecoveryMessage root control.dir (.malformed detail)
+  | .selectorMismatch entry =>
+      throw <| IO.userError <|
+        sessionSelectorMismatchMessage root control.dir entry
   | .unusable entry reason =>
-      throw <| IO.userError <| generationRecoveryMessage root entry reason
+      throw <| IO.userError <| generationRecoveryMessage root control.dir entry reason
 
 def withProjectDaemon
     (root : System.FilePath)

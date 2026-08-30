@@ -7,6 +7,7 @@ Author: Emilio J. Gallego Arias
 import Lean
 import Beam.JsonPretty
 import Beam.Path
+import Beam.System
 
 open Lean
 
@@ -796,6 +797,9 @@ private def writePreparedBundle
   if input.bundle == .none then
     pure result
   else
+    if opts.outputDir?.isNone then
+      if let some root := opts.root? then
+        Beam.ensurePrivateDir "Beam project state directory" (root / ".beam")
     let bundleDir ← resolveBundleDir input collection opts
     IO.FS.createDirAll bundleDir
     let home? ← if input.redact then IO.getEnv "HOME" else pure none

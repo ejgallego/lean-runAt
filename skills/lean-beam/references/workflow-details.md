@@ -98,7 +98,7 @@ batch-only.
 
 Beam assumes Lake workspace configuration remains unchanged while the Lean server is running. After
 editing a lakefile, manifest, package override, `lean-toolchain`, Lean options, plugins, or dynamic
-libraries, run `lean-beam shutdown` before the next command that uses the Lean server.
+libraries, run `lean-beam --root ROOT stop` before the next command that uses the Lean server.
 `lean-beam refresh` only reopens a file within the current server and is not sufficient. Beam does
 not detect this configuration drift.
 
@@ -210,7 +210,7 @@ What is not a valid checkpoint target:
 Treat `fileProgress` as observability, not as proof that every call is a full barrier.
 
 ```bash
-# with `lean-beam ensure --hold` running in another process
+# with `lean-beam serve` running in another process
 sync_out="$(lean-beam sync "Foo.lean")"
 printf '%s\n' "$sync_out"
 version="$(printf '%s\n' "$sync_out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["version"])')"
@@ -308,7 +308,7 @@ If you edit `A.lean` and `B.lean` imports `A.lean`, a successful probe in `B.lea
 itself to prove the dependency cone is fresh.
 
 ```bash
-# with `lean-beam ensure --hold` running in another process
+# with `lean-beam serve` running in another process
 # make a real edit in A.lean and save the source file to disk
 lean-beam sync "A.lean"
 b_update="$(lean-beam update "B.lean")"
@@ -334,7 +334,7 @@ Use `lake build` when:
 For the one-time local completion fallback, discard Beam checkpoints before the batch build:
 
 ```bash
-lean-beam shutdown
+lean-beam --root ROOT stop
 lake clean
 lake build
 ```

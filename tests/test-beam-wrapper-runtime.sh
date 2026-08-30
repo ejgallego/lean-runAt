@@ -142,7 +142,7 @@ beam_wrapper_start_owner "$primary_root"
 primary_owner_pid="$beam_wrapper_last_owner_pid"
 (
   cd "$primary_root"
-  "$beam_script" ensure lean > /dev/null
+  "$beam_script" stats > /dev/null
 )
 
 primary_registry="$(beam_wrapper_registry_path "$primary_root")"
@@ -362,7 +362,7 @@ PY
   fi
   expect_sigint_cancelled "anonymous non-progress wrapper SIGINT path" "$interrupt_quiet_anon_out" "$interrupt_quiet_anon_err" ""
 
-  "$beam_script" --root "$signal_root" shutdown > /dev/null 2>&1 || true
+  "$beam_script" --root "$signal_root" stop > /dev/null 2>&1 || true
 )
 wait_for_exit "$signal_owner_pid" "first signal-test session owner" 120 0.1
 wait "$signal_owner_pid"
@@ -456,7 +456,7 @@ signal_owner_pid="$beam_wrapper_last_owner_pid"
     exit 1
   fi
 
-  "$beam_script" --root "$signal_root" shutdown > /dev/null 2>&1 || true
+  "$beam_script" --root "$signal_root" stop > /dev/null 2>&1 || true
 )
 wait_for_exit "$signal_owner_pid" "second signal-test session owner" 120 0.1
 wait "$signal_owner_pid"
@@ -465,7 +465,7 @@ beam_wrapper_unregister_pid "$signal_owner_pid"
 beam_wrapper_start_owner "$other_root"
 (
   cd "$other_root"
-  "$beam_script" ensure lean > /dev/null
+  "$beam_script" stats > /dev/null
 )
 
 other_registry="$(beam_wrapper_registry_path "$other_root")"
@@ -510,7 +510,7 @@ fi
 
 (
   cd "$primary_root"
-  "$beam_script" shutdown > /dev/null
+  "$beam_script" --root "$primary_root" stop > /dev/null
 )
 wait_for_exit "$primary_owner_pid" "primary session owner" 120 0.1
 wait "$primary_owner_pid"

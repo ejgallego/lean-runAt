@@ -36,7 +36,7 @@ Rules:
 ## Minimal branching example
 
 ```bash
-# with `lean-beam ensure --hold` running in another process
+# with `lean-beam serve` running in another process
 root="$(lean-beam run-at-handle "Proofs.lean" <version-from-update> 42 6 "constructor")"
 
 # writing handles to files avoids stdin conflicts in larger shell scripts
@@ -57,7 +57,7 @@ Use this when you want to explore multiple children from the same preserved basi
 ## Minimal linear playout example
 
 ```bash
-# with `lean-beam ensure --hold` running in another process
+# with `lean-beam serve` running in another process
 root="$(lean-beam run-at-handle "Proofs.lean" <version-from-update> 42 6 "constructor")"
 # file-backed handles are often easier in longer shell loops
 printf '%s\n' "$root" > root.handle.json
@@ -87,7 +87,7 @@ Use this when you want one evolving playout path instead of a preserved branch p
 Concrete shell sketch:
 
 ```bash
-# with `lean-beam ensure --hold` running in another process
+# with `lean-beam serve` running in another process
 root="$(lean-beam run-at-handle "Proofs.lean" <version-from-update> 42 6 "constructor")"
 
 child_a="$(printf '%s\n' "$root" | lean-beam run-with "Proofs.lean" - "constructor")"
@@ -102,7 +102,7 @@ printf '%s\n' "$child_b" | lean-beam release "Proofs.lean" -
 The same sketch with the helper:
 
 ```bash
-# with `lean-beam ensure --hold` running in another process
+# with `lean-beam serve` running in another process
 root="$(lean-beam-search mint "Proofs.lean" <version-from-update> 42 6 "constructor")"
 child_a="$(printf '%s\n' "$root" | lean-beam-search branch "Proofs.lean" "constructor")"
 child_b="$(printf '%s\n' "$root" | lean-beam-search branch "Proofs.lean" "aesop")"

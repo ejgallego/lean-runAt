@@ -20,6 +20,27 @@ def regularNonSymlinkFile (path : System.FilePath) : IO Bool := do
 def resolveExistingPath (path : System.FilePath) : IO System.FilePath :=
   IO.FS.realPath path
 
+/--
+Resolve the existing prefix of `path`, then append its missing suffix.
+
+This gives a path selected before creation the same canonical spelling it will have afterward. In
+particular, aliases in an existing ancestor such as macOS `/tmp` are resolved even when the selected
+leaf does not exist yet.
+-/
+partial def resolvePathForCreation (path : System.FilePath) : IO System.FilePath := do
+  try
+    resolveExistingPath path
+  catch
+  | .noFileOrDirectory .. =>
+      let some parent := path.parent
+        | throw <| IO.userError s!"cannot resolve a creation parent for '{path}'"
+      let some name := path.fileName
+        | throw <| IO.userError s!"cannot resolve a creation leaf for '{path}'"
+      -- Resolve before normalizing: lexical normalization would give the wrong meaning to `..`
+      -- after an existing symbolic-link ancestor. Normalize only the rebuilt canonical path.
+      pure <| ((← resolvePathForCreation parent) / name).normalize
+  | err => throw err
+
 /-- Resolve `path`, interpreting relative paths under an already-resolved `root`. -/
 def resolvePathAgainstRoot (root path : System.FilePath) : IO System.FilePath :=
   resolveExistingPath <| if path.isAbsolute then path else root / path

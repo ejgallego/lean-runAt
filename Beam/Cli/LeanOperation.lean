@@ -15,52 +15,24 @@ open Beam.Broker
 private def rootText (root : System.FilePath) : String :=
   root.toString
 
-private def storeHandleFlag (storeHandle : Bool) : Option Bool :=
-  if storeHandle then some true else none
-
 def leanRunAtRequest
     (root : System.FilePath)
     (path : String)
     (version : Nat)
     (line character : Nat)
-    (text? : Option String)
+    (text : String)
     (storeHandle : Bool := false) : Request :=
-  match text? with
-  | some text =>
-      ({ path, version, line, character, text } : Beam.Lean.RunAtInput).toBrokerRequest
-        (rootText root) (storeHandle := storeHandle)
-  | none =>
-      {
-        op := .runAt
-        backend := .lean
-        root? := some (rootText root)
-        path? := some path
-        version? := some version
-        line? := some line
-        character? := some character
-        storeHandle? := storeHandleFlag storeHandle
-      }
+  ({ path, version, line, character, text } : Beam.Lean.RunAtInput).toBrokerRequest
+    (rootText root) (storeHandle := storeHandle)
 
 def leanRunWithRequest
     (root : System.FilePath)
     (path : String)
     (handle : Handle)
-    (text? : Option String)
+    (text : String)
     (linear : Bool := false) : Request :=
-  match text? with
-  | some text =>
-      ({ path, handle, text } : Beam.Lean.RunWithInput).toBrokerRequest
-        (rootText root) (linear := linear)
-  | none =>
-      {
-        op := .runWith
-        backend := .lean
-        root? := some (rootText root)
-        path? := some path
-        handle? := some handle
-        storeHandle? := some true
-        linear? := some linear
-      }
+  ({ path, handle, text } : Beam.Lean.RunWithInput).toBrokerRequest
+    (rootText root) (linear := linear)
 
 def leanReleaseRequest (root : System.FilePath) (path : String) (handle : Handle) : Request :=
   ({ path, handle } : Beam.Lean.ReleaseInput).toBrokerRequest (rootText root)

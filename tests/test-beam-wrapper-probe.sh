@@ -17,7 +17,7 @@ beam_wrapper_start_owner "$project_root"
 
 (
   cd "$project_root"
-  "$beam_script" ensure lean > /dev/null
+  "$beam_script" stats > /dev/null
 )
 
 registry_path="$(beam_wrapper_registry_path "$project_root")"
@@ -25,7 +25,7 @@ beam_wrapper_expect_file "$registry_path"
 
 pid1="$(read_json_field "$registry_path" pid)"
 port1="$(read_json_field "$registry_path" port)"
-root1="$(read_json_field "$registry_path" workspaces.0.root)"
+root1="$(read_json_field "$registry_path" workspace.root)"
 client1="$(read_json_field "$registry_path" clientBin 2>/dev/null || true)"
 if [ -z "$client1" ]; then
   client1="$client"
@@ -41,7 +41,7 @@ fi
 
 (
   cd "$project_root"
-  "$beam_script" ensure lean > /dev/null
+  "$beam_script" stats > /dev/null
   command_version="$(beam_wrapper_update_version CommandA "$beam_script" lean-update CommandA.lean)"
   signature_version="$(beam_wrapper_update_version SignatureHelp "$beam_script" lean-update SignatureHelp.lean)"
   position_empty_version="$(beam_wrapper_update_version PositionEmptyLine "$beam_script" lean-update PositionEmptyLine.lean)"

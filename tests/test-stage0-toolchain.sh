@@ -67,13 +67,13 @@ assert_output_contains "stage0 custom toolchain doctor output" "$doctor_out" 'bu
 
 stage0_owner_err="$tmp_root/stage0-owner.err"
 ELAN_HOME="$host_elan_home" \
-  "$install_home/.local/bin/lean-beam" --root "$project_root" ensure --hold \
+  "$install_home/.local/bin/lean-beam" --root "$project_root" serve \
   >/dev/null 2>"$stage0_owner_err" &
 stage0_owner_pid="$!"
-if ! wait_for_file_text "$stage0_owner_err" "owning Beam session" "stage0 session owner" 600 0.1; then
+if ! wait_for_file_text "$stage0_owner_err" "serving Beam session" "stage0 session owner" 600 0.1; then
   exit 1
 fi
 ELAN_HOME="$host_elan_home" \
-  "$install_home/.local/bin/lean-beam" --root "$project_root" shutdown >/dev/null
+  "$install_home/.local/bin/lean-beam" --root "$project_root" stop >/dev/null
 wait_for_exit "$stage0_owner_pid" "stage0 session owner" 120 0.1
 wait "$stage0_owner_pid"

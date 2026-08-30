@@ -23,7 +23,7 @@ private def usage : String :=
     "usage: beam-client [--port N] request <json|-> | request-stream <json|->",
     "",
     "beam-client is raw port-oriented maintainer/debug tooling.",
-    "For wrapper sessions, use: lean-beam --root PATH [--control-dir DIR] request-stream <json|->",
+    "For wrapper sessions, use: lean-beam --root PATH [--session-dir DIR] request-stream <json|->",
     "That supported machine interface selects the session descriptor and injects routing/authentication.",
     "",
     "request prints the final response on stdout and formats streamed diagnostics for humans on stderr.",

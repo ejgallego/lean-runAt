@@ -126,6 +126,11 @@ private def checkToolDescriptors : IO Unit := do
     let projectedTool : Beam.Mcp.ToolName := .leanOperation op
     require s!"Lean operation {repr op} should derive MCP key from operation key"
       (projectedTool.key == "lean_" ++ op.key)
+    require s!"shared Lean operation {repr op} should not contain MCP transport guidance"
+      (!op.description.contains "tools/call" && !op.description.contains "progressToken")
+    require s!"projected MCP operation {repr op} should advertise MCP progress controls"
+      (projectedTool.descriptor.description.contains "tools/call" &&
+        projectedTool.descriptor.description.contains "_meta.progressToken")
     let matchingTools := Beam.Mcp.ToolName.leanOperationTools.filter (fun tool =>
       tool == .leanOperation op)
     require s!"Lean operation {repr op} should have exactly one MCP tool"

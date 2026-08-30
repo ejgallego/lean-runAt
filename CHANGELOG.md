@@ -33,10 +33,21 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 
 ### Changed
 
-- Wrapper daemons now have explicit session ownership: only `lean-beam ensure --hold` starts a
-  generation, ordinary wrapper commands attach to it, `--port` is accepted only by that owner-start
-  command, and holder exit cancels admitted requests before closing the daemon through an inherited
-  pipe without heartbeat leases or time-based retirement
+- Wrapper lifecycle commands now use the explicit `serve`, `status`, and `stop` vocabulary;
+  `stop` and `recover` require `--root`, alternate selectors use `--session-dir`, and wrapper
+  descriptors contain exactly one frozen workspace. Successful lifecycle commands use typed
+  `ok`/`result` envelopes, diagnostics preserve the complete session selector, and every wrapper
+  observation revalidates the selected directory without following a symbolic-link leaf. Project
+  state writers share private-directory preparation, and Lean execution commands require text at
+  the typed CLI boundary instead of constructing incomplete broker requests. Missing session paths
+  canonicalize their existing ancestor before creation, abnormal daemon exits project to
+  `recoveryRequired`, selector mismatches stay separate from lifecycle state, and repeated `stop`
+  reports `changed: false`
+  ([#243](https://github.com/leanprover/lean-beam/pull/243), @ejgallego).
+- Wrapper daemons now have explicit session ownership: only the foreground owner command starts a
+  generation, ordinary wrapper commands attach to it, `--port` is owner-only, and holder exit
+  cancels admitted requests before closing the daemon through an inherited pipe without heartbeat
+  leases or time-based retirement
   ([#241](https://github.com/leanprover/lean-beam/pull/241), @ejgallego).
 - Long-running Lean operations now separate liveness status, request progress, and diagnostics.
   Sync and refresh use the discoverable `diagnostic_scope: "errors" | "all"` and
@@ -97,7 +108,7 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
   instead of accepting any existing filesystem entry at an artifact path.
 - Install and prune control-file reads now reject non-regular or symlinked paths, and a failed lock
   owner-PID write removes the lock directory acquired by that process.
-- `lean-beam ensure --hold` now exits cleanly and promptly after `SIGINT`.
+- `lean-beam serve` now exits cleanly and promptly after `SIGINT`.
 - `lean-save` and `lean-close-save` now stage and commit complete artifact sets, preserving prior
   outputs on reported failure or cancellation and preventing same-worker saves from mixing files
   ([#217](https://github.com/leanprover/lean-beam/pull/217), @ejgallego).
