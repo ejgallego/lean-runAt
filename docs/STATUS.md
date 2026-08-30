@@ -259,8 +259,9 @@ Exact event ordering and examples live in
   request for that path fails root validation with a direct `workspace root does not resolve`
   error; it does not start a replacement daemon for a missing directory.
 - Cancellation is cooperative; prompt stopping depends on inner elaboration polling interruption.
-- The Beam daemon can manage multiple local workspaces, with one active session per backend per
-  workspace. Remote workspaces and same-source multi-toolchain mirrors are not implemented yet.
+- Standalone Beam brokers and MCP runtimes can manage multiple local workspaces, with one active
+  session per backend per workspace. Wrapper sessions deliberately publish one frozen workspace.
+  Remote workspaces and same-source multi-toolchain mirrors are not implemented yet.
 
 ### MCP
 

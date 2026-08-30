@@ -49,7 +49,6 @@ live but stuck wrapper process. Longer bundle build locks intentionally use the 
 unbounded lock helper.
 -/
 private structure ProjectControl where
-  root : System.FilePath
   dir : System.FilePath
   registry : System.FilePath
 
@@ -57,16 +56,12 @@ private def projectControl
     (root : System.FilePath)
     (explicitControlDir? : Option System.FilePath := none) : IO ProjectControl := do
   let dir ← controlDirFor root explicitControlDir?
-  pure { root, dir, registry := dir / "beam-daemon.json" }
+  pure { dir, registry := dir / "beam-daemon.json" }
 
 private def rejectControlDirObservation
     (dir : System.FilePath)
     (observation : Beam.PrivateDirObservation) : IO Unit := do
   Beam.requirePrivateDir "Beam session directory" dir observation
-
-/-- Accept an existing control path only when it is a real, account-private directory. -/
-private def validatePrivateControlDir (dir : System.FilePath) : IO Unit := do
-  rejectControlDirObservation dir (← Beam.observePrivateDir dir)
 
 /-- Validate an existing session selection without creating it; absence remains observable. -/
 private def validateControlDirForObservation (dir : System.FilePath) : IO Unit := do
@@ -851,7 +846,8 @@ inductive ProjectDaemonStopDelivery where
 /-- Authoritative state committed by an explicit wrapper-session stop operation. -/
 inductive ProjectDaemonStopResult where
   | absent
-  | stopping (changed : Bool) (delivery? : Option ProjectDaemonStopDelivery)
+  | alreadyStopping
+  | stopping (delivery : ProjectDaemonStopDelivery)
 
 /-- Fence and request shutdown of the exact wrapper-owned generation without PID signalling. -/
 def shutdownRegisteredProjectDaemon
@@ -888,7 +884,7 @@ def shutdownRegisteredProjectDaemon
         throw <| IO.userError <| generationRecoveryMessage root control.dir entry reason
   match plan with
   | .none => pure .absent
-  | .alreadyStopping => pure <| .stopping false none
+  | .alreadyStopping => pure .alreadyStopping
   | .committed entry =>
       let delivery ←
         match registryEndpoint? entry with
@@ -900,7 +896,7 @@ def shutdownRegisteredProjectDaemon
             | .ok (.successResult ..) => pure .acknowledged
             | .ok (.errorResult failure) => pure <| .rejected failure
             | .error failure => pure <| .failed failure
-      pure <| .stopping true (some delivery)
+      pure <| .stopping delivery
 
 structure RecoveryResult where
   recovered : Bool

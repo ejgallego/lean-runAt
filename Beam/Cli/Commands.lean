@@ -153,23 +153,28 @@ private def stopProjectSession (opts : CliOptions) : IO Unit := do
   | .absent =>
       printResponse <| Response.success <|
         toJson ({ state := .absent, changed := false } : SessionTransitionResult)
-  | .stopping changed delivery? =>
+  | .alreadyStopping =>
+      printResponse <| Response.success <| toJson ({
+        state := .stopping
+        changed := false
+      } : SessionTransitionResult)
+  | .stopping delivery =>
       let warning? ←
-        match delivery? with
-        | none | some .acknowledged => pure none
-        | some (.rejected failure) =>
+        match delivery with
+        | .acknowledged => pure none
+        | .rejected failure =>
             pure <| some ({
               code := "shutdownRejected"
               message := failure.error.message
             } : SessionTransitionWarning)
-        | some (.failed failure) =>
+        | .failed failure =>
             pure <| some ({
               code := "shutdownDeliveryFailed"
               message := ← daemonFailureMessage root failure opts.explicitControlDir?
             } : SessionTransitionWarning)
       printResponse <| Response.success <| toJson ({
         state := .stopping
-        changed
+        changed := true
         warning?
       } : SessionTransitionResult)
 
