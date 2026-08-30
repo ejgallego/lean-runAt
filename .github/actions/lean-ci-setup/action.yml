@@ -5,6 +5,12 @@
 name: Lean CI Setup
 description: Install system dependencies, elan, and restore Lean/Lake caches for CI jobs.
 
+inputs:
+  save-lake-artifact-cache:
+    description: Save the restored Lake artifact cache when the job succeeds.
+    required: false
+    default: "false"
+
 runs:
   using: composite
   steps:
@@ -27,6 +33,7 @@ runs:
         path: |
           ~/.elan/toolchains
           ~/.elan/settings.toml
+          !~/.elan/toolchains/*/lake/cache
         key: ${{ runner.os }}-elan-${{ hashFiles('lean-toolchain') }}
 
     - name: Restore Lake Package Cache
@@ -41,3 +48,35 @@ runs:
         elan --version
         lean --version
         lake --version
+
+    - name: Resolve Lake Artifact Cache
+      id: lake-artifact-cache
+      shell: bash
+      run: |
+        lake_bin="$(elan which lake)"
+        toolchain_root="${lake_bin%/bin/lake}"
+        if [[ "${toolchain_root}" == "${lake_bin}" ]]; then
+          echo "error: could not resolve the active Lake toolchain root" >&2
+          exit 1
+        fi
+        cache_dir="${toolchain_root}/lake/cache"
+        mkdir -p "${cache_dir}"
+        printf 'dir=%s\n' "${cache_dir}" >> "${GITHUB_OUTPUT}"
+
+    - name: Restore Lake Artifact Cache
+      if: inputs.save-lake-artifact-cache != 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ steps.lake-artifact-cache.outputs.dir }}
+        key: ${{ runner.os }}-${{ runner.arch }}-lake-artifacts-v2-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-lake-artifacts-v2-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-
+
+    - name: Restore And Save Lake Artifact Cache
+      if: inputs.save-lake-artifact-cache == 'true'
+      uses: actions/cache@v5
+      with:
+        path: ${{ steps.lake-artifact-cache.outputs.dir }}
+        key: ${{ runner.os }}-${{ runner.arch }}-lake-artifacts-v2-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-lake-artifacts-v2-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-

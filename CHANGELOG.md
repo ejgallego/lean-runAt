@@ -33,6 +33,9 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 
 ### Changed
 
+- Local builds now write to Lake's toolchain-scoped artifact cache and restore cached outputs into
+  `.lake/build`, preserving the paths used by Beam's wrapper, installer, and tests. CI restores that
+  cache for Lean jobs and lets one job per OS publish each commit's updated cache.
 - Wrapper lifecycle commands now use the explicit `serve`, `status`, and `stop` vocabulary;
   `stop` and `recover` require `--root`, alternate selectors use `--session-dir`, and wrapper
   descriptors contain exactly one frozen workspace. Successful lifecycle commands use typed

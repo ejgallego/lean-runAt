@@ -570,6 +570,24 @@ What this does not promise:
 
 ## Recommended Test Order
 
+Beam enables Lake's toolchain-scoped local artifact cache. Cached artifacts are restored into the
+ordinary `.lake/build` layout because the wrapper, installer, and test harnesses consume those
+paths directly. This lets task worktrees reuse unchanged compilation outputs without changing the
+repository's runtime layout contract. For a genuinely cold Beam rebuild, point `LAKE_CACHE_DIR` at
+a fresh temporary directory; Lake's `--no-cache` option controls remote package caches rather than
+this explicit local package cache. Restricted automation that cannot write to the default cache
+inside the elan toolchain must likewise point `LAKE_CACHE_DIR` at a writable directory; sharing
+that directory between task worktrees preserves the intended reuse. The save/checkpoint regression
+suite uses separate fixture packages and disables their artifact caches so a Lake replay cannot
+masquerade as a Beam-written artifact.
+
+CI restores the artifact cache for every Lean job, while `beam-fast` is the single writer for each
+OS and commit. Keeping one writer avoids concurrent immutable GitHub cache entries and bounds cache
+growth. CI archives the active root toolchain's exact Lake cache directory separately from the elan
+toolchain cache. It does not override `LAKE_CACHE_DIR`, so compatibility tests that select another
+toolchain continue using Lake's toolchain-isolated default instead of replaying incompatible native
+artifacts.
+
 - LSP request / handle / scenario changes: `bash tests/test-lsp.sh`
 - Beam broker protocol / stream / barrier changes: `bash tests/test-beam-fast.sh`
 - Beam save replay changes: `bash tests/test-beam-save-olean.sh`
