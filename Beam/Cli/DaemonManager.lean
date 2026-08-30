@@ -59,75 +59,24 @@ private def projectControl
   let dir ← controlDirFor root explicitControlDir?
   pure { root, dir, registry := dir / "beam-daemon.json" }
 
-private def privateControlDirRights : IO.FileRight := {
-  user := { read := true, write := true, execution := true }
-}
-
-private def privateControlDirMode : UInt32 :=
-  privateControlDirRights.flags
-
-private def invalidControlDirMessage (dir detail : String) : String :=
-  s!"unsafe Beam control directory {dir}: {detail}. Select a dedicated directory that is a real " ++
-    "directory with mode 0700; Beam does not change permissions on existing paths"
-
-private def permissionModeText (mode : UInt32) : String :=
-  let value := mode.toNat
-  s!"0{value / 64}{(value / 8) % 8}{value % 8}"
-
-private inductive ControlDirObservation where
-  | absent
-  | privateDir
-  | symlink
-  | nonPrivate (mode : UInt32)
-  | notDirectory
-
-/-- Inspect the exact control leaf without following a final symbolic link. -/
-private def observeControlDir (dir : System.FilePath) : IO ControlDirObservation := do
-  try
-    let metadata ← dir.symlinkMetadata
-    match metadata.type with
-    | .dir =>
-        let mode ← Beam.fileModeNoFollow dir
-        if mode == privateControlDirMode then
-          pure .privateDir
-        else
-          pure <| .nonPrivate mode
-    | .symlink => pure .symlink
-    | .file | .other => pure .notDirectory
-  catch
-  | .noFileOrDirectory .. => pure .absent
-  | err => throw err
-
 private def rejectControlDirObservation
-    (dir : System.FilePath) : ControlDirObservation → IO Unit
-  | .symlink =>
-      throw <| IO.userError <|
-        invalidControlDirMessage dir.toString "symbolic links are not accepted"
-  | .nonPrivate mode =>
-      throw <| IO.userError <|
-        invalidControlDirMessage dir.toString
-          s!"existing mode is {permissionModeText mode}, expected 0700"
-  | .notDirectory =>
-      throw <| IO.userError <|
-        invalidControlDirMessage dir.toString "the path is not a directory"
-  | .absent =>
-      throw <| IO.userError <|
-        invalidControlDirMessage dir.toString "the path disappeared during control preparation"
-  | .privateDir => pure ()
+    (dir : System.FilePath)
+    (observation : Beam.PrivateDirObservation) : IO Unit := do
+  Beam.requirePrivateDir "Beam session directory" dir observation
 
 /-- Accept an existing control path only when it is a real, account-private directory. -/
 private def validatePrivateControlDir (dir : System.FilePath) : IO Unit := do
-  rejectControlDirObservation dir (← observeControlDir dir)
+  rejectControlDirObservation dir (← Beam.observePrivateDir dir)
 
 /-- Validate an existing session selection without creating it; absence remains observable. -/
 private def validateControlDirForObservation (dir : System.FilePath) : IO Unit := do
-  match ← observeControlDir dir with
+  match ← Beam.observePrivateDir dir with
   | .absent | .privateDir => pure ()
   | observation => rejectControlDirObservation dir observation
 
 /-- Recognize absence without creating a session directory or accepting an unsafe existing leaf. -/
 private def sessionDescriptorAbsent (control : ProjectControl) : IO Bool := do
-  match ← observeControlDir control.dir with
+  match ← Beam.observePrivateDir control.dir with
   | .absent => pure true
   | .privateDir =>
       match ← readRegistryAt control.registry with
@@ -140,31 +89,7 @@ Create a missing dedicated control leaf as private, or validate an existing path
 it. The directory is ready before Beam creates its lock or any capability-bearing descriptor.
 -/
 private def preparePrivateControlDir (dir : System.FilePath) : IO Unit := do
-  match ← observeControlDir dir with
-  | .privateDir => return
-  | .absent => pure ()
-  | observation => rejectControlDirObservation dir observation
-  if let some parent := dir.parent then
-    IO.FS.createDirAll parent
-  try
-    IO.FS.createDir dir
-  catch
-  | .alreadyExists .. =>
-      -- A concurrent owner may have created the leaf after our absent observation. Never adopt it
-      -- implicitly: apply the same read-only validation as any other existing path.
-      validatePrivateControlDir dir
-      return
-  | err => throw err
-  try
-    -- This chmod is restricted to the leaf created successfully by this invocation.
-    IO.setAccessRights dir privateControlDirRights
-    validatePrivateControlDir dir
-  catch err =>
-    try
-      IO.FS.removeDir dir
-    catch _ =>
-      pure ()
-    throw err
+  Beam.ensurePrivateDir "Beam session directory" dir
 
 /-- Supply project registry mutation only for the dynamic extent of the project control lock. -/
 private def withProjectControl
@@ -185,7 +110,7 @@ private def withExistingProjectControl
     (act : ProjectControl → IO Unit)
     (explicitControlDir? : Option System.FilePath := none) : IO Unit := do
   let control ← projectControl root explicitControlDir?
-  match ← observeControlDir control.dir with
+  match ← Beam.observePrivateDir control.dir with
   | .privateDir => pure ()
   | .absent | .symlink | .nonPrivate _ | .notDirectory => return
   try
@@ -849,11 +774,12 @@ private def configMismatchMessage
     (root : System.FilePath)
     (sessionDir : System.FilePath)
     (entry : SessionDescriptor)
-    (expectedHash : String) : String :=
+    (expectedHash : String)
+    (backend : Backend) : String :=
   s!"the live Beam session for {root} uses configuration {entry.configHash}, " ++
     s!"but this command requires {expectedHash}; the current owner was preserved. " ++
     "Interrupt its foreground owner, then start a new one with the desired configuration:\n" ++
-    wrapperSessionCommand root sessionDir "serve"
+    wrapperSessionCommand root sessionDir (.serve backend)
 
 private def drainingOwnerMessage (root : System.FilePath) (entry : SessionDescriptor) : String :=
   s!"Beam session {entry.daemonId} for {root} is draining; " ++
@@ -875,12 +801,12 @@ private def generationRecoveryMessage
   match reason with
   | .wrongRegistryRoot recordedRoot =>
       let recovery := wrapperSessionCommand (System.FilePath.mk recordedRoot) sessionDir
-        s!"recover --generation {shellQuote entry.daemonId}"
+        (.recoverGeneration entry.daemonId)
       message ++ s!"; the selected root {root} cannot recover session {entry.daemonId}. " ++
         s!"After verifying that generation is gone, use its recorded workspace selector:\n{recovery}"
   | _ =>
       let recovery := wrapperSessionCommand root sessionDir
-        s!"recover --generation {shellQuote entry.daemonId}"
+        (.recoverGeneration entry.daemonId)
       message ++ s!"; when recovery is safe, run:\n{recovery}"
 
 private def registryReadRecoveryMessage
@@ -890,7 +816,7 @@ private def registryReadRecoveryMessage
   registryRecoveryMessage root
     (registryRead.detail?.getD s!"unexpected registry state '{registryRead.status}'") ++
     "; opaque state can be quarantined explicitly with:\n" ++
-    wrapperSessionCommand root sessionDir "recover --force"
+    wrapperSessionCommand root sessionDir .recoverForce
 
 private def markRegistryDraining (control : ProjectControl) (entry : SessionDescriptor) : IO Unit := do
   match ← readRegistryAt control.registry with
@@ -1043,20 +969,21 @@ def ProjectDaemonOwner.registered (owner : ProjectDaemonOwner) : IO Bool := do
         current.capability == owner.client.capability && current.lifecycle == .live)
   | .absent | .legacy | .unsupported _ | .malformed _ => pure false
 
-private def missingOwnerAction : Option Backend → String
-  | some .rocq => "serve rocq"
-  | some .lean | none => "serve"
+private def missingOwnerCommand : Option Backend → WrapperSessionCommand
+  | some .rocq => .serve .rocq
+  | some .lean | none => .serve .lean
 
 private def missingOwnerMessage
     (root sessionDir : System.FilePath)
     (backend? : Option Backend) : String :=
-  let command := wrapperSessionCommand root sessionDir (missingOwnerAction backend?)
+  let command := wrapperSessionCommand root sessionDir (missingOwnerCommand backend?)
   s!"no live Beam session owner is registered for {root}; " ++
     s!"start this foreground owner and keep it running while using wrapper commands:\n{command}"
 
 private def startOwnedProjectDaemon
     (control : ProjectControl)
     (desired : DesiredConfig)
+    (backend : Backend)
     (opts : CliOptions) : IO OwnedProjectDaemon := do
   match ← observeProjectRegistryAt desired.root control.registry with
   | .absent => pure ()
@@ -1065,7 +992,7 @@ private def startOwnedProjectDaemon
         throw <| IO.userError (activeOwnerMessage desired.root)
       else
         throw <| IO.userError
-          (configMismatchMessage desired.root control.dir entry desired.configHash)
+          (configMismatchMessage desired.root control.dir entry desired.configHash backend)
   | .draining entry => throw <| IO.userError (drainingOwnerMessage desired.root entry)
   | .legacy =>
       throw <| IO.userError <| registryReadRecoveryMessage desired.root control.dir .legacy
@@ -1192,7 +1119,7 @@ def withProjectDaemonOwner
   preparePrivateControlDir controlDir
   let desired ← desiredConfig home root backend
   let owned ← withProjectControl root (explicitControlDir? := some controlDir) fun control =>
-    startOwnedProjectDaemon control desired opts
+    startOwnedProjectDaemon control desired backend opts
   let exitCodeRef ← IO.mkRef (none : Option UInt32)
   try
     act {

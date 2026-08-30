@@ -471,15 +471,13 @@ private def checkLeanOperationRequests : IO Unit := do
     text := "exact h"
   }
   requireRequestJson "runAt request should share the Lean operation adapter"
-    (Beam.Cli.leanRunAtRequest root path 12 4 2 (some "exact h"))
+    (Beam.Cli.leanRunAtRequest root path 12 4 2 "exact h")
     (runAtInput.toBrokerRequest rootText)
   requireRequestJson "runAt handle request should share the Lean operation adapter"
-    (Beam.Cli.leanRunAtRequest root path 12 4 2 (some "exact h") (storeHandle := true))
+    (Beam.Cli.leanRunAtRequest root path 12 4 2 "exact h" (storeHandle := true))
     (runAtInput.toBrokerRequest rootText (storeHandle := true))
-  let missingRunAtText := Beam.Cli.leanRunAtRequest root path 12 4 2 none
-  require "runAt missing text should remain a broker validation error" missingRunAtText.text?.isNone
-  require "runAt missing text should still target run_at" (missingRunAtText.op == .runAt)
-  require "runAt missing text should carry version" (missingRunAtText.version? == some 12)
+  expectIoErrorContains "runAt missing text should fail at the CLI boundary"
+    "usage: beam" (Beam.Cli.parseTextArg "lean-run-at Demo.lean 12 4 2" [])
 
   let positionInput : Beam.Lean.PositionInput := {
     path
@@ -529,19 +527,13 @@ private def checkLeanOperationRequests : IO Unit := do
     text := "simp"
   }
   requireRequestJson "runWith request should share the Lean operation adapter"
-    (Beam.Cli.leanRunWithRequest root path sampleBrokerHandle (some "simp"))
+    (Beam.Cli.leanRunWithRequest root path sampleBrokerHandle "simp")
     (runWithInput.toBrokerRequest rootText)
   requireRequestJson "runWith linear request should share the Lean operation adapter"
-    (Beam.Cli.leanRunWithRequest root path sampleBrokerHandle (some "simp") (linear := true))
+    (Beam.Cli.leanRunWithRequest root path sampleBrokerHandle "simp" (linear := true))
     (runWithInput.toBrokerRequest rootText (linear := true))
-  let missingRunWithText := Beam.Cli.leanRunWithRequest root path sampleBrokerHandle none
-  require "runWith missing text should remain a broker validation error" missingRunWithText.text?.isNone
-  require "runWith missing text should keep successor-handle semantics"
-    (missingRunWithText.storeHandle? == some true)
-  require "runWith missing text should keep linear flag explicit"
-    (missingRunWithText.linear? == some false)
-  require "runWith missing text should keep the supplied handle"
-    missingRunWithText.handle?.isSome
+  expectIoErrorContains "runWith missing text should fail at the CLI boundary"
+    "usage: beam" (Beam.Cli.parseTextArg "lean-run-with Demo.lean HANDLE" [])
 
   requireRequestJson "release request should share the Lean operation adapter"
     (Beam.Cli.leanReleaseRequest root path sampleBrokerHandle)

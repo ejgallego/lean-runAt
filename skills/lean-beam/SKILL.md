@@ -172,9 +172,9 @@ This changes the right agent behavior:
   keeping independent probe sequences in flight
 - after a real source edit, run `lean-beam update <file>` before later probes; run
   `lean-beam sync <file>` when you need diagnostics/readiness
-- use `lake build` for dependency-cone validation and in clean CI; use a local `shutdown` / `lake
-  clean` / `lake build` sequence once when no successful clean CI result is available or
-  server-sensitive elaboration is suspected
+- use `lake build` for dependency-cone validation and in clean CI; use a local
+  `lean-beam --root ROOT stop` / `lake clean` / `lake build` sequence once when no successful
+  clean CI result is available or server-sensitive elaboration is suspected
 - use scratch files only for context-free Lean syntax checks or Beam incident isolation
 
 ## Prompting Contract

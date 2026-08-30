@@ -22,7 +22,7 @@ structure CliOptions where
   args : List String := []
 
 structure ParsedTextArg where
-  text? : Option String := none
+  text : String
   source : String := "argv"
 
 def parseNatArg (name value : String) : IO Nat := do
@@ -39,7 +39,7 @@ def hasSubstring (text needle : String) : Bool :=
   | _ => true
 
 def textArgUsage (cmdHead : String) : String :=
-  s!"usage: beam [--root PATH] {cmdHead} [--stdin | --text-file <path> | -- <text...> | <text...>]"
+  s!"usage: beam [--root PATH] {cmdHead} (--stdin | --text-file <path> | -- <text...> | <text...>)"
 
 def textArgReadsStdin (args : List String) : Bool :=
   match args with
@@ -48,19 +48,23 @@ def textArgReadsStdin (args : List String) : Bool :=
 
 def parseTextArg (cmdHead : String) (args : List String) : IO ParsedTextArg := do
   match args with
-  | [] => pure {}
+  | [] => throw <| IO.userError (textArgUsage cmdHead)
   | ["--stdin"] =>
-      pure { text? := some (← (← IO.getStdin).readToEnd), source := "stdin" }
+      pure { text := ← (← IO.getStdin).readToEnd, source := "stdin" }
   | ["--text-file", path] =>
-      pure { text? := some (← IO.FS.readFile (System.FilePath.mk path)), source := s!"text-file:{path}" }
-  | "--" :: rest =>
-      pure { text? := joinTextArgs rest, source := "argv" }
+      pure { text := ← IO.FS.readFile (System.FilePath.mk path), source := s!"text-file:{path}" }
+  | "--" :: rest => do
+      let some text := joinTextArgs rest
+        | throw <| IO.userError (textArgUsage cmdHead)
+      pure { text, source := "argv" }
   | "--stdin" :: _ =>
       throw <| IO.userError (textArgUsage cmdHead)
   | "--text-file" :: _ =>
       throw <| IO.userError (textArgUsage cmdHead)
-  | _ =>
-      pure { text? := joinTextArgs args, source := "argv" }
+  | _ => do
+      let some text := joinTextArgs args
+        | throw <| IO.userError (textArgUsage cmdHead)
+      pure { text, source := "argv" }
 
 def parseJsonText (label text : String) : IO Json := do
   match Json.parse text with
@@ -194,12 +198,26 @@ def parseLeanTodoArgs (args : List String) :
 def shellQuote (text : String) : String :=
   "'" ++ text.replace "'" "'\\''" ++ "'"
 
+inductive WrapperSessionCommand where
+  | serve (backend : Backend)
+  | stop
+  | recoverGeneration (generation : String)
+  | recoverForce
+
+private def WrapperSessionCommand.text : WrapperSessionCommand → String
+  | .serve .lean => "serve"
+  | .serve .rocq => "serve rocq"
+  | .stop => "stop"
+  | .recoverGeneration generation =>
+      s!"recover --generation {shellQuote generation}"
+  | .recoverForce => "recover --force"
+
 /-- Render one exact public wrapper-session command selector. -/
 def wrapperSessionCommand
     (root sessionDir : System.FilePath)
-    (action : String) : String :=
+    (command : WrapperSessionCommand) : String :=
   s!"lean-beam --root {shellQuote root.toString} " ++
-    s!"--session-dir {shellQuote sessionDir.toString} {action}"
+    s!"--session-dir {shellQuote sessionDir.toString} {command.text}"
 
 def parseEnvFlag (raw : String) : Bool :=
   let normalized := raw.trimAscii.toString.toLower

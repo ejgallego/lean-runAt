@@ -94,15 +94,15 @@ private def runLeanRunAt
     (action path versionText lineText characterText : String)
     (textArgs : List String)
     (storeHandle : Bool := false) : IO Unit := do
-  let root ← projectRoot opts .lean
   let version ← parseNatArg "version" versionText
   let line ← parseNatArg "line" lineText
   let character ← parseNatArg "character" characterText
   let parsedText ← parseTextArg s!"{action} <path> <version> <line> <character>" textArgs
+  let root ← projectRoot opts .lean
   withProjectDaemon root .lean (explicitControlDir? := opts.explicitControlDir?) fun client => do
     let req ← withEnvClientRequestId <|
-      leanRunAtRequest root path version line character parsedText.text? (storeHandle := storeHandle)
-    maybeEmitTextDebug req.clientRequestId? action parsedText.source parsedText.text?
+      leanRunAtRequest root path version line character parsedText.text (storeHandle := storeHandle)
+    maybeEmitTextDebug req.clientRequestId? action parsedText.source parsedText.text
     callBrokerWithProgress root client req (leanRunAtWaitSpec action path line character)
 
 private def runLeanRunWith
@@ -120,12 +120,12 @@ private def runLeanRunWith
       textArgUsage s!"{action} <path> <handle-json|-|--handle-file <path>>",
       "cannot read both handle json and continuation text from stdin; pass the handle inline, use --handle-file, or use --text-file for the text"
     ]
-  let root ← projectRoot opts .lean
   let (handle, textArgs) ← parseHandleInput s!"{action} <path>" args
   let parsedText ← parseTextArg s!"{action} <path> <handle-json|-|--handle-file <path>>" textArgs
+  let root ← projectRoot opts .lean
   let req ← withEnvClientRequestId <|
-    leanRunWithRequest root path handle parsedText.text? (linear := linear)
-  maybeEmitTextDebug req.clientRequestId? action parsedText.source parsedText.text?
+    leanRunWithRequest root path handle parsedText.text (linear := linear)
+  maybeEmitTextDebug req.clientRequestId? action parsedText.source parsedText.text
   withProjectDaemon root .lean (explicitControlDir? := opts.explicitControlDir?) fun client =>
     callBrokerWithProgress root client req (leanRunWithWaitSpec path (linear := linear))
 
@@ -234,7 +234,7 @@ private def serveBackend
       (← IO.getStdout).flush
       IO.eprintln <|
         "beam: serving Beam session; interrupt this process or run when finished:\n" ++
-        wrapperSessionCommand root owner.client.controlDir "stop"
+        wrapperSessionCommand root owner.client.controlDir .stop
 
 private def sessionStatus (opts : CliOptions) : IO Unit := do
   let root ← projectRootAny opts

@@ -214,6 +214,23 @@ if [ -e "$tmp1/.beam" ]; then
   exit 1
 fi
 
+# A feedback bundle can be the first writer below `.beam`. It must establish the same private
+# project-state boundary expected by a later wrapper session rather than creating an incompatible
+# umask-derived directory.
+feedback_private_input='{"title":"Private Beam state","summary":"Check feedback state setup.","reproduction":"feedback before serve","expected":"Private shared state.","actual":"Private shared state."}'
+feedback_private_json="$(printf '%s\n' "$feedback_private_input" | \
+  "$beam_script" --root "$tmp1" feedback-report --stdin --bundle dir)"
+assert_json_field_equals "feedback bundle mode" "$feedback_private_json" metadata.bundle dir
+if [ "$(file_mode "$tmp1/.beam")" != "700" ]; then
+  echo "expected feedback to create the shared Beam state directory with mode 700" >&2
+  exit 1
+fi
+feedback_status="$("$beam_script" --root "$tmp1" status)"
+assert_json_field_equals \
+  "feedback-created state remains a valid session selection" "$feedback_status" result.state absent
+remove_tmp_tree_within "$tmp1/.beam/feedback" "$tmp1"
+rmdir "$tmp1/.beam"
+
 mkdir -p "$tmp1/.beam"
 chmod 700 "$tmp1/.beam"
 "$beam_script" --root "$tmp1" stop > /dev/null
