@@ -536,24 +536,6 @@ if ! grep -Fq "already owned" "$second_owner_err"; then
   exit 1
 fi
 
-collision_out="$tmp2/collision.out"
-collision_err="$tmp2/collision.err"
-if "$beam_script" --root "$tmp2" --port "$port1" serve > "$collision_out" 2> "$collision_err"; then
-  echo "expected an owner not to claim another project's endpoint" >&2
-  cat "$collision_out" >&2
-  exit 1
-fi
-if ! grep -Fq "invalid Beam daemon capability" "$collision_err"; then
-  echo "expected endpoint collision not to disclose an authenticated daemon's project" >&2
-  cat "$collision_err" >&2
-  exit 1
-fi
-if [ -e "$tmp2/.beam/beam-daemon.json" ]; then
-  echo "expected endpoint collision not to publish a registry" >&2
-  cat "$tmp2/.beam/beam-daemon.json" >&2
-  exit 1
-fi
-
 stale_registry="$tmp2/.beam/beam-daemon.json"
 REGISTRY_TEMPLATE="$registry" STALE_REGISTRY="$stale_registry" STALE_ROOT="$tmp2" python3 - <<'PY'
 import json
@@ -641,98 +623,6 @@ if [ ! -f "$legacy_quarantine" ]; then
   printf '%s\n' "$legacy_recover_json" >&2
   exit 1
 fi
-
-busy_port_file="$(mktemp "$tmp2/non-beam-port-XXXXXX")"
-python3 - "$busy_port_file" <<'PY' &
-import socketserver
-import sys
-
-class Handler(socketserver.BaseRequestHandler):
-    def handle(self):
-        self.request.recv(4096)
-
-with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
-    with open(sys.argv[1], "w", encoding="utf-8") as stream:
-        print(server.server_address[1], file=stream, flush=True)
-    server.serve_forever()
-PY
-busy_pid="$!"
-if ! wait_for_nonempty_file "$busy_port_file" "non-Beam occupied port"; then
-  exit 1
-fi
-busy_port="$(cat "$busy_port_file")"
-busy_out="$tmp2/non-beam-port.out"
-busy_err="$tmp2/non-beam-port.err"
-if "$beam_script" --root "$tmp2" --port "$busy_port" serve > "$busy_out" 2> "$busy_err"; then
-  echo "expected owner startup to reject a port occupied by a non-Beam service" >&2
-  cat "$busy_out" >&2
-  exit 1
-fi
-if ! grep -Fq "already in use" "$busy_err"; then
-  echo "expected non-Beam port collision to report the occupied endpoint" >&2
-  cat "$busy_err" >&2
-  exit 1
-fi
-if [ -e "$tmp2/.beam/beam-daemon.json" ]; then
-  echo "expected non-Beam port collision not to publish a registry" >&2
-  cat "$tmp2/.beam/beam-daemon.json" >&2
-  exit 1
-fi
-kill "$busy_pid" > /dev/null 2>&1 || true
-wait "$busy_pid" 2>/dev/null || true
-busy_pid=""
-rm -f -- "$busy_port_file"
-busy_port_file=""
-
-busy_port_file="$(mktemp "$tmp2/silent-non-beam-port-XXXXXX")"
-python3 - "$busy_port_file" <<'PY' &
-import socketserver
-import sys
-import time
-
-class Handler(socketserver.BaseRequestHandler):
-    def handle(self):
-        time.sleep(10)
-
-with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
-    with open(sys.argv[1], "w", encoding="utf-8") as stream:
-        print(server.server_address[1], file=stream, flush=True)
-    server.serve_forever()
-PY
-busy_pid="$!"
-if ! wait_for_nonempty_file "$busy_port_file" "silent non-Beam occupied port"; then
-  exit 1
-fi
-busy_port="$(cat "$busy_port_file")"
-busy_out="$tmp2/silent-non-beam-port.out"
-busy_err="$tmp2/silent-non-beam-port.err"
-silent_probe_started="$SECONDS"
-if "$beam_script" --root "$tmp2" --port "$busy_port" serve > "$busy_out" 2> "$busy_err"; then
-  echo "expected owner startup to reject a silent non-Beam service" >&2
-  cat "$busy_out" >&2
-  exit 1
-fi
-silent_probe_elapsed="$((SECONDS - silent_probe_started))"
-if [ "$silent_probe_elapsed" -ge 8 ]; then
-  echo "expected silent non-Beam probe to honor its response deadline, took ${silent_probe_elapsed}s" >&2
-  cat "$busy_err" >&2
-  exit 1
-fi
-if ! grep -Fq "response timed out" "$busy_err"; then
-  echo "expected silent non-Beam collision to report the bounded probe timeout" >&2
-  cat "$busy_err" >&2
-  exit 1
-fi
-if [ -e "$tmp2/.beam/beam-daemon.json" ]; then
-  echo "expected silent non-Beam collision not to publish a registry" >&2
-  cat "$tmp2/.beam/beam-daemon.json" >&2
-  exit 1
-fi
-kill "$busy_pid" > /dev/null 2>&1 || true
-wait "$busy_pid" 2>/dev/null || true
-busy_pid=""
-rm -f -- "$busy_port_file"
-busy_port_file=""
 
 # Once stop commits its draining fence, a delivery failure must remain a successful, typed
 # transition result rather than obscuring the state change. This fixture answers the identity

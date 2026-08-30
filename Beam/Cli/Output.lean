@@ -7,7 +7,6 @@ Author: Emilio J. Gallego Arias
 import Lean
 import Beam.Broker.Protocol
 import Beam.Cli.Args
-import Beam.Cli.RuntimeBundle.Paths
 import Beam.JsonPretty
 import Beam.LSP.RunAt
 
@@ -16,6 +15,26 @@ open Lean
 namespace Beam.Cli
 
 open Beam.Broker
+
+def boolText (value : Bool) : String :=
+  if value then "true" else "false"
+
+private def hexDigit (n : Nat) : Char :=
+  if n < 10 then
+    Char.ofNat (48 + n)
+  else
+    Char.ofNat (87 + n)
+
+private def hexByte (byte : UInt8) : String :=
+  let n := byte.toNat
+  String.singleton (hexDigit (n / 16)) ++ String.singleton (hexDigit (n % 16))
+
+private def utf8Hex (bytes : ByteArray) : String :=
+  String.intercalate " " <| Id.run do
+    let mut parts : Array String := #[]
+    for byte in bytes do
+      parts := parts.push (hexByte byte)
+    return parts.toList
 
 private def diagnosticSeverityLabel : Option Lsp.DiagnosticSeverity → String
   | some .error => "error"

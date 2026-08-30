@@ -58,7 +58,7 @@ private def bundleMetadataWorkspaceMatches
   Beam.sameFilePath (System.FilePath.mk metadata.workspace) workspace
 
 private def bundleArtifactsReady (workspace : System.FilePath) : IO Bool := do
-  let paths := bundlePathsFor workspace
+  let paths := leanBundlePathsFor workspace
   return (← Beam.regularNonSymlinkFile paths.daemon) &&
     (← Beam.regularNonSymlinkFile paths.plugin)
 

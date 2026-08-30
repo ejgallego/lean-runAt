@@ -134,11 +134,11 @@ private def printLeanDoctorInfo (home root : System.FilePath) : IO Unit := do
   IO.println s!"plugin: {bundleInfo.plugin}"
 
 private def printRocqDoctorInfo (home root : System.FilePath) : IO Unit := do
-  let paths ← defaultBundlePaths home
-  let daemonReady := ← paths.daemon.pathExists
+  let daemon ← defaultDaemonPath home
+  let daemonReady := ← daemon.pathExists
   IO.println s!"coq-lsp: {(← maybeRocqCmd root).getD ""}"
   IO.println s!"daemon ready: {boolText daemonReady}"
-  IO.println s!"daemon binary: {paths.daemon}"
+  IO.println s!"daemon binary: {daemon}"
 
 def daemonFailureIncidentDoctorLines
     (root : System.FilePath)

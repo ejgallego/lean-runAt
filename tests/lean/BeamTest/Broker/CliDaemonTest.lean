@@ -588,16 +588,14 @@ private def checkDiagnosticScopeArgs : IO Unit := do
     require s!"{label} diagnostic scope should reject obsolete +full" obsoleteRejected
 
 private def checkStartupRetryPolicy : IO Unit := do
-  require "automatic occupied endpoint should retry"
-    (Beam.Daemon.shouldRetryAutomaticStartup true 1 true false)
-  require "automatic startup bind collision should retry"
-    (Beam.Daemon.shouldRetryAutomaticStartup true 1 false true)
-  require "automatic endpoint should not retry after attempts are exhausted"
-    (!Beam.Daemon.shouldRetryAutomaticStartup true 0 true true)
-  require "automatic endpoint should not retry when endpoint is not occupied after failure"
-    (!Beam.Daemon.shouldRetryAutomaticStartup true 1 false false)
-  require "explicit endpoint should not retry"
-    (!Beam.Daemon.shouldRetryAutomaticStartup false 1 true true)
+  require "occupied endpoint should retry"
+    (Beam.Daemon.shouldRetryStartup 1 true false)
+  require "startup bind collision should retry"
+    (Beam.Daemon.shouldRetryStartup 1 false true)
+  require "endpoint should not retry after attempts are exhausted"
+    (!Beam.Daemon.shouldRetryStartup 0 true true)
+  require "endpoint should not retry when it is not occupied after failure"
+    (!Beam.Daemon.shouldRetryStartup 1 false false)
   require "Linux bind failure wording should be recognized"
     (Beam.Daemon.startupLogSuggestsEndpointInUse "resource busy (error code: 4294967198, address already in use)")
   require "macOS bind failure wording should be recognized"
@@ -1099,7 +1097,7 @@ private def checkLockLifecycle : IO Unit := do
       pure ()
 
 private def writeFakeBundleArtifacts (workspace : System.FilePath) : IO Unit := do
-  let paths := Beam.Cli.bundlePathsFor workspace
+  let paths := Beam.Cli.leanBundlePathsFor workspace
   for path in #[paths.daemon, paths.plugin] do
     if let some parent := path.parent then
       IO.FS.createDirAll parent
@@ -1252,7 +1250,7 @@ private def checkRuntimeBundleHelpers : IO Unit := do
       Beam.Cli.toolchainFingerprintHash sampleFingerprintB)
 
   let workspace := System.FilePath.mk "/tmp/beam-runtime-bundle-workspace"
-  let paths := Beam.Cli.bundlePathsFor workspace
+  let paths := Beam.Cli.leanBundlePathsFor workspace
   require "bundle daemon path should point at workspace build output"
     (paths.daemon == workspace / ".lake" / "build" / "bin" / "beam-daemon")
   require "bundle plugin path should live under workspace build lib"
@@ -1340,7 +1338,7 @@ private def checkRuntimeBundleMetadataAcceptance : IO Unit := do
     IO.FS.removeFile metadataPath
     writeBundleMetadataFile bundleDir toolchain sourceHash sampleFingerprint workspace
 
-    let daemon := (Beam.Cli.bundlePathsFor workspace).daemon
+    let daemon := (Beam.Cli.leanBundlePathsFor workspace).daemon
     IO.FS.removeFile daemon
     IO.FS.createDir daemon
     require "bundle should reject a required artifact path that is a directory"

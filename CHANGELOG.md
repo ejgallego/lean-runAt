@@ -39,7 +39,8 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 - The pre-stable `lean-beam request-stream` and raw `beam-client` executable have been removed.
   Automated wrapper callers use typed commands and final stdout JSON; clients that need structured
   live events use MCP. The wrapper-to-daemon stream remains an internal, library-tested transport.
-  Session descriptor schema 4 no longer records or hashes a client executable.
+  Session descriptor schema 4 no longer records or hashes a client executable or a caller-selected
+  port; Beam selects the private daemon endpoint.
 - Wrapper lifecycle commands now use the explicit `serve`, `status`, and `stop` vocabulary;
   `stop` and `recover` require `--root`, alternate selectors use `--session-dir`, and wrapper
   descriptors contain exactly one frozen workspace. Successful lifecycle commands use typed
@@ -52,7 +53,7 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
   reports `changed: false`
   ([#243](https://github.com/leanprover/lean-beam/pull/243), @ejgallego).
 - Wrapper daemons now have explicit session ownership: only the foreground owner command starts a
-  generation, ordinary wrapper commands attach to it, `--port` is owner-only, and holder exit
+  generation, ordinary wrapper commands attach to it, and holder exit
   cancels admitted requests before closing the daemon through an inherited pipe without heartbeat
   leases or time-based retirement
   ([#241](https://github.com/leanprover/lean-beam/pull/241), @ejgallego).

@@ -175,7 +175,7 @@ private def qualifyToolchainBundle
   let probe := qualificationDir / "Probe.lean"
   IO.FS.createDirAll qualificationDir
   IO.FS.writeFile probe "example : True := by\n  trivial\n"
-  let plugin ← Beam.resolveExistingPath (bundlePathsFor workspace).plugin
+  let plugin ← Beam.resolveExistingPath (leanBundlePathsFor workspace).plugin
   let probe ← Beam.resolveExistingPath probe
   let out ← IO.Process.output {
     cmd := lake.cmd
@@ -216,22 +216,22 @@ def buildToolchainBundle (home : System.FilePath) (toolchain srcHash : String)
   writeBundleMetadata bundleDir toolchain srcHash fingerprint workspace
 
 def existingToolchainBundleForFingerprint? (cacheRoot home : System.FilePath) (toolchain : String)
-    (fingerprint : ToolchainFingerprint) : IO (Option (BundlePaths × String)) := do
+    (fingerprint : ToolchainFingerprint) : IO (Option (LeanBundlePaths × String)) := do
   let (bundleDir, bundleId, srcHash) ← bundleDirForFingerprint cacheRoot home toolchain fingerprint
   let workspace := bundleWorkspaceFor bundleDir
   if ← bundleReady bundleDir toolchain srcHash fingerprint then
-    pure <| some (bundlePathsFor workspace, bundleId)
+    pure <| some (leanBundlePathsFor workspace, bundleId)
   else
     pure none
 
 def existingToolchainBundle? (cacheRoot home : System.FilePath) (toolchain : String) :
-    IO (Option (BundlePaths × String)) := do
+    IO (Option (LeanBundlePaths × String)) := do
   let fingerprint ← toolchainFingerprint toolchain
   existingToolchainBundleForFingerprint? cacheRoot home toolchain fingerprint
 
 partial def existingToolchainBundleInAnyForFingerprint? (cacheRoots : List System.FilePath)
     (home : System.FilePath) (toolchain : String) (fingerprint : ToolchainFingerprint) :
-    IO (Option (BundlePaths × String)) := do
+    IO (Option (LeanBundlePaths × String)) := do
   match cacheRoots with
   | [] => pure none
   | cacheRoot :: rest =>
@@ -240,7 +240,7 @@ partial def existingToolchainBundleInAnyForFingerprint? (cacheRoots : List Syste
       | none => existingToolchainBundleInAnyForFingerprint? rest home toolchain fingerprint
 
 partial def existingToolchainBundleInAny? (cacheRoots : List System.FilePath) (home : System.FilePath)
-    (toolchain : String) : IO (Option (BundlePaths × String)) := do
+    (toolchain : String) : IO (Option (LeanBundlePaths × String)) := do
   match cacheRoots with
   | [] => pure none
   | _ =>
@@ -248,7 +248,7 @@ partial def existingToolchainBundleInAny? (cacheRoots : List System.FilePath) (h
       existingToolchainBundleInAnyForFingerprint? cacheRoots home toolchain fingerprint
 
 def ensureToolchainBundleInForFingerprint (cacheRoot home : System.FilePath) (toolchain : String)
-    (fingerprint : ToolchainFingerprint) : IO (BundlePaths × String) := do
+    (fingerprint : ToolchainFingerprint) : IO (LeanBundlePaths × String) := do
   let (bundleDir, bundleId, srcHash) ← bundleDirForFingerprint cacheRoot home toolchain fingerprint
   let workspace := bundleWorkspaceFor bundleDir
   let some platformRoot := bundleDir.parent
@@ -256,15 +256,16 @@ def ensureToolchainBundleInForFingerprint (cacheRoot home : System.FilePath) (to
   withLock (bundleBuildLockPath platformRoot bundleId) do
     unless ← bundleReady bundleDir toolchain srcHash fingerprint do
       buildToolchainBundle home toolchain srcHash fingerprint cacheRoot bundleDir workspace
-  pure (bundlePathsFor workspace, bundleId)
+  pure (leanBundlePathsFor workspace, bundleId)
 
 def ensureToolchainBundleIn (cacheRoot home : System.FilePath) (toolchain : String) :
-    IO (BundlePaths × String) := do
+    IO (LeanBundlePaths × String) := do
   ensureAcceptedLeanToolchain home toolchain
   let fingerprint ← toolchainFingerprint toolchain
   ensureToolchainBundleInForFingerprint cacheRoot home toolchain fingerprint
 
-def ensureToolchainBundle (root home : System.FilePath) (toolchain : String) : IO (BundlePaths × String) := do
+def ensureToolchainBundle (root home : System.FilePath) (toolchain : String) :
+    IO (LeanBundlePaths × String) := do
   ensureAcceptedLeanToolchain home toolchain
   let fingerprint ← toolchainFingerprint toolchain
   match ← existingToolchainBundleInAnyForFingerprint? (← installBundleCacheRoots) home toolchain fingerprint with
@@ -273,10 +274,10 @@ def ensureToolchainBundle (root home : System.FilePath) (toolchain : String) : I
       let cacheRoot ← runtimeBundleCacheRootForWrite root
       ensureToolchainBundleInForFingerprint cacheRoot home toolchain fingerprint
 
-def ensureDefaultDaemon (home : System.FilePath) : IO BundlePaths := do
-  let paths ← defaultBundlePaths home
-  if ← paths.daemon.pathExists then
-    pure paths
+def ensureDefaultDaemon (home : System.FilePath) : IO System.FilePath := do
+  let daemon ← defaultDaemonPath home
+  if ← daemon.pathExists then
+    pure daemon
   else
     let out ← IO.Process.output {
       cmd := "lake"
@@ -285,16 +286,16 @@ def ensureDefaultDaemon (home : System.FilePath) : IO BundlePaths := do
     }
     if out.exitCode != 0 then
       throw <| IO.userError s!"failed to build the default Beam daemon\n{out.stderr}"
-    ensureDaemonExists paths
-    pure paths
+    ensurePathExists "Beam daemon" daemon
+    pure daemon
 
 def predictedToolchainBundleForFingerprint (cacheRoot home : System.FilePath) (toolchain : String)
-    (fingerprint : ToolchainFingerprint) : IO (BundlePaths × String) := do
+    (fingerprint : ToolchainFingerprint) : IO (LeanBundlePaths × String) := do
   let (bundleDir, bundleId, _) ← bundleDirForFingerprint cacheRoot home toolchain fingerprint
-  pure (bundlePathsFor (bundleWorkspaceFor bundleDir), bundleId)
+  pure (leanBundlePathsFor (bundleWorkspaceFor bundleDir), bundleId)
 
 def predictedToolchainBundle (cacheRoot home : System.FilePath) (toolchain : String) :
-    IO (BundlePaths × String) := do
+    IO (LeanBundlePaths × String) := do
   let fingerprint ← toolchainFingerprint toolchain
   predictedToolchainBundleForFingerprint cacheRoot home toolchain fingerprint
 

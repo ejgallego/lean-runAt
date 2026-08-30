@@ -1072,7 +1072,13 @@ private def checkSessionCloseAdmission : IO Unit := do
     ((← ActiveRequestRegistry.count runtime.activeRequests) == 0)
 
 private def checkWrapperDaemonAuthorization : IO Unit := do
-  let root := System.FilePath.mk "/tmp/beam-wrapper-daemon-authorization"
+  let base := System.FilePath.mk s!"/tmp/beam-wrapper-daemon-authorization-{← IO.monoNanosNow}"
+  let rootPath := base / "workspace"
+  let otherRootPath := base / "other-workspace"
+  IO.FS.createDirAll rootPath
+  IO.FS.createDirAll otherRootPath
+  let root ← Beam.resolveExistingPath rootPath
+  let otherRoot ← Beam.resolveExistingPath otherRootPath
   let capability := "generation-secret"
   let runtime ← Beam.Broker.ServerRuntime.create
     ({ root } : Beam.Broker.BrokerConfig) "fixture"
@@ -1096,6 +1102,24 @@ private def checkWrapperDaemonAuthorization : IO Unit := do
     }
     require "wrapper daemon should admit the exact generation capability" stats.ok
 
+    let wrongRoot ← runtime.dispatchRequest {
+      op := .ensure
+      workspaceId? := some "fixture"
+      root? := some otherRoot.toString
+      daemonCapability? := some capability
+    }
+    require "authenticated wrapper request should reject another root"
+      (wrongRoot.error?.any fun err =>
+        err.code == "invalidParams" && err.message.contains "serves" &&
+          err.message.contains otherRoot.toString)
+
+    let statsAfterWrongRoot ← runtime.dispatchRequest {
+      op := .stats
+      daemonCapability? := some capability
+    }
+    require "wrong-root rejection should preserve the authenticated generation"
+      statsAfterWrongRoot.ok
+
     for op in [Op.initWorkspace, .listWorkspaces, .dropWorkspace] do
       let response ← runtime.dispatchRequest {
         op
@@ -1106,7 +1130,10 @@ private def checkWrapperDaemonAuthorization : IO Unit := do
         (response.error?.any fun err =>
           err.code == "invalidParams" && err.message.contains "wrapper-owned daemon mode")
   finally
-    runtime.close
+    try
+      runtime.close
+    finally
+      IO.FS.removeDirAll base
 
 def main : IO Unit := do
   checkResponseJsonShape

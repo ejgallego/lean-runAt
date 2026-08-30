@@ -13,7 +13,7 @@ def usage : String :=
     "usage:",
     "  beam --version",
     "  beam version",
-    "  beam [--root PATH] [--session-dir DIR] [--port N] serve [lean|rocq]",
+    "  beam [--root PATH] [--session-dir DIR] serve [lean|rocq]",
     "  beam [--root PATH] lean-run-at <path> <version> <line> <character> (--stdin | --text-file <path> | -- <text...> | <text...>)",
     "  beam [--root PATH] lean-run-at-handle <path> <version> <line> <character> (--stdin | --text-file <path> | -- <text...> | <text...>)",
     "  beam [--root PATH] lean-hover <path> <version> <line> <character>",

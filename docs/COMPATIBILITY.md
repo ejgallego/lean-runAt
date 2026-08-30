@@ -22,8 +22,8 @@ A Lean release line is the canonical `major.minor` family recorded in
   but the installer does not reuse it. Remove the schema-2 decoder when 0.3 development opens.
 - CLI session descriptor schema 4. It freezes one workspace binding plus one
   generation identity, lifecycle, endpoint, and capability. Schema-less, schema-1, the superseded
-  schema-2 multi-binding shape, schema 3 with its obsolete client-executable field, and unknown
-  records are reported and remain fenced;
+  schema-2 multi-binding shape, schema 3 with its obsolete client-executable and
+  caller-selected-port fields, and unknown records are reported and remain fenced;
   normal startup does not decode, delete, or migrate them.
   After independently stopping the generation that wrote an opaque record, an operator may
   quarantine it with `lean-beam --root ROOT recover --force`. Current descriptors instead require

@@ -23,9 +23,9 @@ structured live events should use MCP.
 
 The returned document `version` is the snapshot token for broker, MCP, and wrapper callers.
 Position- or range-bound operations reject missing or stale versions; clients can obtain the
-version from `lean-beam update`, broker `update_file`, or MCP `lean_update`. `lean-beam sync`,
-broker `sync_file`, and MCP `lean_sync` also return the current version when the caller needs the
-diagnostics/readiness barrier.
+version from `lean-beam update`, the internal broker `update_file` operation, or MCP `lean_update`.
+`lean-beam sync`, the internal broker `sync_file` operation, and MCP `lean_sync` also return the
+current version when the caller needs the diagnostics/readiness barrier.
 
 When the broker rejects a position- or range-bound request because the supplied version is stale,
 the failure uses `contentModified` and includes `error.data.reason = "documentVersionMismatch"`.
@@ -33,7 +33,7 @@ The same payload reports `expectedVersion`, the currently accepted `acceptedVers
 `currentVersion` when the broker can name the current tracked document version.
 
 Example stale-version semantic response, as printed by the wrapper on stdout or carried in the
-`payload` of a terminal broker stream message:
+`payload` of a terminal internal broker stream message:
 
 ```json
 {
@@ -115,7 +115,7 @@ Their transport types differ by surface.
 | Progress | Request-scoped operation movement, not diagnostics and not final readiness. | MCP `notifications/progress`; internal broker `fileProgress` events; CLI progress text. |
 | Status | Best-effort notice that a no-token MCP request is doing setup or remains pending. | MCP `notifications/message` with logger `beam.status`. |
 | Streamed diagnostics | Lean-published events observed while a request is pending. | MCP `notifications/message` with logger `lean.diagnostic`; internal broker `diagnostic` events; CLI stderr diagnostics. |
-| Current result | Stable synced-state verdict for one document version. | Final broker/CLI `diagnostics`, `readiness`, and `fileProgress` fields; MCP spells the progress field `document_progress`. |
+| Current result | Stable synced-state verdict for one document version. | Final internal broker response or wrapper stdout `diagnostics`, `readiness`, and `fileProgress` fields; MCP spells the progress field `document_progress`. |
 
 Wrapper stderr is the human-facing surface. Machine consumers of an owned wrapper session should
 use final stdout JSON from the typed wrapper commands. Use MCP for structured live events.
@@ -195,9 +195,10 @@ enable diagnostic logging and/or request `diagnostic_scope: "all"` plus
 `diagnostics_in_result: true`.
 Successful `lake setup-file` status diagnostics are transient Lean observations. MCP projects them
 through live `beam.status` or tokened progress, and they usually do not appear in final
-`diagnostics_in_result` replay after Lean clears setup progress. Broker and CLI streams still carry
-Lean's temporary information-diagnostic envelope. Until Lean exposes a first-class setup/build
-status signal, the separation is an MCP projection rather than an end-to-end typed distinction.
+`diagnostics_in_result` replay after Lean clears setup progress. The internal broker stream still
+carries Lean's temporary information-diagnostic envelope, which the wrapper may render on stderr.
+Until Lean exposes a first-class setup/build status signal, the separation is an MCP projection
+rather than an end-to-end typed distinction.
 
 ## Progress
 

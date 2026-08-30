@@ -18,20 +18,11 @@ open Beam.Broker
 structure CliOptions where
   explicitRoot? : Option System.FilePath := none
   explicitControlDir? : Option System.FilePath := none
-  requestedPort? : Option UInt16 := none
   args : List String := []
 
 structure ParsedTextArg where
   text : String
   source : String := "argv"
-
-def parsePortText (name value : String) : Except String UInt16 := do
-  let some n := value.toNat?
-    | throw s!"invalid {name} '{value}'"
-  if n < UInt16.size then
-    pure n.toUInt16
-  else
-    throw s!"{name} '{value}' is outside the supported range 0-65535"
 
 def parseNatArg (name value : String) : IO Nat := do
   let some n := value.toNat?
@@ -268,9 +259,6 @@ partial def parseCliOptions (opts : CliOptions) : List String → IO CliOptions
   | "--session-dir" :: dir :: rest => do
       let dir ← resolveSessionDirArg dir
       parseCliOptions { opts with explicitControlDir? := some dir } rest
-  | "--port" :: port :: rest => do
-      let port ← IO.ofExcept <| parsePortText "port" port
-      parseCliOptions { opts with requestedPort? := some port } rest
   | arg :: rest =>
       parseCliOptions { opts with args := opts.args ++ [arg] } rest
 

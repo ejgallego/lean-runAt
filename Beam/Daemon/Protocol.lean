@@ -64,7 +64,6 @@ structure SessionDescriptor where
   configHash : String
   daemonBin? : Option String := none
   startedAt : String
-  requestedPort? : Option Nat := none
   deriving FromJson, ToJson
 
 def SessionDescriptor.identity (entry : SessionDescriptor) : DaemonIdentity := {
@@ -165,11 +164,10 @@ def startupLogSuggestsEndpointInUse (logText : String) : Bool :=
   logText.contains "address already in use" ||
   logText.contains "Address already in use"
 
-def shouldRetryAutomaticStartup
-    (usesAutomaticEndpoint : Bool)
+def shouldRetryStartup
     (tries : Nat)
     (endpointOccupied startupAddressInUse : Bool) : Bool :=
-  usesAutomaticEndpoint && tries > 0 && (endpointOccupied || startupAddressInUse)
+  tries > 0 && (endpointOccupied || startupAddressInUse)
 
 def endpointAcceptsConnection (endpoint : Transport.Endpoint) : IO Bool := do
   try

@@ -201,15 +201,6 @@ private def parseBackendName (name : String) : IO Backend := do
   | .ok backend => pure backend
   | .error err => throw <| IO.userError err
 
-private def commandMaySelectPort : List String → Bool
-  | ["serve"] => true
-  | ["serve", _] => true
-  | _ => false
-
-private def validateRequestedPortScope (opts : CliOptions) : IO Unit := do
-  if opts.requestedPort?.isSome && !commandMaySelectPort opts.args then
-    throw <| IO.userError "--port is only valid when starting an owner with 'serve [lean|rocq]'"
-
 private def runThenHoldUntilInterrupted
     (owner : ProjectDaemonOwner)
     (act : IO Unit) : IO Unit :=
@@ -266,7 +257,6 @@ private def sessionStatus (opts : CliOptions) : IO Unit := do
   printResponse <| Response.success (toJson result)
 
 def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit := do
-  validateRequestedPortScope opts
   match opts.args with
   | [] =>
       throw <| IO.userError usage

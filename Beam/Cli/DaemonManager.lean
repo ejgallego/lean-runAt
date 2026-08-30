@@ -271,34 +271,24 @@ def observeProjectRegistry
     (explicitControlDir? : Option System.FilePath := none) : IO RegistryObservation := do
   observeProjectControl root (← projectControl root explicitControlDir?)
 
-private def requestedPortNat? (opts : CliOptions) : Option Nat :=
-  opts.requestedPort?.map (·.toNat)
+private def selectPort : IO UInt16 := do
+  let now ← IO.monoNanosNow
+  let seed := now % 20000 + 30000
+  if seed < UInt16.size then
+    pure seed.toUInt16
+  else
+    pure 37654
 
-private def selectPort (opts : CliOptions) : IO UInt16 := do
-  match opts.requestedPort? with
-  | some port => pure port
-  | none =>
-      let now ← IO.monoNanosNow
-      let seed := now % 20000 + 30000
-      if seed < UInt16.size then
-        pure seed.toUInt16
-      else
-        pure 37654
-
-private def selectEndpoint (opts : CliOptions) : IO Transport.Endpoint := do
-  pure <| .tcp (← selectPort opts)
-
-private def usesAutomaticTcpEndpoint (opts : CliOptions) : Bool :=
-  opts.requestedPort?.isNone
+private def selectEndpoint : IO Transport.Endpoint := do
+  pure <| .tcp (← selectPort)
 
 private partial def selectUnoccupiedEndpoint
     (desired : DesiredConfig)
-    (opts : CliOptions)
     (tries : Nat := 10) : IO Transport.Endpoint := do
-  let endpoint ← selectEndpoint opts
+  let endpoint ← selectEndpoint
   let retryOrReject (message : String) : IO Transport.Endpoint := do
-    if usesAutomaticTcpEndpoint opts && tries > 0 then
-      selectUnoccupiedEndpoint desired opts (tries - 1)
+    if tries > 0 then
+      selectUnoccupiedEndpoint desired (tries - 1)
     else
       throw <| IO.userError message
   match ← daemonRootResult endpoint projectDaemonWorkspaceId with
@@ -593,8 +583,7 @@ private def registryEntryFor
     (daemonId : String)
     (capability : String)
     (pid : Nat)
-    (endpoint : Transport.Endpoint)
-    (opts : CliOptions) : IO SessionDescriptor := do
+    (endpoint : Transport.Endpoint) : IO SessionDescriptor := do
   let port? :=
     match endpoint with
     | .tcp port => some port.toNat
@@ -619,15 +608,13 @@ private def registryEntryFor
     configHash := desired.configHash
     daemonBin? := some desired.daemonBin.toString
     startedAt := ← Beam.utcTimestamp
-    requestedPort? := requestedPortNat? opts
   }
 
 private partial def startDaemonEntry
     (desired : DesiredConfig)
-    (opts : CliOptions)
     (controlDir : System.FilePath)
     (tries : Nat := 10) : IO (Transport.Endpoint × SessionDescriptor × IO.Process.Child daemonStdio) := do
-  let endpoint ← selectUnoccupiedEndpoint desired opts
+  let endpoint ← selectUnoccupiedEndpoint desired
   let logPath ← daemonStartupLogPathFor desired.root (some controlDir)
   let daemonId ← newDaemonGenerationId desired.configHash
   let identity : DaemonIdentity := { daemonId, configHash := desired.configHash }
@@ -637,7 +624,7 @@ private partial def startDaemonEntry
     try
       match ← waitForDaemon child endpoint logPath desired.root identity capability with
       | .ok () =>
-          let entry ← registryEntryFor desired daemonId capability child.pid.toNat endpoint opts
+          let entry ← registryEntryFor desired daemonId capability child.pid.toNat endpoint
           pure (.ok entry)
       | .error failure =>
           pure (.error failure)
@@ -650,43 +637,31 @@ private partial def startDaemonEntry
   | .error failure =>
     terminateDaemonChild child
     let endpointOccupied ← endpointAcceptsConnection endpoint
-    if shouldRetryAutomaticStartup
-        (usesAutomaticTcpEndpoint opts) tries endpointOccupied failure.endpointInUse then
-      return ← startDaemonEntry desired opts controlDir (tries - 1)
+    if shouldRetryStartup tries endpointOccupied failure.endpointInUse then
+      return ← startDaemonEntry desired controlDir (tries - 1)
     throw <| IO.userError failure.message
 
 def desiredConfig (home root : System.FilePath) (required : Backend) : IO DesiredConfig := do
-  let defaultPaths ← defaultBundlePaths home
-  let mut daemonBin := defaultPaths.daemon
-  let mut plugin? : Option System.FilePath := none
-  let mut leanCmd? : Option String := none
-  let mut rocqCmd? : Option String := none
-  let mut toolchain? : Option String := none
-  let mut bundleId := "default"
-  match required with
-  | .lean =>
-      if ← hasLeanProject root then
+  let (daemonBin, plugin?, leanCmd?, toolchain?, bundleId) ←
+    match required with
+    | .lean =>
+        unless ← hasLeanProject root do
+          throw <| IO.userError s!"could not resolve Lean Beam daemon config for {root}"
         let toolchain ← leanToolchain root
-        let (bundle, id) ← ensureToolchainBundle root home toolchain
+        let (bundle, bundleId) ← ensureToolchainBundle root home toolchain
         ensureLeanBundleExists bundle
-        daemonBin := bundle.daemon
-        plugin? := some bundle.plugin
-        leanCmd? := some (← leanBin root)
-        toolchain? := some toolchain
-        bundleId := id
-      else
-        throw <| IO.userError s!"could not resolve Lean Beam daemon config for {root}"
-  | .rocq =>
-      let daemonPaths ← ensureDefaultDaemon home
-      daemonBin := daemonPaths.daemon
-  if ← hasRocqProject root then
-    rocqCmd? ← maybeRocqCmd root
-  else if required == .rocq then
-    rocqCmd? := some (← rocqCmd root)
+        pure (bundle.daemon, some bundle.plugin, some (← leanBin root), some toolchain, bundleId)
+    | .rocq =>
+        pure (← ensureDefaultDaemon home, none, none, none, "default")
+  let rocqCmd? ←
+    if ← hasRocqProject root then
+      maybeRocqCmd root
+    else if required == .rocq then
+      some <$> rocqCmd root
+    else
+      pure none
   match required with
-  | .lean =>
-      if leanCmd?.isNone || plugin?.isNone then
-        throw <| IO.userError s!"could not resolve Lean Beam daemon config for {root}"
+  | .lean => pure ()
   | .rocq =>
       if rocqCmd?.isNone then
         throw <| IO.userError s!"could not resolve Rocq Beam daemon config for {root}"
@@ -1014,8 +989,7 @@ private def missingOwnerMessage
 private def startOwnedProjectDaemon
     (control : ProjectControl)
     (desired : DesiredConfig)
-    (backend : Backend)
-    (opts : CliOptions) : IO OwnedProjectDaemon := do
+    (backend : Backend) : IO OwnedProjectDaemon := do
   match ← observeProjectRegistryAt desired.root control.registry with
   | .absent => pure ()
   | .live entry =>
@@ -1039,7 +1013,7 @@ private def startOwnedProjectDaemon
   | .unusable entry reason =>
       throw <| IO.userError <|
         generationRecoveryMessage desired.root control.dir entry reason
-  let (endpoint, entry, child) ← startDaemonEntry desired opts control.dir
+  let (endpoint, entry, child) ← startDaemonEntry desired control.dir
   try
     writeRegistry control entry
   catch err =>
@@ -1202,7 +1176,7 @@ def withProjectDaemonOwner
   -- Allocate all fallible owner bookkeeping before the child and registry generation exist.
   let exitCodeRef ← IO.mkRef (none : Option UInt32)
   let owned ← withProjectControl root (explicitControlDir? := some controlDir) fun control =>
-    startOwnedProjectDaemon control desired backend opts
+    startOwnedProjectDaemon control desired backend
   try
     act {
         client := owned.client

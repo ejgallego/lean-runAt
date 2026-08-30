@@ -477,19 +477,6 @@ if [ "$port1" = "$port2" ]; then
   exit 1
 fi
 
-port_scope_out="$(beam_wrapper_mktemp_file port-scope-out)"
-port_scope_err="$(beam_wrapper_mktemp_file port-scope-err)"
-if "$beam_script" --root "$primary_root" --port 43123 stats >"$port_scope_out" 2>"$port_scope_err"; then
-  echo "expected --port on an attaching command to be rejected" >&2
-  cat "$port_scope_out" >&2
-  exit 1
-fi
-if ! grep -Fq -- "--port is only valid" "$port_scope_err"; then
-  echo "expected rejected attaching --port to explain the owner-only scope" >&2
-  cat "$port_scope_err" >&2
-  exit 1
-fi
-
 (
   cd "$primary_root"
   "$beam_script" --root "$primary_root" stop > /dev/null

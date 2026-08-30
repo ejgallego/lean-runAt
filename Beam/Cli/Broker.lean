@@ -441,10 +441,10 @@ def callBrokerWithProgress
   let visibleClientRequestId? := wrapperReq.visibleClientRequestId?
   let showProgress ← progressEnabled
   let callbacks : StreamCallbacks := {
-    onFileProgress := fun _ progress => do
+    onFileProgress := fun progress => do
       if showProgress then
         IO.eprintln <| annotateRunatMessage visibleClientRequestId? (spec.progressMsg progress)
-    onDiagnostic := fun _ diagnostic =>
+    onDiagnostic := fun diagnostic =>
       IO.eprintln <| annotateRunatMessage visibleClientRequestId? (formatStreamDiagnostic diagnostic)
   }
   let progressSpec? := if showProgress then some spec else none

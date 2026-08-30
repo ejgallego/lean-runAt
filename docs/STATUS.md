@@ -188,8 +188,8 @@ as an implementation boundary.
 - Wrapper sessions use explicit ownership. `lean-beam serve` is the only wrapper command that
   starts a project daemon; it passes the daemon an inherited pipe and remains alive as the owner.
   Ordinary wrapper calls only attach to that generation and
-  fail with the exact owner-start command when none is live. The optional `--port` override belongs
-  only to `serve`; attaching commands reject it. Owner EOF shuts down request admission,
+  fail with the exact owner-start command when none is live. Beam chooses the private daemon
+  endpoint and publishes it only through the session descriptor. Owner EOF shuts down request admission,
   marks admitted requests for cancellation, and closes backend sessions and the daemon after those
   requests drain; a backend success that completed before cancellation remains successful. This
   happens without heartbeat timeouts or filesystem leases and works across PID namespaces because

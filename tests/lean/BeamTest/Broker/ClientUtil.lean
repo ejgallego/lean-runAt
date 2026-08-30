@@ -39,9 +39,9 @@ def runClientWithStream
   let progressRef ← IO.mkRef #[]
   let diagnosticRef ← IO.mkRef #[]
   let resp ← Beam.Broker.sendRequestWithCallbacks endpoint (inFixtureWorkspace req) {
-    onFileProgress := fun _ progress =>
+    onFileProgress := fun progress =>
       progressRef.modify fun seen => seen.push progress
-    onDiagnostic := fun _ diagnostic =>
+    onDiagnostic := fun diagnostic =>
       diagnosticRef.modify fun seen => seen.push diagnostic
   }
   pure (resp, ← progressRef.get, ← diagnosticRef.get)
@@ -50,10 +50,16 @@ def runClientWithProgress
     (endpoint : Beam.Broker.Endpoint)
     (req : Beam.Broker.Request) : IO (Beam.Broker.Response × Array ProgressEvent) := do
   let progressRef ← IO.mkRef #[]
-  let resp ← Beam.Broker.sendRequestWithCallbacks endpoint (inFixtureWorkspace req) {
-    onFileProgress := fun clientRequestId? progress =>
-      progressRef.modify fun seen => seen.push { clientRequestId?, progress }
-  }
+  let result ← Beam.Broker.sendRequestWithStreamResult endpoint (inFixtureWorkspace req) fun stream =>
+    match stream with
+    | .fileProgress clientRequestId? progress =>
+        progressRef.modify fun seen => seen.push { clientRequestId?, progress }
+    | .diagnostic .. | .response .. => pure ()
+  let resp ←
+    match result with
+    | .ok response => pure response
+    | .error failure =>
+        throw <| IO.userError s!"broker request failed: {failure.detail}"
   pure (resp, ← progressRef.get)
 
 def runClient (endpoint : Beam.Broker.Endpoint) (req : Beam.Broker.Request) : IO Beam.Broker.Response := do

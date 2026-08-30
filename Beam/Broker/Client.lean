@@ -13,8 +13,8 @@ open Lean
 namespace Beam.Broker
 
 structure StreamCallbacks where
-  onFileProgress : Option String → SyncFileProgress → IO Unit := fun _ _ => pure ()
-  onDiagnostic : Option String → StreamDiagnostic → IO Unit := fun _ _ => pure ()
+  onFileProgress : SyncFileProgress → IO Unit := fun _ => pure ()
+  onDiagnostic : StreamDiagnostic → IO Unit := fun _ => pure ()
 
 abbrev Endpoint := Transport.Endpoint
 
@@ -156,10 +156,10 @@ partial def sendRequestWithCallbacksResult
     match stream with
     | .response .. =>
         pure ()
-    | .fileProgress clientRequestId? progress =>
-        callbacks.onFileProgress clientRequestId? progress
-    | .diagnostic clientRequestId? diagnostic =>
-        callbacks.onDiagnostic clientRequestId? diagnostic
+    | .fileProgress _ progress =>
+        callbacks.onFileProgress progress
+    | .diagnostic _ diagnostic =>
+        callbacks.onDiagnostic diagnostic
 
 partial def sendRequestWithCallbacks
     (endpoint : Endpoint)
