@@ -1477,11 +1477,15 @@ payload = json.loads(os.environ["MCP_CONFIG_JSON"])
 expected_toolchain = os.environ["EXPECTED_TOOLCHAIN"]
 lean_cmd = payload.get("lean_cmd")
 lean_plugin = payload.get("lean_plugin")
+lean_lake_helper = payload.get("lean_lake_helper")
 if not isinstance(lean_cmd, str) or not lean_cmd:
     print(f"mcp-config did not return a lean_cmd: {payload}", file=sys.stderr)
     sys.exit(1)
 if not isinstance(lean_plugin, str) or not Path(lean_plugin).is_file():
     print(f"mcp-config did not return an existing lean_plugin: {payload}", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(lean_lake_helper, str) or not Path(lean_lake_helper).is_file():
+    print(f"mcp-config did not return an existing lean_lake_helper: {payload}", file=sys.stderr)
     sys.exit(1)
 if payload.get("toolchain") != expected_toolchain:
     print(f"mcp-config returned unexpected toolchain: {payload}", file=sys.stderr)

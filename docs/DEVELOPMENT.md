@@ -222,9 +222,10 @@ Keep these stdio invariants explicit:
 - JSON-RPC envelopes and current-method parameter objects reject undeclared fields; protocol
   extensions belong in `_meta` or in a deliberately versioned schema change
 
-The installed wrapper passes the matching `beam-cli`; on lazy first use, `Beam.Mcp.Runtime` runs
-`beam-cli` with the canonical root to obtain `mcp-config`. Keep bundle selection in that narrow
-CLI/runtime boundary. Clients supply descriptors, not raw commands or plugin paths.
+The installed wrapper passes the matching `beam-cli`; on lazy first use, `Beam.Mcp.Runtime` obtains
+one Lean command/plugin/helper runtime from `beam-cli --root <root> mcp-config`. Keep bundle
+selection in that narrow boundary: do not accept either explicit runtime flag alone or mix bundle
+artifacts. Clients supply descriptors, not raw commands or plugin paths.
 
 When adding an MCP-facing operation:
 

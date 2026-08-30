@@ -1115,6 +1115,7 @@ private def brokerConfigSame (left right : BrokerConfig) : Bool :=
   left.root == right.root &&
     left.leanCmd? == right.leanCmd? &&
     left.leanPlugin? == right.leanPlugin? &&
+    left.leanLakeHelper? == right.leanLakeHelper? &&
     left.rocqCmd? == right.rocqCmd?
 
 private def detachBackendSession
@@ -1828,9 +1829,9 @@ private def saveOleanCore
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let started ← liftHandlerIO <| startTrackedDiagnosticsBarrierIO server req path emitProgress?
     emitDiagnostic? (cancelRef? := cancelRef?)
-  let leanCmd? ← liftHandlerIO <| server.withState do
+  let (leanCmd?, lakeHelper?) ← liftHandlerIO <| server.withState do
     let workspace ← requireWorkspace req.workspaceId
-    pure workspace.config.leanCmd?
+    pure (workspace.config.leanCmd?, workspace.config.leanLakeHelper?)
   liftHandlerIO <| propagatePendingCancellation started.session cancelRef?
   let barrier ← awaitWaitForDiagnosticsBarrier
     s!"save_olean sync barrier clientRequestId={optionLabel req.clientRequestId?} uri={started.uri} version={started.version}"
@@ -1858,7 +1859,7 @@ private def saveOleanCore
       barrierOutcome.completionDiagnostics barrierProgress?
   let spec ← withFailureProgress barrierProgress? <| liftBrokerFailureIO <|
     mkLeanSaveSpec started.session.root path
-      { hash := started.textTraceHash, mtime := started.textMTime } leanCmd?
+      { hash := started.textTraceHash, mtime := started.textMTime } leanCmd? lakeHelper?
   let syncResult :=
     mkSyncFileResult spec.relPath started.version currentDiagnostics saveReadiness
   withFailureProgress barrierProgress? <|

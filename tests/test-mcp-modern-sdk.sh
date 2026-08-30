@@ -61,7 +61,7 @@ run_sdk_mode() {
     --mode "$mode"
 }
 
-run_step "build MCP server" lake build Beam.LSP:shared lean-beam-mcp
+run_step "build MCP server" lake build Beam.LSP:shared beam-daemon lean-beam-mcp
 run_step "install official MCP TypeScript client" install_sdk
 mkdir -p "$project_root"
 rsync -a --exclude='.beam/' tests/save_olean_project/ "$project_root"/

@@ -113,11 +113,16 @@ local descriptor as a sandbox.
 The installed `bin/lean-beam-mcp` wrapper is the public setup path. It pairs the MCP executable with
 the matching installed `beam-cli` and passes `--beam-cli`. On first use of a canonical root,
 [Beam/Mcp/Runtime.lean](../Beam/Mcp/Runtime.lean) asks
-`beam-cli --root <root> mcp-config` for the project-specific Lean command and runAt plugin.
+`beam-cli --root <root> mcp-config` for the project-specific Lean command, runAt plugin, and
+target-built Lake helper. The helper exchanges only JSON metadata with the MCP broker, so workspace
+configuration and zero-build save traces remain owned by the selected Lean/Lake build even when the
+MCP executable itself was built with a different Lean commit.
 
 Keep bundle resolution in this CLI/runtime boundary. Normal MCP clients should pass the workspace
-descriptor, not raw Lean commands or plugin paths. Direct developer runs may still pass
-`--lean-cmd` and `--lean-plugin` explicitly.
+descriptor, not raw Lean commands or plugin paths. Source-tree tests and direct developer runs may
+instead pass `--lean-cmd` and `--lean-plugin` together when the plugin has a sibling `beam-daemon` in
+the standard build or install layout. MCP rejects either explicit flag alone, combining
+`--beam-cli` with explicit runtime flags, and an explicit plugin without that sibling helper.
 
 `lean_drop_workspace` is optional cache management, not context selection. It evicts the runtime
 for its descriptor and invalidates proof handles owned by that runtime. Drop is idempotent and

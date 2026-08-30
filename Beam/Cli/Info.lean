@@ -248,6 +248,7 @@ def printMcpConfig (home : System.FilePath) (opts : CliOptions) : IO Unit := do
     ("root", toJson root.toString),
     ("lean_cmd", toJson leanCmd),
     ("lean_plugin", toJson plugin.toString),
+    ("lean_lake_helper", toJson desired.daemonBin.toString),
     ("toolchain", toJson desired.toolchain?),
     ("bundle_id", toJson desired.bundleId)
   ]

@@ -2418,6 +2418,14 @@ def run_multi_toolchain_workspaces(repo_root, fixture_root, timeout, server_trac
         roots = [tmp_root / "fixture-toolchain", tmp_root / "current-toolchain"]
         for root in roots:
             copy_project_fixture(fixture_root, root)
+            lakefile = root / "lakefile.toml"
+            lakefile.write_text(
+                lakefile.read_text(encoding="utf-8").replace(
+                    "\n[[lean_lib]]",
+                    '\nmoreGlobalServerArgs = ["-Dpp.universes=true"]\n\n[[lean_lib]]',
+                ),
+                encoding="utf-8",
+            )
         (roots[1] / "lean-toolchain").write_text(current_toolchain + "\n", encoding="utf-8")
         expected_toolchains = [fixture_toolchain, current_toolchain]
         configs = [beam_cli_mcp_config(repo_root, root, timeout) for root in roots]
@@ -2428,6 +2436,31 @@ def run_multi_toolchain_workspaces(repo_root, fixture_root, timeout, server_trac
             )
             lean_cmd = config.get("lean_cmd")
             require(isinstance(lean_cmd, str) and lean_cmd, f"mcp-config omitted lean_cmd for {root}: {config}")
+            lake_helper = config.get("lean_lake_helper")
+            require(
+                isinstance(lake_helper, str) and Path(lake_helper).is_file(),
+                f"mcp-config omitted the target Lake helper for {root}: {config}",
+            )
+            helper_env = subprocess.run(
+                [lake_helper, "lake-helper", "server-env"],
+                input=json.dumps({"root": str(root), "leanCmd": lean_cmd}),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                timeout=timeout,
+                check=False,
+                cwd=str(root),
+            )
+            require(
+                helper_env.returncode == 0,
+                f"target Lake helper failed for {root}: {helper_env.stdout}{helper_env.stderr}",
+            )
+            helper_result = json.loads(helper_env.stdout).get("result", {})
+            require(
+                "-Dpp.universes=true" in helper_result.get("moreServerArgs", []),
+                f"target Lake helper omitted moreGlobalServerArgs for {root}: {helper_result}",
+            )
             version = subprocess.run(
                 [lean_cmd, "--version"],
                 stdout=subprocess.PIPE,
@@ -2450,6 +2483,10 @@ def run_multi_toolchain_workspaces(repo_root, fixture_root, timeout, server_trac
             configs[0].get("lean_plugin") != configs[1].get("lean_plugin"),
             f"different toolchains resolved to the same Beam plugin: {configs}",
         )
+        require(
+            configs[0].get("lean_lake_helper") != configs[1].get("lean_lake_helper"),
+            f"different toolchains resolved to the same target Lake helper: {configs}",
+        )
 
         client = McpClient(
             repo_root,
@@ -2462,6 +2499,22 @@ def run_multi_toolchain_workspaces(repo_root, fixture_root, timeout, server_trac
         try:
             client.initialize()
             run_concurrent_workspace_updates(client, roots, "toolchain-first-use")
+            for root in roots:
+                saved = client.call_tool(
+                    "lean_save",
+                    {
+                        "path": "SaveSmoke/B.lean",
+                        "workspace": workspace_descriptor(root),
+                    },
+                )
+                require(
+                    saved.get("module") == "SaveSmoke.B",
+                    f"cross-toolchain save returned the wrong module for {root}: {saved}",
+                )
+                require(
+                    Path(saved.get("trace", "")).is_file(),
+                    f"cross-toolchain save did not publish a Lake trace for {root}: {saved}",
+                )
             require_active_lean_workspaces(client, roots, "multi-toolchain process")
         finally:
             client.close()

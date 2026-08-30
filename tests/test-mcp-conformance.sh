@@ -93,7 +93,7 @@ start_bridge() {
   bridge_url="$(wait_for_ready_url "$ready_file")" || return
 }
 
-run_step "build MCP server" lake build Beam.LSP:shared lean-beam-mcp
+run_step "build MCP server" lake build Beam.LSP:shared beam-daemon lean-beam-mcp
 mkdir -p "$npm_cache"
 
 scenarios="${MCP_CONFORMANCE_SCENARIOS:-server-initialize ping tools-list}"

@@ -551,6 +551,58 @@ private def checkRuntimeSetupErrors : IO Unit := do
     catch _ =>
       pure ()
 
+  let projectRoot ← Beam.resolveExistingPath (← IO.currentDir)
+  let plugin ← BeamTest.TestHarness.pluginPath
+  match ← Beam.Mcp.Runtime.mkBrokerConfig {
+      leanCmd? := some "lean"
+      leanPlugin? := some plugin.toString
+    } projectRoot with
+  | .error err =>
+      throw <| IO.userError s!"explicit MCP runtime setup failed: {err.message}"
+  | .ok config =>
+      require "explicit MCP runtime should infer its sibling target Lake helper"
+        config.leanLakeHelper?.isSome
+
+  for (label, options) in #[
+      ("Lean command only", ({ beamCli? := some "unused", leanCmd? := some "lean" } : Beam.Mcp.Runtime.Options)),
+      ("Lean plugin only", ({ beamCli? := some "unused", leanPlugin? := some plugin.toString } : Beam.Mcp.Runtime.Options)),
+      ("beam-cli with explicit runtime", ({
+        beamCli? := some "unused"
+        leanCmd? := some "lean"
+        leanPlugin? := some plugin.toString
+      } : Beam.Mcp.Runtime.Options))
+    ] do
+    match ← Beam.Mcp.Runtime.mkBrokerConfig options projectRoot with
+    | .ok _ =>
+        throw <| IO.userError s!"{label} MCP runtime setup succeeded unexpectedly"
+    | .error err =>
+        require s!"{label} should be an invalidRequest error" (err.code == -32600)
+        require s!"{label} should reject mixed or partial runtime sources"
+          (err.message.contains "choose exactly one Lean runtime source")
+
+  let isolatedPluginDir :=
+    System.FilePath.mk s!"/tmp/lean-beam-mcp-plugin-without-helper-{← IO.monoNanosNow}"
+  try
+    IO.FS.createDirAll isolatedPluginDir
+    let isolatedPlugin := isolatedPluginDir / plugin.fileName.getD "beam-lsp-plugin"
+    IO.FS.writeFile isolatedPlugin "not loaded by this setup check\n"
+    match ← Beam.Mcp.Runtime.mkBrokerConfig {
+        leanCmd? := some "lean"
+        leanPlugin? := some isolatedPlugin.toString
+      } projectRoot with
+    | .ok _ =>
+        throw <| IO.userError "helperless explicit MCP runtime setup succeeded unexpectedly"
+    | .error err =>
+        require "helperless explicit MCP runtime should be an invalidRequest error" (err.code == -32600)
+        require "helperless explicit MCP runtime should name the target Lake helper"
+          (err.message.contains "could not locate the target Lake helper")
+  finally
+    try
+      if ← isolatedPluginDir.pathExists then
+        IO.FS.removeDirAll isolatedPluginDir
+    catch _ =>
+      pure ()
+
 private def expectResponse (label : String) (value : Option Json) : IO Json := do
   match value with
   | some json => pure json

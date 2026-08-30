@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Author: Emilio J. Gallego Arias
 -/
 
+import Beam.Broker.LakeEnv
 import BeamTest.Broker.TestUtil
 import Lean
 
@@ -13,11 +14,31 @@ namespace BeamTest.Broker.StartupHandshakeTest
 
 open BeamTest.Broker.TestUtil
 
+private def checkWorkspaceFallbackEnv (root : System.FilePath) : IO Unit := do
+  let invalidRoot := root / "invalid-workspace"
+  IO.FS.createDirAll invalidRoot
+  IO.FS.writeFile (invalidRoot / "lakefile.lean") "this is not a valid Lake configuration\n"
+  let noConfigEnv ← Beam.Broker.leanServerLakeEnv root (some "lean")
+  let invalidConfigEnv ← Beam.Broker.leanServerLakeEnv invalidRoot (some "lean")
+  for serverEnv in #[noConfigEnv, invalidConfigEnv] do
+    let some (_, some loaderPath) := serverEnv.env.find? (·.1 == Lake.sharedLibPathEnvVar)
+      | throw <| IO.userError s!"expected backend environment variable {Lake.sharedLibPathEnvVar}"
+    if loaderPath.isEmpty then
+      throw <| IO.userError s!"expected nonempty backend environment variable {Lake.sharedLibPathEnvVar}"
+  if noConfigEnv.env.any (·.1 == Lake.invalidConfigEnvVar) then
+    throw <| IO.userError "plain Lean fallback unexpectedly marked Lake configuration invalid"
+  unless invalidConfigEnv.env.any (·.1 == Lake.invalidConfigEnvVar) do
+    throw <| IO.userError "invalid same-version Lake configuration should remain marked invalid"
+
+private def fakeLeanInstallProbe :=
+  "if [ \"${1:-}\" = \"--print-prefix\" ]; then exec lean --print-prefix; fi"
+
 private def writeResponseErrorServer (root : System.FilePath) : IO System.FilePath := do
   let script := root / "fake-lean-startup-response-error.sh"
   let body := String.intercalate "\n" [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
+    fakeLeanInstallProbe,
     "printf '%s\\n' \"$$\" > \"$(dirname \"$0\")/fake-lean.pid\"",
     "frame() {",
     "  local body=\"$1\"",
@@ -56,6 +77,7 @@ private def writeAbruptExitServer (root : System.FilePath) : IO System.FilePath 
   let body := String.intercalate "\n" [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
+    fakeLeanInstallProbe,
     "python3 -c 'import sys; sys.stderr.buffer.write(b\"stderr-prefix-start\\n\" + bytes([0xc3, 0xa9]) * 10000 + b\"\\nAstderr-tail-marker\\n\")'",
     "exit 23"
   ] ++ "\n"
@@ -115,6 +137,7 @@ def main : IO Unit := do
   IO.FS.createDirAll root
   let plugin ← BeamTest.TestHarness.pluginPath
   try
+    checkWorkspaceFallbackEnv root
     let responseErrorServer ← writeResponseErrorServer root
     checkStartupFailure root responseErrorServer plugin "initialize failed" (checkPidGone := true)
     let abruptExitServer ← writeAbruptExitServer root
