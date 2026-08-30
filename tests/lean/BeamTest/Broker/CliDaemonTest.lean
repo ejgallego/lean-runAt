@@ -1100,7 +1100,7 @@ private def checkLockLifecycle : IO Unit := do
 
 private def writeFakeBundleArtifacts (workspace : System.FilePath) : IO Unit := do
   let paths := Beam.Cli.bundlePathsFor workspace
-  for path in #[paths.daemon, paths.client, paths.plugin] do
+  for path in #[paths.daemon, paths.plugin] do
     if let some parent := path.parent then
       IO.FS.createDirAll parent
     IO.FS.writeFile path "fake artifact\n"
@@ -1255,8 +1255,6 @@ private def checkRuntimeBundleHelpers : IO Unit := do
   let paths := Beam.Cli.bundlePathsFor workspace
   require "bundle daemon path should point at workspace build output"
     (paths.daemon == workspace / ".lake" / "build" / "bin" / "beam-daemon")
-  require "bundle client path should point at workspace build output"
-    (paths.client == workspace / ".lake" / "build" / "bin" / "beam-client")
   require "bundle plugin path should live under workspace build lib"
     (paths.plugin.toString.startsWith (workspace / ".lake" / "build" / "lib").toString)
   require "state directory should remain the public .beam path"
@@ -1342,23 +1340,23 @@ private def checkRuntimeBundleMetadataAcceptance : IO Unit := do
     IO.FS.removeFile metadataPath
     writeBundleMetadataFile bundleDir toolchain sourceHash sampleFingerprint workspace
 
-    let client := (Beam.Cli.bundlePathsFor workspace).client
-    IO.FS.removeFile client
-    IO.FS.createDir client
+    let daemon := (Beam.Cli.bundlePathsFor workspace).daemon
+    IO.FS.removeFile daemon
+    IO.FS.createDir daemon
     require "bundle should reject a required artifact path that is a directory"
       (!(← Beam.Cli.bundleReady bundleDir toolchain sourceHash sampleFingerprint))
     require "bundle with a directory artifact should not expose a source hash"
       ((← Beam.Cli.completeBundleSourceHash? bundleDir).isNone)
-    IO.FS.removeDir client
+    IO.FS.removeDir daemon
 
-    let symlinkTarget := root / "client-symlink-target"
+    let symlinkTarget := root / "daemon-symlink-target"
     IO.FS.writeFile symlinkTarget "fake artifact\n"
-    createSymlink "bundle artifact fixture" symlinkTarget client
+    createSymlink "bundle artifact fixture" symlinkTarget daemon
     require "bundle should reject a symlinked required artifact"
       (!(← Beam.Cli.bundleReady bundleDir toolchain sourceHash sampleFingerprint))
     require "bundle with a symlinked artifact should not expose a source hash"
       ((← Beam.Cli.completeBundleSourceHash? bundleDir).isNone)
-    IO.FS.removeFile client
+    IO.FS.removeFile daemon
 
     require "bundle should reject matching metadata without required artifacts"
       (!(← Beam.Cli.bundleReady bundleDir toolchain sourceHash sampleFingerprint))

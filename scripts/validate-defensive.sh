@@ -375,6 +375,7 @@ log "cloning checkout into $clone_root"
 log "overlaying current working tree state"
 "$system_rsync" -a --delete \
   --exclude='.git/' \
+  --exclude='.lake/' \
   --exclude='.beam/' \
   --exclude='.codex-worktrees/' \
   "$repo_root"/ "$clone_root"/

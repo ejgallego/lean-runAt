@@ -206,7 +206,7 @@ def buildToolchainBundle (home : System.FilePath) (toolchain srcHash : String)
   let lake ← lakeInvocationFor bundleDir toolchain fingerprint
   let out ← IO.Process.output {
     cmd := lake.cmd
-    args := lake.args ++ #["build", "Beam.LSP:shared", "beam-daemon", "beam-client"]
+    args := lake.args ++ #["build", "Beam.LSP:shared", "beam-daemon"]
     env := lake.env
     cwd := workspace.toString
   }
@@ -275,12 +275,12 @@ def ensureToolchainBundle (root home : System.FilePath) (toolchain : String) : I
 
 def ensureDefaultDaemonHelpers (home : System.FilePath) : IO BundlePaths := do
   let paths ← defaultBundlePaths home
-  if (← paths.daemon.pathExists) && (← paths.client.pathExists) then
+  if ← paths.daemon.pathExists then
     pure paths
   else
     let out ← IO.Process.output {
       cmd := "lake"
-      args := #["build", "beam-daemon", "beam-client"]
+      args := #["build", "beam-daemon"]
       cwd := home.toString
     }
     if out.exitCode != 0 then

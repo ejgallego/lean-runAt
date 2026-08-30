@@ -282,9 +282,8 @@ the selected leaf without following links before every status or attachment oper
 drift therefore fails closed instead of silently weakening an already published session boundary.
 
 Each wrapper session publishes exactly one frozen workspace. Wrapper mode does not allow runtime
-`init_workspace`, `list_workspaces`, or `drop_workspace` requests. The
-supported semantic `request-stream` also excludes process-wide `shutdown` and `reset_stats`; use
-the dedicated `lean-beam --root ROOT stop` command for lifecycle control.
+`init_workspace`, `list_workspaces`, or `drop_workspace` requests. Use the dedicated
+`lean-beam --root ROOT stop` command for lifecycle control.
 
 Use a stable external session directory when ownership must remain fenced while the project path is
 deleted and recreated; deleting a project-local `.beam` necessarily deletes its default fence.
@@ -306,15 +305,10 @@ For a current descriptor, the selected `--root` must match its recorded workspac
 using the same session directory with an unrelated root cannot quarantine the session. `status`
 reports this as `sessionSelectorMismatch`, not as a lifecycle state or recovery requirement.
 
-Machine clients should avoid root auto-detection and raw port/session fields:
-
-```bash
-lean-beam --root /workspace/a request-stream \
-  '{"op":"stats","clientRequestId":"agent-stats-1"}'
-```
-
-The wrapper selects the frozen workspace and injects root, workspace identity, generation
-capability, and endpoint. `beam-client --port ...` is lower-level maintainer/debug tooling.
+Machine clients should pass an explicit `--root`, invoke the typed wrapper operations, and consume
+their final stdout JSON. Wrapper stderr remains human-facing. Use MCP when a client requires
+structured live progress or diagnostic notifications; Beam intentionally does not expose its raw
+port, session capability, or generic broker request record as an installed client interface.
 
 The `python3` line extracts `result.version` for shell examples. You can also copy that version
 number from the printed `lean-beam update` JSON.

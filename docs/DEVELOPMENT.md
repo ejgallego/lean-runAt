@@ -445,12 +445,10 @@ A paused holder keeps its pipe open and remains valid without expiry. If the pro
 disappears, cleanup uses the already resolved control path without recreating the project.
 
 Human commands may infer a project root only when the Lean and Rocq candidates agree or exactly one
-exists; otherwise they report every candidate and require `--root`. The supported machine stream requires explicit
-`--root` and a nonempty `clientRequestId`; its semantic JSON cannot supply `root`, `workspaceId`,
-capability, dynamic workspace operations, or process-wide control operations such as `shutdown` and
-`resetStats`. The wrapper selects the descriptor binding and injects session metadata. Lifecycle
-shutdown remains the dedicated `lean-beam --root ROOT stop` command so it can publish `draining` first. Raw
-port-oriented `beam-client` requests are maintainer/debug tooling. A wrapper-owned daemon rejects
+exists; otherwise they report every candidate and require `--root`. Automated callers should pass
+an explicit root, invoke typed wrapper commands, and consume final stdout JSON. Lifecycle shutdown
+remains the dedicated `lean-beam --root ROOT stop` command so it can publish `draining` first. Beam
+does not install a raw port-oriented generic broker client. A wrapper-owned daemon rejects
 `initWorkspace`, `listWorkspaces`, and `dropWorkspace`; a separately launched broker retains the
 generic multi-workspace surface and has its own explicit owner. Broker runtime ownership is a typed
 `ServerMode`: wrapper identity and capability cannot be constructed independently.

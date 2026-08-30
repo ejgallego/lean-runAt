@@ -36,6 +36,10 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 - Local builds now write to Lake's toolchain-scoped artifact cache and restore cached outputs into
   `.lake/build`, preserving the paths used by Beam's wrapper, installer, and tests. CI restores that
   cache for Lean jobs and lets one job per OS publish each commit's updated cache.
+- The pre-stable `lean-beam request-stream` and raw `beam-client` executable have been removed.
+  Automated wrapper callers use typed commands and final stdout JSON; clients that need structured
+  live events use MCP. The wrapper-to-daemon stream remains an internal, library-tested transport.
+  Session descriptor schema 4 no longer records or hashes a client executable.
 - Wrapper lifecycle commands now use the explicit `serve`, `status`, and `stop` vocabulary;
   `stop` and `recover` require `--root`, alternate selectors use `--session-dir`, and wrapper
   descriptors contain exactly one frozen workspace. Successful lifecycle commands use typed

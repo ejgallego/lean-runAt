@@ -83,9 +83,6 @@ lean_exe "beam-daemon" where
   root := `Beam.Broker.ServerMain
   supportInterpreter := true
 
-lean_exe "beam-client" where
-  root := `Beam.BrokerClient
-
 lean_exe "lean-beam-mcp" where
   root := `Beam.Mcp.ServerMain
   supportInterpreter := true
@@ -106,9 +103,9 @@ lean_exe "beam-daemon-save-stream-test" where
   srcDir := "tests/lean"
   root := `BeamTest.Broker.SaveStreamTestMain
 
-lean_exe "beam-daemon-request-stream-test" where
+lean_exe "beam-daemon-stream-contract-test" where
   srcDir := "tests/lean"
-  root := `BeamTest.Broker.RequestStreamContractTestMain
+  root := `BeamTest.Broker.StreamContractTestMain
 
 lean_exe "beam-sync-result-test" where
   srcDir := "tests/lean"

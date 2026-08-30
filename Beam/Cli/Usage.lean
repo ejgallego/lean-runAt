@@ -48,7 +48,6 @@ def usage : String :=
     "  beam [--root PATH] [--session-dir DIR] status",
     "  beam --root PATH [--session-dir DIR] stop",
     "  beam --root PATH [--session-dir DIR] recover --generation ID | --force",
-    "  beam --root PATH [--session-dir DIR] request-stream <json|->",
     "",
     "Project-session commands accept an absolute --session-dir DIR as an exact alternate session selection.",
     "Use the same --root and --session-dir for serving, attachment, diagnostics, stopping, and recovery.",
@@ -82,7 +81,6 @@ def usage : String :=
     "Wrapper diagnostics and progress are human-facing on stderr.",
     "Set BEAM_DEBUG_TEXT=1 to print the exact escaped text and UTF-8 bytes sent for text-carrying",
     "Lean probe requests.",
-    "For machine-readable streaming diagnostics/progress, use beam --root PATH request-stream.",
     "For the Lean workflow contract and anti-patterns, see skills/lean-beam/SKILL.md."
   ]
 

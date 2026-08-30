@@ -104,7 +104,6 @@ review context.
 The repo includes:
 
 - `lake exe beam-daemon`
-- `lake exe beam-client`
 - `lake exe beam-daemon-smoke-test`
 - `lake exe beam-daemon-rocq-smoke-test`
 - [scripts/lean-beam](scripts/lean-beam)

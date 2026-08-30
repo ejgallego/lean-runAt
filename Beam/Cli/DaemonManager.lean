@@ -120,7 +120,7 @@ private def computeConfigHash
     (leanCmd? : Option String)
     (plugin? : Option System.FilePath)
     (rocqCmd? : Option String)
-    (daemonBin clientBin : System.FilePath)
+    (daemonBin : System.FilePath)
     (bundleId : String) : String := Id.run do
   let mut acc : UInt64 := 14695981039346656037
   acc := mixField acc root.toString
@@ -128,7 +128,6 @@ private def computeConfigHash
   acc := mixField acc (plugin?.map (·.toString) |>.getD "")
   acc := mixField acc (rocqCmd?.getD "")
   acc := mixField acc daemonBin.toString
-  acc := mixField acc clientBin.toString
   acc := mixField acc bundleId
   s!"{acc.toNat}"
 
@@ -618,7 +617,6 @@ private def registryEntryFor
       bundleId? := some desired.bundleId
     }
     configHash := desired.configHash
-    clientBin? := some desired.clientBin.toString
     daemonBin? := some desired.daemonBin.toString
     startedAt := ← Beam.utcTimestamp
     requestedPort? := requestedPortNat? opts
@@ -660,7 +658,6 @@ private partial def startDaemonEntry
 def desiredConfig (home root : System.FilePath) (required : Backend) : IO DesiredConfig := do
   let defaultPaths ← defaultBundlePaths home
   let mut daemonBin := defaultPaths.daemon
-  let mut clientBin := defaultPaths.client
   let mut plugin? : Option System.FilePath := none
   let mut leanCmd? : Option String := none
   let mut rocqCmd? : Option String := none
@@ -673,7 +670,6 @@ def desiredConfig (home root : System.FilePath) (required : Backend) : IO Desire
         let (bundle, id) ← ensureToolchainBundle root home toolchain
         ensureLeanBundleExists bundle
         daemonBin := bundle.daemon
-        clientBin := bundle.client
         plugin? := some bundle.plugin
         leanCmd? := some (← leanBin root)
         toolchain? := some toolchain
@@ -683,7 +679,6 @@ def desiredConfig (home root : System.FilePath) (required : Backend) : IO Desire
   | .rocq =>
       let helpers ← ensureDefaultDaemonHelpers home
       daemonBin := helpers.daemon
-      clientBin := helpers.client
   if ← hasRocqProject root then
     rocqCmd? ← maybeRocqCmd root
   else if required == .rocq then
@@ -695,7 +690,7 @@ def desiredConfig (home root : System.FilePath) (required : Backend) : IO Desire
   | .rocq =>
       if rocqCmd?.isNone then
         throw <| IO.userError s!"could not resolve Rocq Beam daemon config for {root}"
-  let configHash := computeConfigHash root leanCmd? plugin? rocqCmd? daemonBin clientBin bundleId
+  let configHash := computeConfigHash root leanCmd? plugin? rocqCmd? daemonBin bundleId
   pure {
     root
     leanCmd?
@@ -703,7 +698,6 @@ def desiredConfig (home root : System.FilePath) (required : Backend) : IO Desire
     rocqCmd?
     toolchain?
     daemonBin
-    clientBin
     bundleId
     configHash
   }

@@ -44,7 +44,6 @@ usage:
   lean-beam [--root PATH] [--session-dir DIR] status
   lean-beam --root PATH [--session-dir DIR] stop
   lean-beam --root PATH [--session-dir DIR] recover --generation ID | --force
-  lean-beam --root PATH [--session-dir DIR] request-stream <json|->
   lean-beam [--root PATH] cancel <request-id>
 
 notes:

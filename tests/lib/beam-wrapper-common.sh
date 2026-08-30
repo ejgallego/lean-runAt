@@ -6,7 +6,6 @@
 
 beam_script=""
 search_helper=""
-client=""
 beam_wrapper_tmp_root=""
 declare -a beam_wrapper_managed_roots=()
 declare -a beam_wrapper_managed_pids=()
@@ -20,7 +19,6 @@ beam_wrapper_last_owner_pid=""
 beam_wrapper_require_bins() {
   beam_script="$PWD/scripts/lean-beam"
   search_helper="$PWD/scripts/lean-beam-search"
-  client="$PWD/.lake/build/bin/beam-client"
 
   if [ ! -x "$beam_script" ]; then
     echo "missing lean-beam wrapper at $beam_script" >&2
@@ -29,11 +27,6 @@ beam_wrapper_require_bins() {
 
   if [ ! -x "$search_helper" ]; then
     echo "missing beam search helper at $search_helper" >&2
-    exit 1
-  fi
-
-  if [ ! -x "$client" ]; then
-    echo "missing CLI client at $client" >&2
     exit 1
   fi
 }

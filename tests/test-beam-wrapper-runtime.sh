@@ -149,10 +149,6 @@ primary_registry="$(beam_wrapper_registry_path "$primary_root")"
 beam_wrapper_expect_file "$primary_registry"
 pid1="$(read_json_field "$primary_registry" pid)"
 port1="$(read_json_field "$primary_registry" port)"
-client1="$(read_json_field "$primary_registry" clientBin 2>/dev/null || true)"
-if [ -z "$client1" ]; then
-  client1="$client"
-fi
 
 beam_wrapper_start_owner "$signal_root"
 signal_owner_pid="$beam_wrapper_last_owner_pid"
@@ -478,20 +474,6 @@ if [ "$pid1" = "$pid2" ]; then
 fi
 if [ "$port1" = "$port2" ]; then
   echo "expected distinct Beam daemon ports per project" >&2
-  exit 1
-fi
-
-cross_err="$(beam_wrapper_mktemp_file cross)"
-cross_req="$(beam_wrapper_mktemp_file cross-req)"
-printf '{"op":"ensure","workspaceId":"beam-cli-project","root":"%s"}\n' "$other_root" > "$cross_req"
-if "$client1" --port "$port1" request - <"$cross_req" >"$cross_err" 2>&1; then
-  echo "expected the CLI project workspace to reject another project root" >&2
-  cat "$cross_err" >&2
-  exit 1
-fi
-if ! grep -q "invalidParams" "$cross_err"; then
-  echo "expected cross-root Beam daemon request to fail with invalidParams" >&2
-  cat "$cross_err" >&2
   exit 1
 fi
 

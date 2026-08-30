@@ -147,7 +147,6 @@ runtime_payload_spec=(
   "required|sourceDirs|Beam|Beam"
   "required|runtimePaths|.lake/build/bin/beam-cli|libexec/beam-cli"
   "required|runtimePaths|.lake/build/bin/beam-daemon|libexec/beam-daemon"
-  "required|runtimePaths|.lake/build/bin/beam-client|libexec/beam-client"
   "required|runtimePaths|.lake/build/bin/lean-beam-mcp|libexec/lean-beam-mcp"
   "required|runtimePaths|.lake/build/lib/$beam_lsp_plugin_shared_lib|libexec/$beam_lsp_plugin_shared_lib"
   "required|wrapperPaths|scripts/lean-beam|bin/lean-beam"
@@ -1056,7 +1055,6 @@ resolve_prepared_toolchain_selection() {
 runtime_artifacts_ready() {
   [ -x "$beam_cli" ] \
     && [ -x "$repo_root/.lake/build/bin/beam-daemon" ] \
-    && [ -x "$repo_root/.lake/build/bin/beam-client" ] \
     && [ -x "$repo_root/.lake/build/bin/lean-beam-mcp" ] \
     && [ -f "$repo_root/.lake/build/lib/$beam_lsp_plugin_shared_lib" ]
 }
@@ -1172,7 +1170,7 @@ validate_runtime_payload_layout() {
         ;;
     esac
     case "$dest_rel" in
-      libexec/beam-cli|libexec/beam-daemon|libexec/beam-client|libexec/lean-beam-mcp|bin/lean-beam|bin/lean-beam-search|bin/lean-beam-mcp)
+      libexec/beam-cli|libexec/beam-daemon|libexec/lean-beam-mcp|bin/lean-beam|bin/lean-beam-search|bin/lean-beam-mcp)
         if [ ! -x "$path" ]; then
           die "installed runtime has a non-executable command: $path"
         fi
@@ -1202,7 +1200,7 @@ ensure_runtime_artifacts() {
   echo "building beam runtime artifacts" >&2
   (
     cd "$repo_root"
-    lake build Beam.LSP:shared beam-cli beam-daemon beam-client lean-beam-mcp
+    lake build Beam.LSP:shared beam-cli beam-daemon lean-beam-mcp
   )
   if ! runtime_artifacts_ready; then
     die "Beam runtime build completed but required artifacts are missing"

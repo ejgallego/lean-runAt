@@ -58,7 +58,7 @@ rsync -a \
 (
   cd "$tmp_repo"
   lake build beam-cli > /dev/null
-  if [ -x ".lake/build/bin/beam-daemon" ] || [ -x ".lake/build/bin/beam-client" ]; then
+  if [ -x ".lake/build/bin/beam-daemon" ]; then
     echo "expected lake build beam-cli not to prebuild Beam daemon helper executables" >&2
     exit 1
   fi
@@ -67,7 +67,7 @@ rsync -a \
   else
     "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" doctor rocq > /dev/null
   fi
-  if [ -x ".lake/build/bin/beam-daemon" ] || [ -x ".lake/build/bin/beam-client" ]; then
+  if [ -x ".lake/build/bin/beam-daemon" ]; then
     echo "expected doctor rocq to remain read-only and not build Beam daemon helpers" >&2
     exit 1
   fi
@@ -83,7 +83,7 @@ rsync -a \
   if ! wait_for_file_text "$rocq_owner_err" "serving Beam session" "Rocq session owner" 600 0.1; then
     exit 1
   fi
-  if [ ! -x ".lake/build/bin/beam-daemon" ] || [ ! -x ".lake/build/bin/beam-client" ]; then
+  if [ ! -x ".lake/build/bin/beam-daemon" ]; then
     echo "expected rocq CLI startup to build missing Beam daemon helpers on demand" >&2
     exit 1
   fi

@@ -44,7 +44,6 @@ private structure LeanBundleDoctorInfo where
   bundleId : String
   ready : Bool
   daemon : String
-  client : String
   plugin : String
 
 private def rejectedLeanBundleDoctorInfo : LeanBundleDoctorInfo := {
@@ -57,7 +56,6 @@ private def rejectedLeanBundleDoctorInfo : LeanBundleDoctorInfo := {
   bundleId := rejectedToolchainDiagnosticText
   ready := false
   daemon := rejectedToolchainDiagnosticText
-  client := rejectedToolchainDiagnosticText
   plugin := rejectedToolchainDiagnosticText
 }
 
@@ -87,7 +85,6 @@ private def acceptedLeanBundleDoctorInfo
     bundleId
     ready
     daemon := paths.daemon.toString
-    client := paths.client.toString
     plugin := paths.plugin.toString
   }
 
@@ -134,16 +131,14 @@ private def printLeanDoctorInfo (home root : System.FilePath) : IO Unit := do
   IO.println s!"bundle id: {bundleInfo.bundleId}"
   IO.println s!"bundle ready: {boolText bundleInfo.ready}"
   IO.println s!"bundle daemon: {bundleInfo.daemon}"
-  IO.println s!"bundle client: {bundleInfo.client}"
   IO.println s!"plugin: {bundleInfo.plugin}"
 
 private def printRocqDoctorInfo (home root : System.FilePath) : IO Unit := do
   let paths ← defaultBundlePaths home
-  let helpersReady := (← paths.daemon.pathExists) && (← paths.client.pathExists)
+  let helpersReady := ← paths.daemon.pathExists
   IO.println s!"coq-lsp: {(← maybeRocqCmd root).getD ""}"
   IO.println s!"daemon helpers ready: {boolText helpersReady}"
   IO.println s!"daemon binary: {paths.daemon}"
-  IO.println s!"client binary: {paths.client}"
 
 def daemonFailureIncidentDoctorLines
     (root : System.FilePath)

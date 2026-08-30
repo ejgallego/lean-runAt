@@ -196,25 +196,6 @@ private def recoverProjectSession (opts : CliOptions) (args : List String) : IO 
     reason? := result.reason?
   } : SessionRecoveryResult)
 
-private def parseProjectRequestArg (raw : String) : IO ProjectRequest := do
-  let text ← if raw == "-" then (← IO.getStdin).readToEnd else pure raw
-  let json ← parseJsonText "project request json" text
-  match fromJson? json with
-  | .ok request => pure request
-  | .error err => throw <| IO.userError s!"invalid project request payload: {err}"
-
-private def runProjectRequestStream (opts : CliOptions) (raw : String) : IO Unit := do
-  let some root := opts.explicitRoot?
-    | throw <| IO.userError
-        "request-stream is a machine interface and requires an explicit --root PATH"
-  let projectRequest ← parseProjectRequestArg raw
-  withSelectedProjectDaemon root (explicitControlDir? := opts.explicitControlDir?) fun selected => do
-    let req := projectRequest.attach selected.workspace.workspaceId selected.workspace.root
-      selected.client.capability
-    let resp ← sendRequestWithStream selected.client.endpoint req fun stream =>
-      IO.println (toJson stream).compress
-    failOnError resp
-
 private def parseBackendName (name : String) : IO Backend := do
   match fromJson? (Json.str name) with
   | .ok backend => pure backend
@@ -522,8 +503,6 @@ def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit := do
       stopProjectSession opts
   | "recover" :: args =>
       recoverProjectSession opts args
-  | "request-stream" :: raw :: [] =>
-      runProjectRequestStream opts raw
   | _ =>
       throw <| IO.userError usage
 

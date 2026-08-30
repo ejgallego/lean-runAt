@@ -22,9 +22,6 @@ abbrev nullBrokerStdio : IO.Process.StdioConfig where
 def daemonExe : IO System.FilePath := do
   pure <| (← IO.appPath).parent.getD (System.FilePath.mk ".") / "beam-daemon"
 
-def clientExe : IO System.FilePath := do
-  pure <| (← IO.appPath).parent.getD (System.FilePath.mk ".") / "beam-client"
-
 private def testPortBase : Nat :=
   49152
 

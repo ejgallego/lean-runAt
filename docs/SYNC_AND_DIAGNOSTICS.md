@@ -18,8 +18,8 @@ document version and return `changed: false`.
 `lean-beam sync` is the diagnostics/readiness barrier for a Lean file. It opens or updates the
 tracked file, waits for diagnostics for the current document version, streams fresh request
 diagnostics, and returns a machine-readable JSON verdict for that version. Wrapper stdout uses
-stable, agent-oriented field ordering; `lean-beam --root ROOT request-stream` is the compact one-line JSON
-stream for programmatic event consumers.
+stable, agent-oriented field ordering. Wrapper stderr is human-facing; clients that require
+structured live events should use MCP.
 
 The returned document `version` is the snapshot token for broker, MCP, and wrapper callers.
 Position- or range-bound operations reject missing or stale versions; clients can obtain the
@@ -118,31 +118,21 @@ Their transport types differ by surface.
 | Current result | Stable synced-state verdict for one document version. | Final broker/CLI `diagnostics`, `readiness`, and `fileProgress` fields; MCP spells the progress field `document_progress`. |
 
 Wrapper stderr is the human-facing surface. Machine consumers of an owned wrapper session should
-use final stdout JSON or `lean-beam --root ROOT [--session-dir DIR] request-stream <json|->`.
+use final stdout JSON from the typed wrapper commands. Use MCP for structured live events.
 
-### Machine Broker Stream
+### Internal Broker Stream
 
-`lean-beam --root ROOT request-stream` prints one compact JSON object per line, in the order the
-broker observed it. Its input is a semantic project request with a required nonempty
-`clientRequestId`; callers cannot supply `root`, `workspaceId`, `daemonCapability`, executable
-configuration, workspace administration operations, or process-wide `shutdown` / `reset_stats`.
-Use the dedicated `lean-beam --root ROOT stop` command for lifecycle control. A request may produce any
-number of `fileProgress` and `diagnostic` messages, followed by exactly one terminal `response`; the
-response is last and no later message belongs to that request.
-
-Keep the session's `lean-beam serve` owner active for the request lifetime. Only the holder
-starts the daemon; the root-aware machine client reads the mode-`0600` descriptor, selects its
-frozen workspace binding, and injects routing and the per-generation capability. Requests
-participate in typed request admission and workspace-scoped cancellation but do not own the daemon.
-The raw `beam-client --port ... request-stream` surface requires complete internal request fields
-and is maintainer/debug tooling for separately managed brokers.
+The wrapper and daemon communicate through an internal stream. A request may produce any number of
+`fileProgress` and `diagnostic` messages, followed by exactly one terminal `response`; the response
+is last and no later message belongs to that request. This wire stream is an implementation
+boundary exercised through `Beam.Broker.Client`; it is not an installed command-line interface.
 
 The selected root chooses a workspace runtime; it is not a filesystem authorization boundary.
 Relative paths resolve below that root, while absolute paths may identify dependency sources. Beam
 can also execute Lean metaprogramming with IO, so callers that require filesystem isolation must
 sandbox the owner process itself.
 
-Every stream variant uses the same `kind`, `payload`, and optional correlation envelope. When the
+Every internal stream variant uses the same `kind`, `payload`, and optional correlation envelope. When the
 request supplies `clientRequestId`, each message repeats it on that outer stream envelope:
 
 ```jsonl

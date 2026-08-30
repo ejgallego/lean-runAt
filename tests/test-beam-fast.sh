@@ -29,7 +29,6 @@ run_quiet_lake_build \
   Beam.LSP:shared \
   beam-cli \
   beam-daemon \
-  beam-client \
   lean-beam-mcp \
   BeamTest.Broker.StreamDedupTest \
   BeamTest.Broker.RequestHandleTest \
@@ -40,7 +39,7 @@ run_quiet_lake_build \
   beam-daemon-smoke-test \
   beam-sync-concurrency-test \
   beam-daemon-save-stream-test \
-  beam-daemon-request-stream-test \
+  beam-daemon-stream-contract-test \
   beam-sync-result-test \
   beam-daemon-startup-handshake-test \
   beam-cli-daemon-test \
@@ -59,7 +58,7 @@ run_quiet_lake_build \
 .lake/build/bin/beam-daemon-smoke-test > /dev/null
 .lake/build/bin/beam-sync-concurrency-test > /dev/null
 .lake/build/bin/beam-daemon-save-stream-test > /dev/null
-.lake/build/bin/beam-daemon-request-stream-test > /dev/null
+.lake/build/bin/beam-daemon-stream-contract-test > /dev/null
 .lake/build/bin/beam-sync-result-test > /dev/null
 .lake/build/bin/beam-daemon-startup-handshake-test > /dev/null
 

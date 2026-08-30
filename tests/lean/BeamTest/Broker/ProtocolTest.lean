@@ -779,54 +779,6 @@ private def checkWorkspaceRoutingFields : IO Unit := do
       require "unsupported workspace mode error should name accepted values"
         (err.contains "'set', 'verify', or 'reset'")
 
-private def checkProjectRequestBoundary : IO Unit := do
-  let semanticJson := Json.mkObj [
-    ("op", toJson Op.runAt),
-    ("backend", toJson Backend.lean),
-    ("clientRequestId", toJson "project-request"),
-    ("path", toJson "Demo.lean"),
-    ("version", toJson (1 : Nat)),
-    ("line", toJson (0 : Nat)),
-    ("character", toJson (0 : Nat)),
-    ("text", toJson "exact rfl")
-  ]
-  let projectRequest ← expectOk "semantic project request" <|
-    fromJson? (α := ProjectRequest) semanticJson
-  let attached := projectRequest.attach "workspace-a" "/workspace/a" "session-capability"
-  require "project request attachment injects the selected workspace"
-    (attached.workspaceId? == some "workspace-a")
-  require "project request attachment injects the owner-side root"
-    (attached.root? == some "/workspace/a")
-  require "project request attachment injects session authority"
-    (attached.daemonCapability? == some "session-capability")
-  match fromJson? (α := ProjectRequest) <| Json.mkObj [("op", toJson Op.stats)] with
-  | .ok _ => throw <| IO.userError "project request unexpectedly accepted a missing request id"
-  | .error err =>
-      require "project request id rejection should explain the machine identity requirement"
-        (err.contains "non-empty clientRequestId")
-  let cancelRequest ← expectOk "semantic cancellation request" <|
-    fromJson? (α := ProjectRequest) <| Json.mkObj [
-      ("op", toJson Op.cancel),
-      ("clientRequestId", toJson "cancel-command"),
-      ("cancelRequestId", toJson "project-request")
-    ]
-  let attachedCancel := cancelRequest.attach "workspace-a" "/workspace/a" "session-capability"
-  require "project cancellation is workspace-scoped"
-    (attachedCancel.workspaceId? == some "workspace-a")
-  require "project cancellation does not invent an unsupported root field"
-    attachedCancel.root?.isNone
-  for field in ["workspaceId", "root", "daemonCapability", "leanCmd"] do
-    match fromJson? (α := ProjectRequest) (semanticJson.setObjVal! field (toJson "forbidden")) with
-    | .ok _ => throw <| IO.userError s!"project request unexpectedly accepted session field '{field}'"
-    | .error _ => pure ()
-  for op in [Op.ensure, .initWorkspace, .listWorkspaces, .dropWorkspace, .resetStats, .shutdown] do
-    match fromJson? (α := ProjectRequest) <| Json.mkObj [
-      ("op", toJson op),
-      ("clientRequestId", toJson "control-request")
-    ] with
-    | .ok _ => throw <| IO.userError s!"project request unexpectedly accepted control op '{op.key}'"
-    | .error _ => pure ()
-
 private def checkWorkspaceLifecycleProtocol : IO Unit := do
   let root := System.FilePath.mk "/workspace"
   let previous := System.FilePath.mk "/previous-workspace"
@@ -1169,7 +1121,6 @@ def main : IO Unit := do
   checkStaleDirectDepHints
   checkRequestArgsBoundary
   checkWorkspaceRoutingFields
-  checkProjectRequestBoundary
   checkWorkspaceLifecycleProtocol
   checkLifecycleTeardownConcurrency
   checkSessionCloseAdmission

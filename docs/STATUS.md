@@ -33,12 +33,12 @@ Pre-stable compatibility policy lives in [Compatibility Policy](COMPATIBILITY.md
 
 ### Local Beam Layer
 
-- local Beam daemon/client pair for Lean and Rocq workflows
+- foreground-owned local Beam daemon with typed `lean-beam` operations for Lean and Rocq workflows
 - optional Rocq Beam goal probes through `coq-lsp`, documented separately in
   [docs/ROCQ.md](ROCQ.md)
 - experimental Lean wrapper commands for follow-up handle continuation and release
 - installed `lean-beam-search` helper for shorter shell branching/playout workflows
-- explicit broker `ok` / `error` response envelopes for machine-readable local protocol consumers
+- explicit `ok` / `error` response envelopes on typed wrapper operations
 - `lean-beam open-files` daemon introspection for tracked documents, including `diskStatus`,
   the daemon-recorded `checkpointed` marker, and the last compact `fileProgress`
 - local broker workspaces keyed by explicit workspace ids, each owning its own LSP session, document
@@ -131,23 +131,19 @@ saved accepted text, the intended future direction is for `lean-beam update` or 
 reuse matching speculative execution rather than replaying it from scratch. Beam would still not
 apply the source edit.
 
-For programmatic local consumers of a wrapper session, the supported machine-readable surface is
-`lean-beam --root ROOT [--session-dir DIR] request-stream <json|->`. The request JSON contains the
-operation, its arguments, and a nonempty `clientRequestId`; it cannot select a workspace, root, or
-capability, and it cannot issue workspace-administration or process-wide control operations. The
-wrapper canonicalizes the explicit root, selects its static workspace binding from the session
-descriptor, and injects routing and authentication. Wrapper stderr is human-facing.
-The port-oriented `beam-client request-stream` remains maintainer/debug tooling for separately
-managed brokers. A wrapper daemon exists only while its foreground `lean-beam serve` owner
-is alive. Attaching requests do not acquire daemon ownership. A separately launched standalone
-daemon has its own explicit process owner. Broker
+Programmatic wrapper consumers invoke the same typed `lean-beam` operations as human callers and
+use their final stdout JSON. Wrapper stderr is human-facing; clients that require structured live
+progress and diagnostic notifications should use MCP. Beam does not install a raw generic broker
+client. A wrapper daemon exists only while its foreground `lean-beam serve` owner is alive.
+Attaching requests do not acquire daemon ownership. A separately launched standalone daemon has
+its own explicit process owner. Broker
 responses require an explicit top-level `ok` boolean, giving projection layers an unambiguous
 success/error discriminator. A successful response always includes `result`; response and stream
 envelopes reject undeclared fields, and typed save/close-save results reject incomplete or extended
-artifact shapes. All raw stream variants use the same `kind`, `payload`, and optional outer
+artifact shapes. Internal stream envelopes use the same `kind`, `payload`, and optional outer
 `clientRequestId` fields; the terminal response payload does not duplicate transport correlation.
-Exact event ordering and examples live in
-[SYNC_AND_DIAGNOSTICS.md](SYNC_AND_DIAGNOSTICS.md#machine-broker-stream).
+The wrapper and daemon still use a streamed internal transport whose exact event ordering is tested
+as an implementation boundary.
 
 `lean-beam-mcp` is the experimental stdio MCP entry point. User setup lives in
 [SETUP.md](SETUP.md#mcp-setup); implementation, protocol, tool-list, and conformance notes live in

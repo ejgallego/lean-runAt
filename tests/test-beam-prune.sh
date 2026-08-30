@@ -122,7 +122,6 @@ write_bundle_artifacts() {
   local workspace="$bundle_dir/workspace"
   mkdir -p "$workspace/.lake/build/bin" "$workspace/.lake/build/lib"
   : >"$workspace/.lake/build/bin/beam-daemon"
-  : >"$workspace/.lake/build/bin/beam-client"
   : >"$workspace/.lake/build/lib/$bundle_plugin_name"
 }
 write_complete_bundle() {

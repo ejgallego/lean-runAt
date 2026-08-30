@@ -69,13 +69,6 @@ def parsePortText (name value : String) : Except String UInt16 := do
   else
     throw s!"{name} '{value}' is outside the supported range 0-65535"
 
-def parseEndpointOption (args : List String) : Except String (Endpoint × List String) := do
-  match args with
-  | "--port" :: port :: rest =>
-      pure (.tcp (← parsePortText "port" port), rest)
-  | _ =>
-      pure (.tcp 8765, args)
-
 private def decodeStreamMessage (msg : String) : Except String StreamMessage := do
   match Json.parse msg with
   | .error err => throw s!"invalid Beam daemon response json: {err}"
@@ -219,15 +212,6 @@ partial def sendRequestWithCallbacks
   | .error failure => throw failure.toIOError
 def sendRequest (endpoint : Endpoint) (req : Request) : IO Response :=
   sendRequestWithCallbacks endpoint req
-
-def readRequestFromStdin : IO Request := do
-  let input ← (← IO.getStdin).readToEnd
-  match Json.parse input with
-  | .error err => throw <| IO.userError s!"invalid request json: {err}"
-  | .ok json =>
-      match fromJson? json with
-      | .ok req => pure req
-      | .error err => throw <| IO.userError s!"invalid request payload: {err}"
 
 /-- Render a CLI response, optionally adding caller-visible correlation at the presentation edge. -/
 def responseOutputJson (resp : Response) (clientRequestId? : Option String := none) : Json :=

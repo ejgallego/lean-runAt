@@ -16,7 +16,7 @@ namespace Beam.Daemon
 open Beam.Broker
 
 def registrySchemaVersion : Nat :=
-  3
+  4
 
 inductive RegistryLifecycle where
   | live
@@ -62,7 +62,6 @@ structure SessionDescriptor where
   workspace : WorkspaceBinding
   /-- Hash of the complete frozen session configuration. -/
   configHash : String
-  clientBin? : Option String := none
   daemonBin? : Option String := none
   startedAt : String
   requestedPort? : Option Nat := none
@@ -83,7 +82,6 @@ structure DesiredConfig where
   rocqCmd? : Option String := none
   toolchain? : Option String := none
   daemonBin : System.FilePath
-  clientBin : System.FilePath
   bundleId : String
   configHash : String
   deriving Repr

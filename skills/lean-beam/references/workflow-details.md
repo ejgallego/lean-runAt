@@ -188,7 +188,7 @@ What is not a valid checkpoint target:
   `error.message` includes a compact preview of underlying diagnostics and/or command messages, and
   `error.data.sync` contains the blocking sync verdict
 - wrapper `stderr` is the human-facing diagnostic surface
-- `lean-beam --root ROOT request-stream ...` is the supported machine-facing wrapper stream
+- use MCP when a client requires structured live diagnostics or progress
 - streamed diagnostics are request-scoped observations; they may carry `completionBlocking=true`,
   but save-blocking evidence is attached to the final sync/save verdict
 - the field-level progress, diagnostic, and readiness contract lives in

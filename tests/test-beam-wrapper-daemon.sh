@@ -343,55 +343,6 @@ assert_json_field_equals "running session status workspace" "$status_json" resul
 assert_json_field_equals \
   "running session status directory" "$status_json" result.sessionDir "$resolved_tmp1/.beam"
 
-machine_stats_json="$("$beam_script" --root "$tmp1" request-stream \
-  '{"op":"stats","clientRequestId":"machine-stats"}')"
-assert_json_field_equals "root-aware machine stream kind" "$machine_stats_json" kind response
-assert_json_field_equals \
-  "root-aware machine stream request id" "$machine_stats_json" clientRequestId machine-stats
-assert_json_field_equals \
-  "root-aware machine stream response" "$machine_stats_json" payload.ok true
-if "$beam_script" request-stream '{"op":"stats","clientRequestId":"missing-root"}' \
-    > "$tmp1/machine-missing-root.out" 2> "$tmp1/machine-missing-root.err"; then
-  echo "expected the machine stream interface to require --root" >&2
-  exit 1
-fi
-if ! grep -Fq "requires an explicit --root PATH" "$tmp1/machine-missing-root.err"; then
-  echo "expected missing-root machine diagnostics to explain the explicit selector" >&2
-  cat "$tmp1/machine-missing-root.err" >&2
-  exit 1
-fi
-if "$beam_script" --root "$tmp1" request-stream \
-    '{"op":"stats","clientRequestId":"caller-route","workspaceId":"beam-cli-project"}' \
-    > "$tmp1/machine-route.out" 2> "$tmp1/machine-route.err"; then
-  echo "expected machine requests to reject caller-selected session routing" >&2
-  exit 1
-fi
-if ! grep -Fq "session-owned fields: workspaceId" "$tmp1/machine-route.err"; then
-  echo "expected machine routing rejection to name the forbidden field" >&2
-  cat "$tmp1/machine-route.err" >&2
-  exit 1
-fi
-if "$beam_script" --root "$tmp1" request-stream \
-    '{"op":"shutdown","clientRequestId":"machine-shutdown"}' \
-    > "$tmp1/machine-shutdown.out" 2> "$tmp1/machine-shutdown.err"; then
-  echo "expected semantic machine requests not to expose process-wide shutdown" >&2
-  exit 1
-fi
-if ! grep -Fq "not available through a project session" "$tmp1/machine-shutdown.err"; then
-  echo "expected machine shutdown rejection to explain the project-session boundary" >&2
-  cat "$tmp1/machine-shutdown.err" >&2
-  exit 1
-fi
-machine_after_shutdown_json="$("$beam_script" --root "$tmp1" request-stream \
-  '{"op":"stats","clientRequestId":"machine-after-shutdown"}')"
-assert_json_field_equals \
-  "rejected machine shutdown leaves daemon live" "$machine_after_shutdown_json" payload.ok true
-if ! kill -0 "$daemon1_pid" 2>/dev/null || \
-    [ "$(read_json_field "$registry" daemonId)" != "$daemon1_id" ]; then
-  echo "expected rejected machine shutdown to preserve the selected generation" >&2
-  exit 1
-fi
-
 python3 - "$registry" "$tmp1" <<'PY'
 import json
 import os
@@ -400,7 +351,7 @@ import sys
 registry, root = sys.argv[1:]
 with open(registry, encoding="utf-8") as stream:
     entry = json.load(stream)
-if entry.get("schemaVersion") != 3:
+if entry.get("schemaVersion") != 4:
     raise SystemExit(f"unexpected session schema: {entry.get('schemaVersion')}")
 workspace = entry.get("workspace")
 if not isinstance(workspace, dict):
@@ -856,7 +807,7 @@ import json
 import os
 
 entry = {
-    "schemaVersion": 3,
+    "schemaVersion": 4,
     "lifecycle": "live",
     "daemonId": "delivery-failure-generation",
     "capability": "delivery-failure-capability",

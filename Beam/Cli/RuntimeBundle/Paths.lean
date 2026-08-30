@@ -14,32 +14,26 @@ namespace Beam.Cli
 
 structure BundlePaths where
   daemon : System.FilePath
-  client : System.FilePath
   plugin : System.FilePath
   deriving Repr
 
 def defaultBundlePaths (home : System.FilePath) : IO BundlePaths := do
   let installedDaemon := home / "libexec" / "beam-daemon"
-  let installedClient := home / "libexec" / "beam-client"
   let installedPlugin := Beam.LSP.Lib.pluginSharedLibPath (home / "libexec")
   let checkoutDaemon := home / ".lake" / "build" / "bin" / "beam-daemon"
-  let checkoutClient := home / ".lake" / "build" / "bin" / "beam-client"
   let checkoutPlugin := Beam.LSP.Lib.pluginSharedLibPath (home / ".lake" / "build" / "lib")
   let installedReady :=
     (← installedDaemon.pathExists) &&
-    (← installedClient.pathExists) &&
     (← installedPlugin.pathExists)
   pure <|
     if installedReady then
       {
         daemon := installedDaemon
-        client := installedClient
         plugin := installedPlugin
       }
     else
       {
         daemon := checkoutDaemon
-        client := checkoutClient
         plugin := checkoutPlugin
       }
 
@@ -48,7 +42,6 @@ def ensurePathExists (kind : String) (path : System.FilePath) : IO Unit := do
     throw <| IO.userError s!"missing {kind} at {path}"
 
 def ensureBundleExists (paths : BundlePaths) : IO Unit := do
-  ensurePathExists "CLI client" paths.client
   ensurePathExists "Beam daemon" paths.daemon
 
 def ensureLeanBundleExists (paths : BundlePaths) : IO Unit := do
@@ -157,7 +150,6 @@ def bundleWorkspaceOwnerMarker (workspace : System.FilePath) : System.FilePath :
 def bundlePathsFor (workspace : System.FilePath) : BundlePaths :=
   {
     daemon := workspace / ".lake" / "build" / "bin" / "beam-daemon"
-    client := workspace / ".lake" / "build" / "bin" / "beam-client"
     plugin := Beam.LSP.Lib.pluginSharedLibPath (workspace / ".lake" / "build" / "lib")
   }
 
