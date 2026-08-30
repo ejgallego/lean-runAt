@@ -104,6 +104,7 @@ private def sampleCollection (home : String) : Beam.Feedback.Collection := {
       ("source_commit", toJson "0123456789abcdef"),
       ("source_branch", toJson "feedback"),
       ("source_dirty", toJson true),
+      ("runtime_payload", toJson "sha256-abcdef0123456789"),
       ("runtime_active", toJson true),
       ("runtime_current", toJson false),
       ("runtime_error", toJson "invalid install manifest")
@@ -145,7 +146,10 @@ private def checkRenderAndRedaction : IO Unit := do
     (result.markdown.contains "- runtime current: `false`")
   require "report card runtime section includes installed runtime error"
     (result.markdown.contains "- runtime error: `invalid install manifest`")
-  require "report card runtime section includes source" (result.markdown.contains "commit 0123456789ab")
+  require "report card runtime section includes exact source commit"
+    (result.markdown.contains "commit 0123456789abcdef")
+  require "report card runtime section includes payload identity"
+    (result.markdown.contains "- runtime payload: `sha256-abcdef0123456789`")
   require "report card debug context section" (result.markdown.contains "## Beam Debug Context")
   require "report card should render each collection warning once"
     (result.markdown.contains "Collection warnings:" &&

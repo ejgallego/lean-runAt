@@ -105,11 +105,12 @@ descriptor. Beam validates that local target even when confidential mode omits p
 MCP returns compact report-card JSON in
 `structuredContent`: `markdown`, `metadata`, `collection_warnings`, and any bundle paths. The
 default Markdown includes a short Beam runtime summary instead of the full collected debug JSON,
-including stale-runtime or invalid-install identity when available. Pass `include_collected: true`
-to include the full collected Beam debug context inline and render the full debug-context section in
-Markdown. Non-confidential results echo the resolved `workspace` descriptor. Confidential results
-omit that descriptor; `include_collected: true` returns only the restricted runtime identity and
-cannot restore omitted project context.
+including the full source commit, runtime payload, and stale-runtime or invalid-install identity
+when available. Pass `include_collected: true` to include the full collected Beam debug context
+inline and render the full debug-context section in Markdown. Non-confidential results echo the
+resolved `workspace` descriptor. Confidential results omit that descriptor;
+`include_collected: true` returns only the restricted runtime identity and cannot restore omitted
+project context.
 
 MCP does not start a Lean runtime just to collect feedback. In non-confidential mode it includes
 daemon registry and recent daemon incident context for the described workspace. When a runtime is

@@ -38,9 +38,55 @@ namespace Beam.Broker
 abbrev brokerStdio : IO.Process.StdioConfig where
   stdin := .piped
   stdout := .piped
-  -- Keep backend stderr away from MCP stdio. Inheriting it can corrupt
-  -- client framing; piping and draining it caused macOS save_olean hangs.
-  stderr := .null
+  -- Keep backend stderr away from MCP stdio while retaining a bounded tail for
+  -- startup and worker-exit diagnostics. The blocking drain runs on a dedicated
+  -- task so it cannot starve regular Lean tasks.
+  stderr := .piped
+
+private def backendStderrTailLimit : Nat :=
+  16 * 1024
+
+private def backendStderrReadSize : USize :=
+  4096
+
+private def isUtf8ContinuationByte (byte : UInt8) : Bool :=
+  decide (128 ≤ byte.toNat ∧ byte.toNat < 192)
+
+private def utf8BoundaryAtOrAfter (bytes : ByteArray) (offset : Nat) : Nat :=
+  let rec loop (offset : Nat) : Nat → Nat
+    | 0 => offset
+    | fuel + 1 =>
+        if h : offset < bytes.size then
+          if isUtf8ContinuationByte bytes[offset] then
+            loop (offset + 1) fuel
+          else
+            offset
+        else
+          offset
+  loop offset 3
+
+structure BackendStderrCapture where
+  tail : Std.Mutex ByteArray
+  drainTask : Task (Except IO.Error Unit)
+
+private partial def drainBackendStderr
+    (stderr : IO.FS.Handle)
+    (tail : Std.Mutex ByteArray) : IO Unit := do
+  let chunk ← stderr.read backendStderrReadSize
+  unless chunk.isEmpty do
+    tail.atomically do
+      let combined := (← get) ++ chunk
+      if combined.size > backendStderrTailLimit then
+        let start := utf8BoundaryAtOrAfter combined (combined.size - backendStderrTailLimit)
+        set <| combined.extract start combined.size
+      else
+        set combined
+    drainBackendStderr stderr tail
+
+def startBackendStderrCapture (stderr : IO.FS.Handle) : IO BackendStderrCapture := do
+  let tail ← Std.Mutex.new ByteArray.empty
+  let drainTask ← IO.asTask (prio := Task.Priority.dedicated) <| drainBackendStderr stderr tail
+  pure { tail, drainTask }
 
 structure Session where
   workspaceId : WorkspaceId
@@ -51,6 +97,7 @@ structure Session where
   proc : IO.Process.Child brokerStdio
   stdin : IO.FS.Stream
   stdout : IO.FS.Stream
+  stderrCapture : BackendStderrCapture
   pending : PendingRequestStore
   nextId : Nat := 1
   nextEventSeq : Nat := 1
@@ -155,6 +202,31 @@ private partial def waitForTaskWithTimeout
     loop (remainingMs - min pollMs remainingMs)
   loop timeoutMs
 
+private def backendName : Backend → String
+  | .lean => "Lean"
+  | .rocq => "Rocq"
+
+private def BackendStderrCapture.snapshot (capture : BackendStderrCapture) : IO String := do
+  let bytes ← capture.tail.atomically get
+  pure <| (String.fromUTF8? bytes).getD "<backend stderr tail is not valid UTF-8>"
+
+private def BackendStderrCapture.awaitDrain
+    (capture : BackendStderrCapture)
+    (timeoutMs : Nat := 500) : IO Unit := do
+  discard <| waitForTaskWithTimeout capture.drainTask timeoutMs
+
+private def backendFailureMessage
+    (backend : Backend)
+    (phase cause : String)
+    (capture : BackendStderrCapture) : IO String := do
+  let stderr := (← capture.snapshot).trimAscii.toString
+  let stderr := if stderr.isEmpty then "<empty>" else stderr
+  pure <| String.intercalate "\n" [
+    s!"{backendName backend} backend failed {phase}: {cause}",
+    s!"backend stderr tail (last {backendStderrTailLimit} bytes):",
+    stderr
+  ]
+
 private def sessionShutdownReplyTimeoutMs : Nat :=
   1000
 
@@ -208,6 +280,25 @@ private def terminateBackendProcess (proc : IO.Process.Child brokerStdio) : IO U
     discard <| proc.tryWait
   catch _ =>
     pure ()
+
+private def startBackendStderrCaptureOrTerminate
+    (backend : Backend)
+    (proc : IO.Process.Child brokerStdio) : IO BackendStderrCapture := do
+  try
+    startBackendStderrCapture proc.stderr
+  catch err =>
+    terminateBackendProcess proc
+    throw <| IO.userError <|
+      s!"{backendName backend} backend failed during startup before stderr capture: {err}"
+
+private def terminateBackendFailure
+    (backend : Backend)
+    (phase cause : String)
+    (proc : IO.Process.Child brokerStdio)
+    (capture : BackendStderrCapture) : IO String := do
+  terminateBackendProcess proc
+  capture.awaitDrain
+  backendFailureMessage backend phase cause capture
 
 private def sessionExited (session : Session) : IO Bool := do
   try
@@ -453,11 +544,13 @@ partial def sessionReaderLoop (session : Session) : IO Unit := do
         pure ()
     sessionReaderLoop session
   catch e =>
+    let message ←
+      terminateBackendFailure session.backend "after startup" e.toString
+        session.proc session.stderrCapture
     PendingRequestStore.failAll session.pending <| BrokerFailure.toResponseFailure {
       code := .workerExited
-      message := e.toString
+      message
     }
-    terminateBackendProcess session.proc
 
 private def startRequestJsonTrackedDetailed
     (session : Session)
@@ -589,6 +682,7 @@ private def acquireBackendSession
     env := env
     cwd := root.toString
   }
+  let stderrCapture ← startBackendStderrCaptureOrTerminate backend proc
   let (session, initializeTask) ←
     try
       let stdin := IO.FS.Stream.ofHandle proc.stdin
@@ -604,6 +698,7 @@ private def acquireBackendSession
         proc
         stdin
         stdout
+        stderrCapture
         pending
       }
       writeLspRequest stdin
@@ -613,8 +708,8 @@ private def acquireBackendSession
         awaitInitializeResponse stdout
       pure (session, initializeTask)
     catch err =>
-      terminateBackendProcess proc
-      throw err
+      throw <| IO.userError <| ←
+        terminateBackendFailure backend "during startup" err.toString proc stderrCapture
   try
     match ← waitForTaskWithTimeout initializeTask backendInitializeTimeoutMs with
     | some (.ok ()) => pure ()
@@ -632,9 +727,10 @@ private def acquireBackendSession
     pure session
   catch err =>
     IO.cancel initializeTask
-    terminateBackendProcess proc
+    let message ←
+      terminateBackendFailure backend "during startup" err.toString proc stderrCapture
     discard <| waitForTaskWithTimeout initializeTask sessionShutdownReplyTimeoutMs
-    throw err
+    throw <| IO.userError message
 
 private def requireWorkspace (workspaceId : WorkspaceId) : M WorkspaceState := do
   let state ← get

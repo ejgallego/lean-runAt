@@ -13,8 +13,8 @@ namespace BeamTest.Broker.StartupHandshakeTest
 
 open BeamTest.Broker.TestUtil
 
-private def writeFakeServer (root : System.FilePath) : IO System.FilePath := do
-  let script := root / "fake-lean-startup.sh"
+private def writeResponseErrorServer (root : System.FilePath) : IO System.FilePath := do
+  let script := root / "fake-lean-startup-response-error.sh"
   let body := String.intercalate "\n" [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
@@ -51,12 +51,31 @@ private partial def waitForProcessGone (pid : Nat) (tries : Nat := 80) : IO Unit
     IO.sleep 25
     waitForProcessGone pid (tries - 1)
 
-def main : IO Unit := do
+private def writeAbruptExitServer (root : System.FilePath) : IO System.FilePath := do
+  let script := root / "fake-lean-startup-abrupt-exit.sh"
+  let body := String.intercalate "\n" [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    "python3 -c 'import sys; sys.stderr.buffer.write(b\"stderr-prefix-start\\n\" + bytes([0xc3, 0xa9]) * 10000 + b\"\\nAstderr-tail-marker\\n\")'",
+    "exit 23"
+  ] ++ "\n"
+  IO.FS.writeFile script body
+  let out ← IO.Process.output {
+    cmd := "chmod"
+    args := #["+x", script.toString]
+  }
+  if out.exitCode != 0 then
+    throw <| IO.userError s!"failed to chmod abrupt-exit startup server\n{out.stderr}"
+  pure script
+
+private def checkStartupFailure
+    (root fakeServer plugin : System.FilePath)
+    (expected : String)
+    (checkPidGone := false)
+    (forbidden? : Option String := none)
+    (maxMessageLength? : Option Nat := none) : IO Unit := do
   let endpoint ← freshTcpEndpoint
-  let root ← mkTempProjectRoot "beam-daemon-startup"
-  IO.FS.createDirAll root
-  let fakeServer ← writeFakeServer root
-  let broker ← spawnLeanBrokerWithPlugin endpoint root (← BeamTest.TestHarness.pluginPath) fakeServer.toString
+  let broker ← spawnLeanBrokerWithPlugin endpoint root plugin fakeServer.toString
   try
     waitForBrokerReadyForRoot endpoint root
     let resp ← runClient endpoint { op := .ensure, root? := some root.toString }
@@ -66,18 +85,42 @@ def main : IO Unit := do
       | throw <| IO.userError s!"expected startup handshake error payload, got {(toJson resp).compress}"
     if err.code != "internalError" then
       throw <| IO.userError s!"expected internalError for startup failure, got {(toJson resp).compress}"
-    unless err.message.contains "initialize failed" do
-      throw <| IO.userError s!"expected startup failure to mention initialize failure, got {(toJson resp).compress}"
-    let pidText ← IO.FS.readFile (root / "fake-lean.pid")
-    let some pid := pidText.trimAscii.toString.toNat?
-      | throw <| IO.userError s!"invalid fake backend pid '{pidText}'"
-    waitForProcessGone pid
+    unless err.message.contains "Lean backend failed during startup" do
+      throw <| IO.userError s!"expected startup failure phase, got {(toJson resp).compress}"
+    unless err.message.contains "backend stderr tail (last 16384 bytes):" do
+      throw <| IO.userError s!"expected bounded stderr label, got {(toJson resp).compress}"
+    unless err.message.contains expected do
+      throw <| IO.userError s!"expected startup failure to mention '{expected}', got {(toJson resp).compress}"
+    if let some forbidden := forbidden? then
+      if err.message.contains forbidden then
+        throw <| IO.userError s!"expected bounded startup failure to omit '{forbidden}', got {(toJson resp).compress}"
+    if let some maxMessageLength := maxMessageLength? then
+      if err.message.length > maxMessageLength then
+        throw <| IO.userError
+          s!"expected startup failure at most {maxMessageLength} characters, got {err.message.length}"
+    if checkPidGone then
+      let pidText ← IO.FS.readFile (root / "fake-lean.pid")
+      let some pid := pidText.trimAscii.toString.toNat?
+        | throw <| IO.userError s!"invalid fake backend pid '{pidText}'"
+      waitForProcessGone pid
   finally
     try
       broker.kill
     catch _ =>
       pure ()
     discard <| broker.tryWait
+
+def main : IO Unit := do
+  let root ← mkTempProjectRoot "beam-daemon-startup"
+  IO.FS.createDirAll root
+  let plugin ← BeamTest.TestHarness.pluginPath
+  try
+    let responseErrorServer ← writeResponseErrorServer root
+    checkStartupFailure root responseErrorServer plugin "initialize failed" (checkPidGone := true)
+    let abruptExitServer ← writeAbruptExitServer root
+    checkStartupFailure root abruptExitServer plugin "stderr-tail-marker"
+      (forbidden? := some "stderr-prefix-start") (maxMessageLength? := some 17000)
+  finally
     try
       IO.FS.removeDirAll root
     catch _ =>

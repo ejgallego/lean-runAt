@@ -391,9 +391,6 @@ private def optionalLine (label : String) (value? : Option String) : List String
 private def boolText (value : Bool) : String :=
   if value then "true" else "false"
 
-private def shortCommit (commit : String) : String :=
-  String.ofList <| commit.toList.take 12
-
 private def jsonField? (json : Json) (field : String) : Option Json :=
   match json.getObjVal? field with
   | .ok value => some value
@@ -440,7 +437,7 @@ private def runtimeSummarySection (collection : Collection) : String :=
     | branch?, commit?, dirty? =>
         let parts :=
           (branch?.map (fun branch => s!"branch {branch}")).toList ++
-          (commit?.map (fun commit => s!"commit {shortCommit commit}")).toList ++
+          (commit?.map (fun commit => s!"commit {commit}")).toList ++
           (dirty?.map (fun dirty => s!"dirty {boolText dirty}")).toList
         some <| String.intercalate ", " parts
   let activeRoot? :=
@@ -460,6 +457,7 @@ private def runtimeSummarySection (collection : Collection) : String :=
     optionalLine "runtime active" ((jsonBoolField? identity "runtime_active").map boolText) ++
     optionalLine "runtime current" ((jsonBoolField? identity "runtime_current").map boolText) ++
     optionalLine "runtime error" (jsonStringField? identity "runtime_error") ++
+    optionalLine "runtime payload" (jsonStringField? identity "runtime_payload") ++
     optionalLine "source" source? ++
     optionalLine "daemon endpoint" (jsonStringField? daemon "registryEndpoint") ++
     warningLines

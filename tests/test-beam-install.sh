@@ -799,6 +799,55 @@ if [ -n "$expected_source_commit" ]; then
   assert_output_contains "installed lean-beam-mcp --version" "$installed_mcp_version" "source commit: $expected_source_commit"
 fi
 
+git -C "$source_checkout" init -q
+git -C "$source_checkout" config user.name "Beam Install Test"
+git -C "$source_checkout" config user.email "beam-install-test@example.invalid"
+git -C "$source_checkout" commit --allow-empty --no-gpg-sign -q -m "test source provenance refresh"
+expected_source_commit="$(git -C "$source_checkout" rev-parse HEAD)"
+stale_source_commit="0000000000000000000000000000000000000000"
+python3 - "$installed_version_root/manifest.json" "$stale_source_commit" <<'PY'
+import json
+import sys
+
+path, stale_source_commit = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    manifest = json.load(stream)
+manifest["sourceCommit"] = stale_source_commit
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(manifest, stream)
+    stream.write("\n")
+PY
+run_step "refresh reused runtime provenance" run_install_from_source --toolchain "$toolchain"
+assert_symlink_target "$installed_runtime_root" "$installed_version_root"
+assert_version_count "$BEAM_INSTALL_ROOT/versions" 1
+BEAM_INSTALL_LAYOUT_JSON="$install_layout_json" assert_manifest_metadata \
+  "$installed_runtime_root/manifest.json" "$installed_payload_id" "$expected_source_commit" "$toolchain"
+refreshed_mcp_version="$("$installed_mcp" --version)"
+if [ -n "$expected_source_commit" ]; then
+  assert_output_contains "refreshed lean-beam-mcp --version" "$refreshed_mcp_version" \
+    "source commit: $expected_source_commit"
+fi
+assert_output_not_contains "refreshed lean-beam-mcp --version" "$refreshed_mcp_version" \
+  "source commit: $stale_source_commit"
+
+cleared_source_manifest="$tmp_root/runtime-reuse-cleared-source-manifest.json"
+"$installed_version_root/libexec/beam-cli" install-manifest-with-source-commit \
+  "$installed_version_root/manifest.json" - >"$cleared_source_manifest"
+python3 - "$installed_version_root/manifest.json" "$cleared_source_manifest" <<'PY'
+import json
+import sys
+
+installed_path, cleared_path = sys.argv[1:]
+with open(installed_path, encoding="utf-8") as stream:
+    expected = json.load(stream)
+with open(cleared_path, encoding="utf-8") as stream:
+    actual = json.load(stream)
+expected["sourceCommit"] = None
+if actual != expected:
+    raise SystemExit(f"clearing sourceCommit changed other manifest data: {actual}")
+PY
+remove_tmp_file "$cleared_source_manifest"
+
 reuse_guard_backup="$tmp_root/runtime-reuse-Beam.lean"
 reuse_guard_err="$tmp_root/runtime-reuse.err"
 cp "$installed_version_root/Beam.lean" "$reuse_guard_backup"

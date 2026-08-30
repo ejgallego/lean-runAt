@@ -248,6 +248,9 @@ Exact event ordering and examples live in
   service. Unix-domain/per-user native IPC remains a possible later transport improvement.
 - A startup failure that reports `operation not permitted` through `.beam/beam-daemon-startup.log` is
   usually an environment restriction, not a bundle-resolution mismatch.
+- Once the Beam daemon is running, a Lean or Rocq backend handshake failure is returned with the
+  bounded tail of that backend's stderr. This backend diagnostic is separate from the selected
+  session directory's daemon startup log, which covers startup of the Beam daemon process itself.
 - Typed broker transport, invalid-response, and response-timeout failures include registry/log
   context and write a JSON incident record below the selected session directory. Incident kinds are `brokerTransportFailure`,
   `invalidBrokerResponse`, and `brokerResponseTimeout`; callback/display failures do not create

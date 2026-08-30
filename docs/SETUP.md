@@ -38,13 +38,14 @@ install/config paths and does not allow replacing unrelated user files.
 These forms install:
 
 - `lean-beam`, `lean-beam-search`, and `lean-beam-mcp` into `~/.local/bin`
-- an immutable runtime under `BEAM_INSTALL_ROOT`, default `~/.local/share/beam`
+- an immutable runtime payload under `BEAM_INSTALL_ROOT`, default `~/.local/share/beam`
 - a bundle cache under `~/.local/share/beam/state/install-bundles`
 - a prebuilt bundle for the repo-pinned validated Lean toolchain
 
 Each install rebuilds the runtime binaries from the current source checkout before staging the
-immutable runtime. After reinstalling, restart active MCP client sessions so they launch the new
-runtime instead of continuing to use an already-running server process.
+immutable runtime payload and its provenance manifest. After reinstalling, restart active MCP client
+sessions so they launch the new runtime instead of continuing to use an already-running server
+process.
 
 The agent flags install the bundled Lean skill into the corresponding agent home. Rocq support is a
 separate optional skill; add `--rocq-skill` to a selected agent target when you also want the Rocq
@@ -126,14 +127,16 @@ lean-beam doctor
 
 ## Prune Old Installed State
 
-The installer publishes each distinct content payload as an immutable runtime under
+The installer publishes each distinct content payload as an immutable runtime payload under
 `BEAM_INSTALL_ROOT/versions`. Reinstalling an identical payload reuses its existing runtime only
 after validating its ownership marker, manifest, required files, executable commands, and payload
 contents. The schema-3 manifest field `createdWithToolchains` records the toolchain selection that
-first created that immutable payload; later prebuilds add mutable bundle-cache entries without
-rewriting that provenance. Beam keeps prior distinct runtimes so publishing `current` stays atomic,
-but those snapshots are not removed automatically. Schema-2 manifests are readable only for
-identity and cleanup; reinstalling never republishes a schema-2 runtime. Preview old state with:
+first created that immutable payload. On reuse, the installer refreshes only the manifest's
+`sourceCommit` to the current source checkout commit, or clears it when no commit is available;
+`createdWithToolchains` remains unchanged. Later prebuilds add mutable bundle-cache entries without
+changing the runtime payload. Beam keeps prior distinct runtimes so publishing `current` stays
+atomic, but those snapshots are not removed automatically. Schema-2 manifests are readable only
+for identity and cleanup; reinstalling never republishes a schema-2 runtime. Preview old state with:
 
 ```bash
 lean-beam prune

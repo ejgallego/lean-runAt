@@ -179,7 +179,8 @@ private def evidenceInputSchema : Json :=
     ("properties", Json.mkObj [
       ("name", Beam.JsonSchema.string "Simple evidence filename, without path separators."),
       ("content", anyJsonSchema "Inline JSON or text evidence to write into the bundle."),
-      ("path", Beam.JsonSchema.string "Path to a local evidence file under the known root or Beam control directory.")
+      ("path", Beam.JsonSchema.string
+        "Path to a local evidence file under the known root or selected Beam session directory.")
     ]),
     ("required", toJson (#[("name" : String)] : Array String)),
     ("additionalProperties", toJson false)

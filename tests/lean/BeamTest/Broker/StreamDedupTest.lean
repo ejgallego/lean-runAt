@@ -97,6 +97,7 @@ private def fakeTrackedSession (root transcript : System.FilePath) : IO Beam.Bro
     cwd := root.toString
   }
   let pending ← Std.Mutex.new ({} : Std.TreeMap Lean.JsonRpc.RequestID Beam.Broker.PendingRequest)
+  let stderrCapture ← Beam.Broker.startBackendStderrCapture proc.stderr
   let session : Beam.Broker.Session := {
     workspaceId := fixtureWorkspaceId
     backend := .lean
@@ -106,6 +107,7 @@ private def fakeTrackedSession (root transcript : System.FilePath) : IO Beam.Bro
     proc
     stdin := IO.FS.Stream.ofHandle proc.stdin
     stdout := IO.FS.Stream.ofHandle proc.stdout
+    stderrCapture
     pending
   }
   let _ ← IO.asTask (prio := Task.Priority.dedicated) <| Beam.Broker.sessionReaderLoop session
@@ -125,6 +127,7 @@ private def fakeSessionWithSyncedDoc
     (version : Nat := 1) : IO Beam.Broker.Session := do
   let proc ← fakeOneRequestProcess root transcript
   let pending ← Std.Mutex.new ({} : Std.TreeMap Lean.JsonRpc.RequestID Beam.Broker.PendingRequest)
+  let stderrCapture ← Beam.Broker.startBackendStderrCapture proc.stderr
   let text ← IO.FS.readFile path
   let textMTime ← Lake.getFileMTime path
   let uri := Beam.Broker.sessionUri path
@@ -144,6 +147,7 @@ private def fakeSessionWithSyncedDoc
     proc
     stdin := IO.FS.Stream.ofHandle proc.stdin
     stdout := IO.FS.Stream.ofHandle proc.stdout
+    stderrCapture
     pending
     docs
   }
