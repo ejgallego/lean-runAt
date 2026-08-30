@@ -206,12 +206,12 @@ as an implementation boundary.
   configuration but cannot replace a mismatched live owner.
 - `lean-beam status` projects internal descriptor observations onto four public states: `absent`,
   `running`, `stopping`, and `recoveryRequired`. Backend-neutral root inference accepts a unique
-  Lean/Rocq candidate and rejects different candidates as ambiguous. Machine requests, `stop`, and
-  `recover` require an explicit canonical `--root`. Successful lifecycle commands use one
-  top-level `ok`/`result` envelope; `serve` projects its private backend warm-up onto the public
-  running-session result instead of exposing broker workspace or epoch fields. `stop` distinguishes
-  a newly committed transition from an already-stopping session and retains committed state in its
-  result when immediate shutdown delivery produces a typed warning.
+  Lean/Rocq candidate and rejects different candidates as ambiguous. Automated callers should pass
+  an explicit canonical `--root`; `stop` and `recover` require one. Successful lifecycle commands
+  use one top-level `ok`/`result` envelope; `serve` projects its private backend warm-up onto the
+  public running-session result instead of exposing broker workspace or epoch fields. `stop`
+  distinguishes a newly committed transition from an already-stopping session and retains committed
+  state in its result when immediate shutdown delivery produces a typed warning.
 - Abnormal or ambiguous state is never reclaimed automatically. The descriptor remains as a fence
   after an unexpected broker/owner exit; an unexpected broker exit preserves the live descriptor,
   whose unavailable endpoint projects to `recoveryRequired`. Once the operator has established that

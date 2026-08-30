@@ -273,7 +273,7 @@ def ensureToolchainBundle (root home : System.FilePath) (toolchain : String) : I
       let cacheRoot ← runtimeBundleCacheRootForWrite root
       ensureToolchainBundleInForFingerprint cacheRoot home toolchain fingerprint
 
-def ensureDefaultDaemonHelpers (home : System.FilePath) : IO BundlePaths := do
+def ensureDefaultDaemon (home : System.FilePath) : IO BundlePaths := do
   let paths ← defaultBundlePaths home
   if ← paths.daemon.pathExists then
     pure paths
@@ -284,8 +284,8 @@ def ensureDefaultDaemonHelpers (home : System.FilePath) : IO BundlePaths := do
       cwd := home.toString
     }
     if out.exitCode != 0 then
-      throw <| IO.userError s!"failed to build default Beam daemon helpers\n{out.stderr}"
-    ensureBundleExists paths
+      throw <| IO.userError s!"failed to build the default Beam daemon\n{out.stderr}"
+    ensureDaemonExists paths
     pure paths
 
 def predictedToolchainBundleForFingerprint (cacheRoot home : System.FilePath) (toolchain : String)

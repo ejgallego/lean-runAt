@@ -677,8 +677,8 @@ def desiredConfig (home root : System.FilePath) (required : Backend) : IO Desire
       else
         throw <| IO.userError s!"could not resolve Lean Beam daemon config for {root}"
   | .rocq =>
-      let helpers ← ensureDefaultDaemonHelpers home
-      daemonBin := helpers.daemon
+      let daemonPaths ← ensureDefaultDaemon home
+      daemonBin := daemonPaths.daemon
   if ← hasRocqProject root then
     rocqCmd? ← maybeRocqCmd root
   else if required == .rocq then

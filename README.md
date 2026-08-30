@@ -9,40 +9,42 @@ The extensions provide Lean-specific capabilities, and the broker exposes them t
 ```mermaid
 flowchart TB
   subgraph level1["Level 1: agents and tools"]
+    direction LR
     cli["CLI / shell / agent"]
     mcp["MCP client / agent"]
   end
 
-  subgraph level2["Level 2: Beam broker"]
-    broker["Beam broker<br/>request routing<br/>session ownership"]
+  subgraph level2["Level 2: Beam runtime paths"]
+    direction LR
+    subgraph cliOwner["CLI lifetime"]
+      direction TB
+      cliAdapter["lean-beam<br/>foreground owner + private daemon"]
+      cliRuntime["ServerRuntime<br/>single workspace"]
+      cliAdapter --> cliRuntime
+    end
+    shared["shared typed operations<br/>admission + dispatch"]
+    subgraph mcpOwner["MCP lifetime"]
+      direction TB
+      mcpAdapter["lean-beam-mcp<br/>multiplexed stdio"]
+      mcpRuntime["ServerRuntime<br/>lazy multi-workspace"]
+      mcpAdapter --> mcpRuntime
+    end
   end
 
   subgraph level3["Level 3: Lean instances"]
-    subgraph lsp1["Lean LSP server"]
-      lean1["Lean"]
-      plugin1["Beam LSP plugin"]
-    end
-    subgraph lsp2["Lean LSP server"]
-      lean2["Lean"]
-      plugin2["Beam LSP plugin"]
-    end
-    subgraph lspn["Lean LSP server"]
-      leanN["Lean"]
-      pluginN["Beam LSP plugin"]
-    end
+    backends["one or more workspace backends<br/>Lean LSP + Beam plugin"]
   end
 
-  cli -- lean-beam --> broker
-  mcp -- lean-beam-mcp --> broker
-  broker --> lsp1
-  broker -- Lean LSP + Beam requests --> lsp2
-  broker --> lspn
-  lean1 --- plugin1
-  lean2 --- plugin2
-  leanN --- pluginN
+  cli --> cliAdapter
+  mcp --> mcpAdapter
+  cliRuntime -. uses .-> shared
+  mcpRuntime -. uses .-> shared
+  cliRuntime -- Beam requests --> backends
+  mcpRuntime -- Beam requests --> backends
 ```
 
-Beam keeps the agent-facing surface small: clients talk to the broker, and the broker owns request
+Beam keeps the agent-facing surface small. The CLI and MCP paths share typed operations and broker
+runtime code, but each owns its transport and runtime lifetime. Those runtime instances own request
 routing plus one or more Lean LSP sessions with the Beam plugin loaded.
 
 Beam lets a client try Lean commands or tactics at specific positions in saved files without

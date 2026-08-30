@@ -5,7 +5,7 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Lean
-import Beam.Broker.Client
+import Beam.Broker.Protocol
 import Beam.Path
 import Beam.LSP.Todo
 
@@ -24,6 +24,14 @@ structure CliOptions where
 structure ParsedTextArg where
   text : String
   source : String := "argv"
+
+def parsePortText (name value : String) : Except String UInt16 := do
+  let some n := value.toNat?
+    | throw s!"invalid {name} '{value}'"
+  if n < UInt16.size then
+    pure n.toUInt16
+  else
+    throw s!"{name} '{value}' is outside the supported range 0-65535"
 
 def parseNatArg (name value : String) : IO Nat := do
   let some n := value.toNat?

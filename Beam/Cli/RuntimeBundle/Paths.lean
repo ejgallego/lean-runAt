@@ -41,11 +41,11 @@ def ensurePathExists (kind : String) (path : System.FilePath) : IO Unit := do
   unless ← path.pathExists do
     throw <| IO.userError s!"missing {kind} at {path}"
 
-def ensureBundleExists (paths : BundlePaths) : IO Unit := do
+def ensureDaemonExists (paths : BundlePaths) : IO Unit := do
   ensurePathExists "Beam daemon" paths.daemon
 
 def ensureLeanBundleExists (paths : BundlePaths) : IO Unit := do
-  ensureBundleExists paths
+  ensureDaemonExists paths
   ensurePathExists "Beam LSP plugin" paths.plugin
 
 def beamStateDirName : String :=

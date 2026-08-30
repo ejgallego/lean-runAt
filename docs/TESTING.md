@@ -131,8 +131,7 @@ Current Beam coverage includes:
   death through inherited-pipe EOF,
   read-only crash-fence lookup, four-state status projection, ambiguity-safe human root inference,
   explicit-root lifecycle commands, exact-generation non-signalling recovery, exact session-directory
-  selection, root-aware machine request routing, and self-termination after the project worktree
-  disappears without recreating it
+  selection, and self-termination after the project worktree disappears without recreating it
 - Linux-only PID-isolated sandbox wrapper coverage in [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh),
   including cross-namespace endpoint attachment, duplicate-owner rejection, a paused owner without
   time-based expiry, explicit stop, killed-owner EOF cleanup, fail-closed preservation of an

@@ -109,6 +109,32 @@ def requireFinalStreamResponse
       throw <| IO.userError
         s!"expected {label} response to arrive last, got {(toJson messages).compress}"
 
+def runBrokerStream
+    (endpoint : Beam.Broker.Endpoint)
+    (req : Beam.Broker.Request) : IO (Array Beam.Broker.StreamMessage) := do
+  let messagesRef ← IO.mkRef #[]
+  match ← Beam.Broker.sendRequestWithStreamResult endpoint (inFixtureWorkspace req) fun message =>
+      messagesRef.modify (·.push message) with
+  | .ok _ => pure (← messagesRef.get)
+  | .error failure =>
+      throw <| IO.userError s!"broker stream request failed: {failure.detail}"
+
+def requireSuccessStream
+    (label : String)
+    (messages : Array Beam.Broker.StreamMessage) : IO (Array Beam.Broker.StreamMessage) := do
+  let response ← requireFinalStreamResponse label messages
+  unless response.ok do
+    throw <| IO.userError s!"expected {label} stream success, got {(toJson response).compress}"
+  pure messages
+
+def requireFailedStream
+    (label : String)
+    (messages : Array Beam.Broker.StreamMessage) : IO (Array Beam.Broker.StreamMessage) := do
+  let response ← requireFinalStreamResponse label messages
+  if response.ok then
+    throw <| IO.userError s!"expected {label} stream failure"
+  pure messages
+
 def expectStreamClientRequestId
     (label : String)
     (messages : Array Beam.Broker.StreamMessage)

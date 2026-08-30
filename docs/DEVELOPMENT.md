@@ -86,7 +86,7 @@ Preferred maintainer entrypoints:
 
 ## Change Discipline
 
-- prefer the wrapper or broker client over raw LSP when the task fits
+- prefer the wrapper over raw LSP when the task fits
 - if a subtle behavior changes, add or update a regression test first
 - keep destructive cleanup scoped to owned temp or worktree paths
 - if Lean reports stale or rebuild trouble unexpectedly, stop and surface it explicitly

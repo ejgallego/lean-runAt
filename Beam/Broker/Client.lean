@@ -5,7 +5,6 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Lean
-import Beam.JsonPretty
 import Beam.Broker.Protocol
 import Beam.Broker.Transport
 
@@ -61,14 +60,6 @@ private def BrokerClientFailure.toIOError : BrokerClientFailure → IO.Error
   | .responseTimeout timeoutMs =>
       IO.userError s!"Beam daemon response timed out after {timeoutMs} ms"
 
-def parsePortText (name value : String) : Except String UInt16 := do
-  let some n := value.toNat?
-    | throw s!"invalid {name} '{value}'"
-  if n < UInt16.size then
-    pure n.toUInt16
-  else
-    throw s!"{name} '{value}' is outside the supported range 0-65535"
-
 private def decodeStreamMessage (msg : String) : Except String StreamMessage := do
   match Json.parse msg with
   | .error err => throw s!"invalid Beam daemon response json: {err}"
@@ -84,31 +75,6 @@ private def captureClientFailure
     pure <| .ok (← action)
   catch e =>
     pure <| .error (failure e)
-
-private def diagnosticSeverityLabel : Option Lsp.DiagnosticSeverity → String
-  | some .error => "error"
-  | some .warning => "warning"
-  | some .information => "info"
-  | some .hint => "hint"
-  | none => "diagnostic"
-
-private def condenseDiagnosticMessage (message : String) : String :=
-  String.intercalate " / " <|
-    ((message.split (· == '\n')).toList.map (fun line => line.trimAscii.toString)).filter
-      (fun line => !line.isEmpty)
-
-def formatStreamDiagnostic (diagnostic : StreamDiagnostic) : String :=
-  let pos := diagnostic.range.start
-  let line := pos.line + 1
-  let character := pos.character + 1
-  let severity := diagnosticSeverityLabel diagnostic.severity?
-  let message := condenseDiagnosticMessage diagnostic.message
-  let blocking :=
-    if diagnostic.completionBlocking then
-      " completionBlocking=true"
-    else
-      ""
-  s!"beam: diagnostic {severity}{blocking} {diagnostic.path}:{line}:{character}: {message}"
 
 private structure ResponseDeadline where
   timeoutMs : Nat
@@ -181,14 +147,6 @@ partial def sendRequestWithStreamTimeoutResult
     (onStream : StreamMessage → IO Unit) : IO (Except BrokerClientFailure Response) := do
   sendRequestWithStreamResultCore endpoint req onStream (some timeoutMs)
 
-partial def sendRequestWithStream
-    (endpoint : Endpoint)
-    (req : Request)
-    (onStream : StreamMessage → IO Unit) : IO Response := do
-  match ← sendRequestWithStreamResult endpoint req onStream with
-  | .ok response => pure response
-  | .error failure => throw failure.toIOError
-
 /-- Send one request with typed client failures and structured progress callbacks. -/
 partial def sendRequestWithCallbacksResult
     (endpoint : Endpoint)
@@ -212,21 +170,5 @@ partial def sendRequestWithCallbacks
   | .error failure => throw failure.toIOError
 def sendRequest (endpoint : Endpoint) (req : Request) : IO Response :=
   sendRequestWithCallbacks endpoint req
-
-/-- Render a CLI response, optionally adding caller-visible correlation at the presentation edge. -/
-def responseOutputJson (resp : Response) (clientRequestId? : Option String := none) : Json :=
-  match clientRequestId? with
-  | some clientRequestId =>
-      (toJson resp).setObjVal! "clientRequestId" (toJson clientRequestId)
-  | none =>
-      toJson resp
-
-def printResponse (resp : Response) (clientRequestId? : Option String := none) : IO Unit := do
-  IO.println <| Beam.orderedJsonPretty (responseOutputJson resp clientRequestId?)
-
-def failOnError (resp : Response) : IO Unit := do
-  match resp with
-  | .successResult .. => pure ()
-  | .errorResult failure => throw <| IO.userError failure.error.message
 
 end Beam.Broker

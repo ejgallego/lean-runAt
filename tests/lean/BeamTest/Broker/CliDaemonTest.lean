@@ -283,7 +283,7 @@ private def checkProjectDaemonWorkspaceRouting : IO Unit := do
 private def checkClientResponsePresentation : IO Unit := do
   let semantic := Beam.Broker.Response.success Json.null
   let presented :=
-    Beam.Broker.responseOutputJson semantic (some "visible-request")
+    Beam.Cli.responseOutputJson semantic (some "visible-request")
   requireJsonString "presented response" "clientRequestId" "visible-request" presented
   match fromJson? (α := Beam.Broker.Response) presented with
   | .ok response =>

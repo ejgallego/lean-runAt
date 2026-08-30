@@ -68,7 +68,7 @@ rsync -a \
     "$tmp_repo/scripts/lean-beam" --root "$tmp_repo/tests/rocq/Minimal" doctor rocq > /dev/null
   fi
   if [ -x ".lake/build/bin/beam-daemon" ]; then
-    echo "expected doctor rocq to remain read-only and not build Beam daemon helpers" >&2
+    echo "expected doctor rocq to remain read-only and not build the Beam daemon" >&2
     exit 1
   fi
   rocq_owner_err="$tmp_repo/rocq-owner.err"
@@ -84,7 +84,7 @@ rsync -a \
     exit 1
   fi
   if [ ! -x ".lake/build/bin/beam-daemon" ]; then
-    echo "expected rocq CLI startup to build missing Beam daemon helpers on demand" >&2
+    echo "expected rocq CLI startup to build the missing Beam daemon on demand" >&2
     exit 1
   fi
   if [ -n "$rocq_cmd" ]; then

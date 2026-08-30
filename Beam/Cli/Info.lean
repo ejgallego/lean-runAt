@@ -135,9 +135,9 @@ private def printLeanDoctorInfo (home root : System.FilePath) : IO Unit := do
 
 private def printRocqDoctorInfo (home root : System.FilePath) : IO Unit := do
   let paths ← defaultBundlePaths home
-  let helpersReady := ← paths.daemon.pathExists
+  let daemonReady := ← paths.daemon.pathExists
   IO.println s!"coq-lsp: {(← maybeRocqCmd root).getD ""}"
-  IO.println s!"daemon helpers ready: {boolText helpersReady}"
+  IO.println s!"daemon ready: {boolText daemonReady}"
   IO.println s!"daemon binary: {paths.daemon}"
 
 def daemonFailureIncidentDoctorLines

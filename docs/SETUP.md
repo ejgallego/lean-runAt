@@ -237,8 +237,8 @@ process owns its runtime session.
 `lean-beam status` reports the public session state as `absent`, `running`, `stopping`, or
 `recoveryRequired`, together with the resolved workspace and session directory. Human-facing
 commands may infer a root only when the result is unique. If Lean and Rocq markers identify
-different candidate roots, Beam lists the ambiguity and requires `--root`. Machine requests,
-`stop`, and `recover` always require an explicit root.
+different candidate roots, Beam lists the ambiguity and requires `--root`. Automated callers should
+pass an explicit root; `stop` and `recover` always require one.
 
 Successful `serve`, `status`, `stop`, and `recover` commands emit the same top-level
 `{"ok": true, "result": ...}` shape. `serve` reports the public running session rather than its

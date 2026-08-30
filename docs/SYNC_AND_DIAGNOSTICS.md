@@ -1,7 +1,7 @@
 # Sync And Diagnostics Contract
 
 This is the canonical contract for Beam sync, refresh, save, progress, diagnostics, and readiness
-reporting across the wrapper, broker stream, and MCP server.
+reporting across the wrapper, internal broker transport, and MCP server.
 
 Beam never applies source edits to `.lean` files on disk; the client applies source edits. The
 commands below read saved source into Beam's LSP mirror or write Lean/Lake build artifacts; none is
@@ -112,9 +112,9 @@ Their transport types differ by surface.
 
 | Concept | Scope | Current surface |
 | --- | --- | --- |
-| Progress | Request-scoped operation movement, not diagnostics and not final readiness. | MCP `notifications/progress`; Beam stream `fileProgress` events; CLI progress text. |
+| Progress | Request-scoped operation movement, not diagnostics and not final readiness. | MCP `notifications/progress`; internal broker `fileProgress` events; CLI progress text. |
 | Status | Best-effort notice that a no-token MCP request is doing setup or remains pending. | MCP `notifications/message` with logger `beam.status`. |
-| Streamed diagnostics | Lean-published events observed while a request is pending. | MCP `notifications/message` with logger `lean.diagnostic`; Beam stream `diagnostic` events; CLI stderr diagnostics. |
+| Streamed diagnostics | Lean-published events observed while a request is pending. | MCP `notifications/message` with logger `lean.diagnostic`; internal broker `diagnostic` events; CLI stderr diagnostics. |
 | Current result | Stable synced-state verdict for one document version. | Final broker/CLI `diagnostics`, `readiness`, and `fileProgress` fields; MCP spells the progress field `document_progress`. |
 
 Wrapper stderr is the human-facing surface. Machine consumers of an owned wrapper session should
@@ -156,7 +156,7 @@ part of the broker `Response` type.
 The terminal response's `fileProgress` is the latest observation available when the result was
 constructed. It can be newer than the last live broker `fileProgress` event because the barrier can
 adjust or reuse a prior observation, and it does not imply that the current request itself emitted
-every preceding update. Raw broker events are not throttled; MCP progress notifications are.
+every preceding update. Internal broker events are not throttled; MCP progress notifications are.
 
 ## MCP Diagnostics
 
