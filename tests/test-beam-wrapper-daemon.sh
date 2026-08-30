@@ -424,6 +424,22 @@ fi
 
 cross_root_descriptor="$tmp2/cross-root-recovery.before"
 cp -- "$registry" "$cross_root_descriptor"
+if "$beam_script" --root "$tmp2" --session-dir "$tmp1/.beam" status \
+    > "$tmp2/cross-root-status.out" 2> "$tmp2/cross-root-status.err"; then
+  echo "expected status through a mismatched session selector to fail" >&2
+  exit 1
+fi
+if ! grep -Fq "sessionSelectorMismatch" "$tmp2/cross-root-status.err" || \
+    ! grep -Fq -- "--root '$resolved_tmp1' --session-dir '$resolved_tmp1/.beam' status" \
+      "$tmp2/cross-root-status.err"; then
+  echo "expected cross-root status rejection to identify the selector mismatch and exact selector" >&2
+  cat "$tmp2/cross-root-status.err" >&2
+  exit 1
+fi
+if ! cmp -s -- "$cross_root_descriptor" "$registry"; then
+  echo "cross-root status must preserve the descriptor byte-for-byte" >&2
+  exit 1
+fi
 if "$beam_script" --root "$tmp2" --session-dir "$tmp1/.beam" \
     recover --generation "$daemon1_id" \
     > "$tmp2/cross-root-recovery.out" 2> "$tmp2/cross-root-recovery.err"; then
@@ -749,6 +765,121 @@ busy_pid=""
 rm -f -- "$busy_port_file"
 busy_port_file=""
 
+# Once stop commits its draining fence, a delivery failure must remain a successful, typed
+# transition result rather than obscuring the state change. This fixture answers the identity
+# probe, then drops the separate shutdown connection.
+busy_port_file="$(mktemp "$tmp2/drop-shutdown-port-XXXXXX")"
+python3 - "$busy_port_file" "$resolved_tmp2" <<'PY' &
+import json
+import socketserver
+import sys
+
+port_file, root = sys.argv[1:]
+daemon_id = "delivery-failure-generation"
+config_hash = "delivery-failure-config"
+
+def receive_frame(sock):
+    header = bytearray()
+    while not header.endswith(b"\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            raise RuntimeError("client closed before sending a frame header")
+        header.extend(chunk)
+    size = int(header[:-1])
+    payload = bytearray()
+    while len(payload) < size:
+        chunk = sock.recv(size - len(payload))
+        if not chunk:
+            raise RuntimeError("client closed during its frame")
+        payload.extend(chunk)
+    return json.loads(payload)
+
+def send_frame(sock, payload):
+    encoded = json.dumps(payload, separators=(",", ":")).encode()
+    sock.sendall(str(len(encoded)).encode() + b"\n" + encoded)
+
+class Server(socketserver.TCPServer):
+    allow_reuse_address = True
+
+with Server(("127.0.0.1", 0), socketserver.BaseRequestHandler) as server:
+    with open(port_file, "w", encoding="utf-8") as stream:
+        print(server.server_address[1], file=stream, flush=True)
+    conn, _ = server.get_request()
+    with conn:
+        request = receive_frame(conn)
+        if request.get("op") != "stats":
+            raise RuntimeError(f"expected stats probe, got {request!r}")
+        send_frame(conn, {
+            "kind": "response",
+            "payload": {
+                "ok": True,
+                "result": {
+                    "root": root,
+                    "daemonIdentity": {
+                        "daemonId": daemon_id,
+                        "configHash": config_hash,
+                    },
+                },
+            },
+        })
+    conn, _ = server.get_request()
+    with conn:
+        receive_frame(conn)
+        # Deliberately close without a response after the caller has committed `draining`.
+PY
+busy_pid="$!"
+if ! wait_for_nonempty_file "$busy_port_file" "shutdown-delivery fixture"; then
+  exit 1
+fi
+busy_port="$(cat "$busy_port_file")"
+DELIVERY_REGISTRY="$stale_registry" DELIVERY_ROOT="$resolved_tmp2" \
+    DELIVERY_PORT="$busy_port" python3 - <<'PY'
+import json
+import os
+
+entry = {
+    "schemaVersion": 3,
+    "lifecycle": "live",
+    "daemonId": "delivery-failure-generation",
+    "capability": "delivery-failure-capability",
+    "pid": 999999999,
+    "ownerPid": 999999999,
+    "port": int(os.environ["DELIVERY_PORT"]),
+    "workspace": {
+        "workspaceId": "beam-cli-project",
+        "root": os.environ["DELIVERY_ROOT"],
+    },
+    "configHash": "delivery-failure-config",
+    "startedAt": "2026-08-30T00:00:00Z",
+}
+with open(os.environ["DELIVERY_REGISTRY"], "w", encoding="utf-8") as stream:
+    json.dump(entry, stream, separators=(",", ":"))
+    stream.write("\n")
+PY
+delivery_stop_json="$("$beam_script" --root "$tmp2" stop)"
+assert_json_field_equals "committed delivery-failure stop response" "$delivery_stop_json" ok true
+assert_json_field_equals \
+  "committed delivery-failure stop state" "$delivery_stop_json" result.state stopping
+assert_json_field_equals \
+  "committed delivery-failure stop change" "$delivery_stop_json" result.changed true
+assert_json_field_equals \
+  "committed delivery-failure stop warning" "$delivery_stop_json" \
+  result.warning.code shutdownDeliveryFailed
+if [ "$(read_json_field "$stale_registry" lifecycle)" != "draining" ]; then
+  echo "expected shutdown delivery failure to preserve the committed draining fence" >&2
+  cat "$stale_registry" >&2
+  exit 1
+fi
+wait "$busy_pid"
+busy_pid=""
+rm -f -- "$busy_port_file"
+busy_port_file=""
+delivery_recover_json="$(
+  "$beam_script" --root "$tmp2" recover --generation delivery-failure-generation
+)"
+assert_json_field_equals \
+  "delivery-failure fence recovery" "$delivery_recover_json" result.changed true
+
 start_slow_request "$tmp1" "shutdown-active" "shutdown-active"
 
 # The desired owner configuration includes installed bundle paths. An ordinary attaching command
@@ -820,6 +951,7 @@ fi
 stop_json="$("$beam_script" --root "$tmp1" stop)"
 assert_json_field_equals "explicit session stop" "$stop_json" ok true
 assert_json_field_equals "explicit session stop state" "$stop_json" result.state stopping
+assert_json_field_equals "explicit session stop changed" "$stop_json" result.changed true
 expect_slow_request_cancelled "$tmp1" "shutdown-active" "shutdown-active"
 if ! wait_for_exit "$hold_pid" "owner after explicit shutdown" 200 0.05; then
   cat "$tmp1/owner-1.err" >&2
@@ -878,11 +1010,16 @@ if [ ! -e "$registry" ]; then
   exit 1
 fi
 if [ "$(read_json_field "$registry" daemonId)" != "$daemon2_id" ] || \
-    [ "$(read_json_field "$registry" lifecycle)" != "draining" ]; then
-  echo "expected an unexpected daemon crash to leave its generation draining" >&2
+    [ "$(read_json_field "$registry" lifecycle)" != "live" ]; then
+  echo "expected an unexpected daemon crash to preserve its live generation fence" >&2
   cat "$registry" >&2
   exit 1
 fi
+crash_status_json="$("$beam_script" --root "$tmp1" status)"
+assert_json_field_equals \
+  "unexpected-crash session status" "$crash_status_json" result.state recoveryRequired
+assert_json_field_equals \
+  "unexpected-crash session generation" "$crash_status_json" result.generation "$daemon2_id"
 if "$beam_script" --root "$tmp1" serve \
     > "$tmp1/crash-replacement.out" 2> "$tmp1/crash-replacement.err"; then
   echo "expected crash-fenced state to reject a replacement owner" >&2
@@ -928,6 +1065,10 @@ draining_status="$("$beam_script" --root "$tmp1" status)"
 assert_json_field_equals "draining session status" "$draining_status" result.state stopping
 assert_json_field_equals \
   "draining session status generation" "$draining_status" result.generation "$draining_daemon_id"
+repeated_stop_json="$("$beam_script" --root "$tmp1" stop)"
+assert_json_field_equals "repeated session stop response" "$repeated_stop_json" ok true
+assert_json_field_equals "repeated session stop state" "$repeated_stop_json" result.state stopping
+assert_json_field_equals "repeated session stop changed" "$repeated_stop_json" result.changed false
 draining_lookup_out="$tmp1/draining-lookup.out"
 draining_lookup_err="$tmp1/draining-lookup.err"
 if "$beam_script" --root "$tmp1" stats > "$draining_lookup_out" 2> "$draining_lookup_err"; then

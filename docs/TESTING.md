@@ -116,16 +116,19 @@ Current Beam coverage includes:
   including the no-implicit-start contract, duplicate-owner rejection, Beam and non-Beam endpoint
   collision safety without cross-project disclosure, authenticated generation probes, mode-`0700`
   session-directory and mode-`0600` descriptor publication, rejection of symlinked or non-private
-  existing session paths without mutating their targets, wrong-root recovery rejection with
+  existing session paths without mutating their targets, stable missing-path canonicalization,
+  wrong-root status classification and recovery rejection with
   byte-for-byte descriptor preservation, unauthorized-shutdown rejection without listener teardown, oversized-frame
   and first-message limits, a bounded identity probe against a silent non-Beam listener, cross-root
   unsafe-registry preservation that does not affect the daemon
   serving the other root, configuration-drift preservation of the owner and active request,
-  explicit stop, cancellation of requests active during shutdown or owner loss,
-  exact-generation cleanup that preserves a replacement registry, a published draining fence while
+  explicit stop, committed-state reporting after shutdown delivery failure, cancellation of requests
+  active during shutdown or owner loss, exact-generation cleanup that preserves a replacement
+  registry, idempotent repeated stop, a published draining fence while
   a daemon is paused, rejection of attachment or replacement while that generation remains
   published, forced process-group cleanup of the daemon and its backend,
-  holder reporting after an unexpected daemon crash, abrupt owner death through inherited-pipe EOF,
+  holder reporting and recovery-required projection after an unexpected daemon crash, abrupt owner
+  death through inherited-pipe EOF,
   read-only crash-fence lookup, four-state status projection, ambiguity-safe human root inference,
   explicit-root lifecycle commands, exact-generation non-signalling recovery, exact session-directory
   selection, root-aware machine request routing, and self-termination after the project worktree

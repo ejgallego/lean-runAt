@@ -39,7 +39,10 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
   `ok`/`result` envelopes, diagnostics preserve the complete session selector, and every wrapper
   observation revalidates the selected directory without following a symbolic-link leaf. Project
   state writers share private-directory preparation, and Lean execution commands require text at
-  the typed CLI boundary instead of constructing incomplete broker requests
+  the typed CLI boundary instead of constructing incomplete broker requests. Missing session paths
+  canonicalize their existing ancestor before creation, abnormal daemon exits project to
+  `recoveryRequired`, selector mismatches stay separate from lifecycle state, and repeated `stop`
+  reports `changed: false`
   ([#243](https://github.com/leanprover/lean-beam/pull/243), @ejgallego).
 - Wrapper daemons now have explicit session ownership: only the foreground owner command starts a
   generation, ordinary wrapper commands attach to it, `--port` is owner-only, and holder exit

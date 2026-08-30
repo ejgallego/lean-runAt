@@ -208,14 +208,18 @@ Exact event ordering and examples live in
   Lean/Rocq candidate and rejects different candidates as ambiguous. Machine requests, `stop`, and
   `recover` require an explicit canonical `--root`. Successful lifecycle commands use one
   top-level `ok`/`result` envelope; `serve` projects its private backend warm-up onto the public
-  running-session result instead of exposing broker workspace or epoch fields.
+  running-session result instead of exposing broker workspace or epoch fields. `stop` distinguishes
+  a newly committed transition from an already-stopping session and retains committed state in its
+  result when immediate shutdown delivery produces a typed warning.
 - Abnormal or ambiguous state is never reclaimed automatically. The descriptor remains as a fence
-  after an unexpected broker/owner exit. Once the operator has established that the matching
-  session is no longer authoritative, `lean-beam --root ROOT recover --generation ID` quarantines
+  after an unexpected broker/owner exit; an unexpected broker exit preserves the live descriptor,
+  whose unavailable endpoint projects to `recoveryRequired`. Once the operator has established that
+  the matching session is no longer authoritative, `lean-beam --root ROOT recover --generation ID` quarantines
   that exact descriptor without signalling persisted PIDs. Legacy, unsupported, or malformed
   descriptor state requires the deliberately broader `recover --force` form. Current-descriptor
   recovery additionally requires a root recorded in that descriptor, so a wrong-root caller using
-  the same session directory cannot quarantine the session.
+  the same session directory cannot quarantine the session. Such a wrong-root selection is reported
+  as `sessionSelectorMismatch`, outside the public lifecycle states.
 - The default authoritative descriptor is `<root>/.beam/beam-daemon.json`, which keeps discovery
   available inside project-scoped agent sandboxes. An absolute `--session-dir DIR` selects one exact
   alternate

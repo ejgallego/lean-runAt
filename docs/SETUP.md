@@ -238,8 +238,10 @@ different candidate roots, Beam lists the ambiguity and requires `--root`. Machi
 
 Successful `serve`, `status`, `stop`, and `recover` commands emit the same top-level
 `{"ok": true, "result": ...}` shape. `serve` reports the public running session rather than its
-private backend warm-up request. Recovery reports `state: "absent"` and whether it changed the
-selected session fence.
+private backend warm-up request. `stop` reports whether it committed the transition to `stopping`;
+repeating it while already stopping returns `changed: false`. If the transition commits but its
+immediate authenticated shutdown delivery fails, the successful stopping result includes a typed
+warning. Recovery reports `state: "absent"` and whether it changed the selected session fence.
 
 The default session descriptor and lock live in `<root>/.beam`. This is intentional for
 project-scoped agent sandboxes: clients that can access the same workspace can discover the same
@@ -267,6 +269,10 @@ Beam will not adopt it by silently changing permissions. `BEAM_SESSION_ROOT=/wri
 sandbox convenience form and must be absolute: Beam derives a separate hashed directory for each
 canonical root below that base.
 
+For a missing explicit session directory, Beam canonicalizes its longest existing ancestor before
+retaining the missing suffix. The selector therefore has the same spelling before and after Beam
+creates it, including through platform aliases such as macOS `/tmp`.
+
 Beam rejects an explicit symbolic-link leaf before canonicalizing `--session-dir` and revalidates
 the selected leaf without following links before every status or attachment operation. Permission
 drift therefore fails closed instead of silently weakening an already published session boundary.
@@ -292,7 +298,8 @@ legacy, unsupported, or malformed descriptors. Recovery preserves the old file u
 `beam-daemon.recovered-*.json` name for diagnosis.
 
 For a current descriptor, the selected `--root` must match its recorded workspace;
-using the same session directory with an unrelated root cannot quarantine the session.
+using the same session directory with an unrelated root cannot quarantine the session. `status`
+reports this as `sessionSelectorMismatch`, not as a lifecycle state or recovery requirement.
 
 Machine clients should avoid root auto-detection and raw port/session fields:
 

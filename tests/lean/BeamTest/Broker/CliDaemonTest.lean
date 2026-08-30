@@ -1027,13 +1027,23 @@ private def checkPathCanonicalization : IO Unit := do
   let stamp ← IO.monoNanosNow
   let root := System.FilePath.mk s!"/tmp/beam-path-canonical-root-{stamp}"
   let alias := System.FilePath.mk s!"/tmp/beam-path-canonical-alias-{stamp}"
+  let missingUnderRoot := root / "missing" / "session"
+  let missingUnderAlias := alias / "missing" / "session"
   try
     IO.FS.createDirAll root
     createSymlink "path canonicalization fixture" root alias
     require "canonical path equality should treat symlinked workspace roots as the same path"
       (← Beam.sameFilePath root alias)
     require "missing paths should fall back to exact text equality"
-      (!(← Beam.sameFilePath (root / "missing") (alias / "missing")))
+      (!(← Beam.sameFilePath missingUnderRoot missingUnderAlias))
+    let resolvedBeforeCreation ← Beam.resolvePathForCreation missingUnderAlias
+    let expectedBeforeCreation := (← Beam.resolveExistingPath root) / "missing" / "session"
+    require "creation-path resolution should canonicalize the longest existing ancestor"
+      (resolvedBeforeCreation == expectedBeforeCreation)
+    IO.FS.createDirAll missingUnderAlias
+    let resolvedAfterCreation ← Beam.resolveExistingPath missingUnderAlias
+    require "creation-path identity should remain stable after creating the missing suffix"
+      (resolvedAfterCreation == resolvedBeforeCreation)
   finally
     try
       if ← alias.pathExists then

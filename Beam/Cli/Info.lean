@@ -191,6 +191,10 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
   | .malformed detail =>
       IO.println "daemon status: malformed registry"
       IO.println s!"registry error: {detail}"
+  | .selectorMismatch entry =>
+      IO.println "daemon status: session selector mismatch"
+      IO.println <| sessionSelectorMismatchMessage root
+        (← Beam.Daemon.controlDirFor root opts.explicitControlDir?) entry
   | .unusable _ reason =>
       IO.println "daemon status: unsafe"
       IO.println s!"daemon safety error: {reason.message}"

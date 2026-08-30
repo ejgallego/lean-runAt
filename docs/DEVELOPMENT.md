@@ -427,10 +427,14 @@ its retained child handle and process group.
 
 The owner watches its exact descriptor generation and daemon child. `lean-beam --root ROOT stop` changes
 that generation from `live` to `draining` under the control lock before sending authenticated
-shutdown. Normal holder exit likewise publishes `draining`, closes its pipe, waits for graceful
+shutdown. A repeated stop observes the committed drain and does not deliver another request; a
+post-commit delivery failure is presentation detail rather than a rollback of the fence. Normal
+holder exit likewise publishes `draining`, closes its pipe, waits for graceful
 teardown, and, after the deadline, terminates the owned process group. It removes only the exact
-generation after owned cleanup completes. An unexpected daemon or owner exit deliberately leaves
-the descriptor fenced: startup does not infer complete process-tree exit from persisted PIDs. Once
+generation after owned cleanup completes. An unexpected daemon exit preserves its exact live
+descriptor so endpoint observation reports recovery-required state. An unexpected owner exit also
+deliberately leaves the descriptor fenced: startup does not infer complete process-tree exit from
+persisted PIDs. Once
 the operator establishes that the old session is no longer authoritative,
 `lean-beam --root ROOT recover --generation ID` quarantines that exact descriptor without signalling
 any recorded process. Opaque legacy, unsupported, or malformed state requires `recover --force`.

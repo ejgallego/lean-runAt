@@ -44,9 +44,15 @@ private structure SessionStatus where
   detail? : Option String := none
   deriving ToJson
 
+private structure SessionTransitionWarning where
+  code : String
+  message : String
+  deriving ToJson
+
 private structure SessionTransitionResult where
   state : SessionState
   changed : Bool
+  warning? : Option SessionTransitionWarning := none
   deriving ToJson
 
 private structure SessionRecoveryResult where
@@ -144,15 +150,28 @@ private def runLeanRelease
 private def stopProjectSession (opts : CliOptions) : IO Unit := do
   let root ← explicitProjectRoot opts "stop"
   match ← shutdownRegisteredProjectDaemon root opts.explicitControlDir? with
-  | .ok (some resp) =>
-      failOnError resp
-      printResponse <| Response.success <|
-        toJson ({ state := .stopping, changed := true } : SessionTransitionResult)
-  | .ok none =>
+  | .absent =>
       printResponse <| Response.success <|
         toJson ({ state := .absent, changed := false } : SessionTransitionResult)
-  | .error failure =>
-      throw <| IO.userError (← daemonFailureMessage root failure opts.explicitControlDir?)
+  | .stopping changed delivery? =>
+      let warning? ←
+        match delivery? with
+        | none | some .acknowledged => pure none
+        | some (.rejected failure) =>
+            pure <| some ({
+              code := "shutdownRejected"
+              message := failure.error.message
+            } : SessionTransitionWarning)
+        | some (.failed failure) =>
+            pure <| some ({
+              code := "shutdownDeliveryFailed"
+              message := ← daemonFailureMessage root failure opts.explicitControlDir?
+            } : SessionTransitionWarning)
+      printResponse <| Response.success <| toJson ({
+        state := .stopping
+        changed
+        warning?
+      } : SessionTransitionResult)
 
 private def recoverProjectSession (opts : CliOptions) (args : List String) : IO Unit := do
   let root ← explicitProjectRoot opts "recover"
@@ -252,6 +271,9 @@ private def sessionStatus (opts : CliOptions) : IO Unit := do
           (some s!"unsupported session descriptor schema {schemaVersion}")
     | .malformed detail =>
         pure <| mkSessionStatus .recoveryRequired root sessionDir none (some detail)
+    | .selectorMismatch entry =>
+        throw <| IO.userError <|
+          sessionSelectorMismatchMessage root sessionDir entry
     | .unusable entry reason =>
         pure <| mkSessionStatus .recoveryRequired root sessionDir
           (some entry.daemonId) (some reason.message)

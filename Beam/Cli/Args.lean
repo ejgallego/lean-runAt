@@ -200,6 +200,7 @@ def shellQuote (text : String) : String :=
 
 inductive WrapperSessionCommand where
   | serve (backend : Backend)
+  | status
   | stop
   | recoverGeneration (generation : String)
   | recoverForce
@@ -207,6 +208,7 @@ inductive WrapperSessionCommand where
 private def WrapperSessionCommand.text : WrapperSessionCommand → String
   | .serve .lean => "serve"
   | .serve .rocq => "serve rocq"
+  | .status => "status"
   | .stop => "stop"
   | .recoverGeneration generation =>
       s!"recover --generation {shellQuote generation}"
@@ -247,7 +249,7 @@ private def resolveSessionDirArg (dir : String) : IO System.FilePath := do
     | .dir | .file | .other =>
         Beam.resolveExistingPath path
   catch
-  | .noFileOrDirectory .. => pure path.normalize
+  | .noFileOrDirectory .. => Beam.resolvePathForCreation path
   | err => throw err
 
 partial def parseCliOptions (opts : CliOptions) : List String → IO CliOptions
