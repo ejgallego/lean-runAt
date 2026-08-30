@@ -28,7 +28,6 @@ particular, aliases in an existing ancestor such as macOS `/tmp` are resolved ev
 leaf does not exist yet.
 -/
 partial def resolvePathForCreation (path : System.FilePath) : IO System.FilePath := do
-  let path := path.normalize
   try
     resolveExistingPath path
   catch
@@ -37,7 +36,9 @@ partial def resolvePathForCreation (path : System.FilePath) : IO System.FilePath
         | throw <| IO.userError s!"cannot resolve a creation parent for '{path}'"
       let some name := path.fileName
         | throw <| IO.userError s!"cannot resolve a creation leaf for '{path}'"
-      pure <| (← resolvePathForCreation parent) / name
+      -- Resolve before normalizing: lexical normalization would give the wrong meaning to `..`
+      -- after an existing symbolic-link ancestor. Normalize only the rebuilt canonical path.
+      pure <| ((← resolvePathForCreation parent) / name).normalize
   | err => throw err
 
 /-- Resolve `path`, interpreting relative paths under an already-resolved `root`. -/

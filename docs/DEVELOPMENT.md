@@ -431,7 +431,9 @@ shutdown. A repeated stop observes the committed drain and does not deliver anot
 post-commit delivery failure is presentation detail rather than a rollback of the fence. Normal
 holder exit likewise publishes `draining`, closes its pipe, waits for graceful
 teardown, and, after the deadline, terminates the owned process group. It removes only the exact
-generation after owned cleanup completes. An unexpected daemon exit preserves its exact live
+generation after owned cleanup completes. A nonzero daemon exit during graceful drain restores the
+exact conservative fence instead of clearing it; a controlled process-group kill that reaps the
+leader completes normal owner cleanup. An unexpected daemon exit preserves its exact live
 descriptor so endpoint observation reports recovery-required state. An unexpected owner exit also
 deliberately leaves the descriptor fenced: startup does not infer complete process-tree exit from
 persisted PIDs. Once
@@ -454,7 +456,8 @@ generic multi-workspace surface and has its own explicit owner. Broker runtime o
 
 The default session directory is `<root>/.beam`, discoverable to project-scoped agents.
 An absolute `--session-dir DIR` is an exact, stateless selection that every participant must repeat.
-`BEAM_SESSION_ROOT` must be absolute and hashes each canonical root below a writable base for
+`BEAM_SESSION_ROOT` must be absolute, resolves the base through its longest existing ancestor, and
+hashes each canonical root below that writable base for
 sandboxed/read-only roots. The selected directory is private to one local account; coordination is
 supported between that account's processes, not across a group-shared control directory. Existing
 directories must be prepared explicitly as mode `0700`; validation rejects symlinks, other file

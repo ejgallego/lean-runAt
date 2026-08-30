@@ -266,8 +266,8 @@ their broker processes: each canonical root receives its own derived session dir
 Every participant must supply the same `--root` and an absolute `--session-dir`; Beam does not
 search alternate session directories. If the exact directory already exists, prepare its `0700` mode explicitly;
 Beam will not adopt it by silently changing permissions. `BEAM_SESSION_ROOT=/writable/base` is the
-sandbox convenience form and must be absolute: Beam derives a separate hashed directory for each
-canonical root below that base.
+sandbox convenience form and must be absolute: Beam canonicalizes the base, then derives a separate
+hashed directory for each canonical root below it.
 
 For a missing explicit session directory, Beam canonicalizes its longest existing ancestor before
 retaining the missing suffix. The selector therefore has the same spelling before and after Beam
@@ -285,7 +285,8 @@ the dedicated `lean-beam --root ROOT stop` command for lifecycle control.
 Use a stable external session directory when ownership must remain fenced while the project path is
 deleted and recreated; deleting a project-local `.beam` necessarily deletes its default fence.
 
-An abnormal owner or broker exit leaves the descriptor as a safety fence. After independently
+An abnormal owner or broker exit, including a nonzero broker exit after stopping begins, leaves the
+descriptor as a safety fence. After independently
 establishing that the recorded generation is no longer authoritative, quarantine that exact record
 without signalling its recorded PIDs:
 

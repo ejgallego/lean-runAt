@@ -5,6 +5,7 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Lean
+import Beam.Path
 
 namespace Beam.Daemon
 
@@ -30,6 +31,7 @@ def controlDirFor
           unless base.isAbsolute do
             throw <| IO.userError
               s!"BEAM_SESSION_ROOT must be an absolute path, got '{base}'"
+          let base ← Beam.resolvePathForCreation base
           pure (base / controlRootTag root)
       | none =>
           pure (beamStateDir root)

@@ -199,7 +199,9 @@ Exact event ordering and examples live in
   from a mode-`0600` descriptor inside a mode-`0700` session directory. A paused owner retains the
   session; a killed owner closes the pipe; explicit
   `lean-beam --root ROOT stop` changes the descriptor to `draining`, and that fence remains until normal
-  owner cleanup has reaped the daemon leader after graceful or process-group teardown.
+  owner cleanup has reaped the daemon leader after graceful or process-group teardown. If the daemon
+  instead exits abnormally during that drain, Beam restores the exact conservative fence so status
+  reports `recoveryRequired` rather than treating leader exit as successful cleanup.
   Ordinary lookups take no mutation lock, create no control files, use the frozen workspace
   configuration, and preserve unsafe session state. A competing owner computes its proposed
   configuration but cannot replace a mismatched live owner.

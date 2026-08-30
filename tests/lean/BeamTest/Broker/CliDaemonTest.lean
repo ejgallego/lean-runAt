@@ -1027,11 +1027,14 @@ private def checkPathCanonicalization : IO Unit := do
   let stamp ← IO.monoNanosNow
   let root := System.FilePath.mk s!"/tmp/beam-path-canonical-root-{stamp}"
   let alias := System.FilePath.mk s!"/tmp/beam-path-canonical-alias-{stamp}"
+  let dotdotAlias := System.FilePath.mk s!"/tmp/beam-path-dotdot-alias-{stamp}"
   let missingUnderRoot := root / "missing" / "session"
   let missingUnderAlias := alias / "missing" / "session"
   try
     IO.FS.createDirAll root
     createSymlink "path canonicalization fixture" root alias
+    IO.FS.createDir (root / "existing")
+    createSymlink "path dotdot canonicalization fixture" (root / "existing") dotdotAlias
     require "canonical path equality should treat symlinked workspace roots as the same path"
       (← Beam.sameFilePath root alias)
     require "missing paths should fall back to exact text equality"
@@ -1044,7 +1047,21 @@ private def checkPathCanonicalization : IO Unit := do
     let resolvedAfterCreation ← Beam.resolveExistingPath missingUnderAlias
     require "creation-path identity should remain stable after creating the missing suffix"
       (resolvedAfterCreation == resolvedBeforeCreation)
+    let missingAfterSymlinkDotdot := dotdotAlias / ".." / "dotdot-missing" / "session"
+    let resolvedAfterSymlinkDotdot ← Beam.resolvePathForCreation missingAfterSymlinkDotdot
+    let expectedAfterSymlinkDotdot :=
+      ((← Beam.resolveExistingPath root) / "dotdot-missing" / "session").normalize
+    require "creation-path resolution should preserve filesystem semantics for symlink followed by dotdot"
+      (resolvedAfterSymlinkDotdot == expectedAfterSymlinkDotdot)
+    IO.FS.createDirAll missingAfterSymlinkDotdot
+    require "symlink-dotdot path identity should remain stable after creation"
+      ((← Beam.resolveExistingPath missingAfterSymlinkDotdot) == resolvedAfterSymlinkDotdot)
   finally
+    try
+      if ← dotdotAlias.pathExists then
+        IO.FS.removeFile dotdotAlias
+    catch _ =>
+      pure ()
     try
       if ← alias.pathExists then
         IO.FS.removeFile alias

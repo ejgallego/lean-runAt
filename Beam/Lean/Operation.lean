@@ -111,7 +111,7 @@ private def operationDescription : Operation → String
   | .closeSave => "Read and synchronize the current on-disk Lean source, write the same Lean/Lake build artifacts when possible, and close the tracked LSP document."
   | .close => "Close the tracked LSP document."
 
-private def sourceFileInvariant : String :=
+def sourceFileInvariant : String :=
   "Beam never applies source edits to `.lean` files on disk; the client applies source edits."
 
 private def executesSuppliedLeanText : Operation → Bool
@@ -121,14 +121,13 @@ private def executesSuppliedLeanText : Operation → Bool
 private def speculativeIoCaveat : String :=
   "Speculative execution isolates Beam's source and document state, but it is not an OS sandbox; Lean commands and project metaprogramming may perform IO."
 
-private def progressDiscovery : String :=
-  "For detailed live updates, clients can pass `tools/call` `_meta.progressToken`; without one, Beam emits one status log when setup or a long-running request is detected and the request's logging policy admits notice-level events."
-
-def Operation.description (operation : Operation) : String :=
+def Operation.behaviorDescription (operation : Operation) : String :=
   String.intercalate " " <|
     [operationDescription operation] ++
-      (if executesSuppliedLeanText operation then [speculativeIoCaveat] else []) ++
-      [progressDiscovery, sourceFileInvariant]
+      (if executesSuppliedLeanText operation then [speculativeIoCaveat] else [])
+
+def Operation.description (operation : Operation) : String :=
+  String.intercalate " " [operation.behaviorDescription, sourceFileInvariant]
 
 private def pathField : String × Json :=
   ("path", Beam.JsonSchema.string "Lean file path, relative to the server root unless absolute.")

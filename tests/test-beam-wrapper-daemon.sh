@@ -493,6 +493,24 @@ if ! grep -Fq "BEAM_SESSION_ROOT must be an absolute path" \
   exit 1
 fi
 
+environment_session_base="$tmp2/environment-session-base"
+environment_session_alias="$tmp2/environment-session-alias"
+mkdir -p "$environment_session_base"
+ln -s "$environment_session_base" "$environment_session_alias"
+environment_status="$(BEAM_SESSION_ROOT="$environment_session_alias" \
+  "$beam_script" --root "$tmp1" status)"
+environment_session_dir="$(json_text_field "$environment_status" result.sessionDir)"
+case "$environment_session_dir" in
+  "$(beam_test_realpath "$environment_session_base")"/*) ;;
+  *)
+    echo "expected BEAM_SESSION_ROOT to publish a canonical derived session selector" >&2
+    printf '%s\n' "$environment_status" >&2
+    exit 1
+    ;;
+esac
+rm -f -- "$environment_session_alias"
+rmdir "$environment_session_base"
+
 port1="$(read_json_field "$registry" port)"
 python3 - "$port1" <<'PY'
 import json
@@ -1033,6 +1051,61 @@ if [ -e "$registry" ]; then
   echo "expected exact-generation crash recovery to quarantine the fence" >&2
   exit 1
 fi
+
+# If the daemon exits abnormally after drain begins, leader exit is not proof of successful cleanup.
+# Restore the exact generation to a conservative recovery-required fence instead of admitting a
+# replacement owner.
+start_owner "$tmp1" "owner-failed-drain"
+failed_drain_daemon_pid="$(read_json_field "$registry" pid)"
+failed_drain_daemon_id="$(read_json_field "$registry" daemonId)"
+kill -STOP "$failed_drain_daemon_pid"
+paused_daemon_pid="$failed_drain_daemon_pid"
+kill -INT "$hold_pid"
+for _ in $(seq 1 40); do
+  if [ -e "$registry" ] && [ "$(read_json_field "$registry" lifecycle)" = "draining" ]; then
+    break
+  fi
+  sleep 0.05
+done
+if [ ! -e "$registry" ] || [ "$(read_json_field "$registry" lifecycle)" != "draining" ]; then
+  echo "expected interrupted owner to publish the failed-drain fence before cleanup" >&2
+  cat "$registry" >&2
+  exit 1
+fi
+kill -KILL "$failed_drain_daemon_pid"
+paused_daemon_pid=""
+if ! wait_for_exit "$hold_pid" "owner after abnormal exit during drain" 80 0.05; then
+  cat "$tmp1/owner-failed-drain.err" >&2
+  exit 1
+fi
+wait "$hold_pid"
+hold_pid=""
+if ! wait_for_exit "$failed_drain_daemon_pid" "daemon after abnormal exit during drain" 40 0.05; then
+  exit 1
+fi
+if [ ! -e "$registry" ] || \
+    [ "$(read_json_field "$registry" daemonId)" != "$failed_drain_daemon_id" ] || \
+    [ "$(read_json_field "$registry" lifecycle)" != "live" ]; then
+  echo "expected abnormal drain exit to preserve the exact recovery fence" >&2
+  if [ -e "$registry" ]; then cat "$registry" >&2; fi
+  exit 1
+fi
+failed_drain_status="$("$beam_script" --root "$tmp1" status)"
+assert_json_field_equals \
+  "failed-drain session status" "$failed_drain_status" result.state recoveryRequired
+assert_json_field_equals \
+  "failed-drain session generation" "$failed_drain_status" \
+  result.generation "$failed_drain_daemon_id"
+if "$beam_script" --root "$tmp1" serve \
+    > "$tmp1/failed-drain-replacement.out" 2> "$tmp1/failed-drain-replacement.err"; then
+  echo "expected failed-drain recovery fence to reject a replacement owner" >&2
+  exit 1
+fi
+failed_drain_recovery="$(
+  "$beam_script" --root "$tmp1" recover --generation "$failed_drain_daemon_id"
+)"
+assert_json_field_equals \
+  "failed-drain recovery" "$failed_drain_recovery" result.changed true
 
 start_owner "$tmp1" "owner-draining-fence"
 draining_daemon_pid="$(read_json_field "$registry" pid)"

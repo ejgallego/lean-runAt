@@ -818,12 +818,24 @@ private def registryReadRecoveryMessage
     "; opaque state can be quarantined explicitly with:\n" ++
     wrapperSessionCommand root sessionDir .recoverForce
 
-private def markRegistryDraining (control : ProjectControl) (entry : SessionDescriptor) : IO Unit := do
+private inductive RegistryDrainTransition where
+  | committed
+  | alreadyDraining
+  | changedUnderfoot
+
+private def markRegistryDraining
+    (control : ProjectControl)
+    (entry : SessionDescriptor) : IO RegistryDrainTransition := do
   match ← readRegistryAt control.registry with
   | .current current =>
-      if sameRegistryGeneration current entry && current.lifecycle == .live then
+      if !sameRegistryGeneration current entry then
+        pure .changedUnderfoot
+      else if current.lifecycle == .draining then
+        pure .alreadyDraining
+      else
         writeExistingRegistry control { current with lifecycle := .draining }
-  | .absent | .legacy | .unsupported _ | .malformed _ => pure ()
+        pure .committed
+  | .absent | .legacy | .unsupported _ | .malformed _ => pure .changedUnderfoot
 
 private inductive ShutdownPlan where
   | none
@@ -854,8 +866,13 @@ def shutdownRegisteredProjectDaemon
     match ← observeProjectRegistryAt root control.registry with
     | .absent => pure ShutdownPlan.none
     | .live entry =>
-        markRegistryDraining control entry
-        pure <| ShutdownPlan.committed entry
+        match ← markRegistryDraining control entry with
+        | .committed => pure <| ShutdownPlan.committed entry
+        | .alreadyDraining => pure ShutdownPlan.alreadyStopping
+        | .changedUnderfoot =>
+            throw <| IO.userError <|
+              "Beam session descriptor changed while committing its draining fence; " ++
+                "the shutdown request was not sent"
     | .draining _ => pure ShutdownPlan.alreadyStopping
     | .legacy =>
         throw <| IO.userError <| registryReadRecoveryMessage root control.dir .legacy
@@ -1083,28 +1100,69 @@ private def attemptCleanup (act : IO Unit) : IO Unit := do
   catch _ =>
     pure ()
 
+private inductive OwnedDaemonFinish where
+  | exitedCleanly
+  | forcedReaped
+  | exitedAbnormally (exitCode : UInt32)
+  | unreaped
+
+private def classifyOwnedDaemonExit (exitCode : UInt32) : OwnedDaemonFinish :=
+  if exitCode == 0 then .exitedCleanly else .exitedAbnormally exitCode
+
+private def forceOwnedDaemonChild
+    {cfg : IO.Process.StdioConfig}
+    (child : IO.Process.Child cfg)
+    (exitCodeRef : IO.Ref (Option UInt32)) : IO OwnedDaemonFinish := do
+  let killSent ←
+    try
+      child.kill
+      pure true
+    catch _ =>
+      pure false
+  attemptCleanup <| waitForOwnedDaemonExit child exitCodeRef 20
+  match ← exitCodeRef.get with
+  | some exitCode =>
+      if killSent then pure .forcedReaped else pure <| classifyOwnedDaemonExit exitCode
+  | none => pure .unreaped
+
 private def finishOwnedDaemonChild
     (owned : OwnedProjectDaemon)
-    (exitCodeRef : IO.Ref (Option UInt32)) : IO Bool := do
+    (exitCodeRef : IO.Ref (Option UInt32)) : IO OwnedDaemonFinish := do
+  if let some exitCode ← exitCodeRef.get then
+    return classifyOwnedDaemonExit exitCode
   try
     let child ← closeDaemonOwnerPipe owned.child
     attemptCleanup <| waitForOwnedDaemonExit child exitCodeRef 100
-    if (← exitCodeRef.get).isNone then
-      -- `startDaemon` uses `setsid`; Lean's retained child handle therefore kills the complete
-      -- daemon process group rather than only the broker PID.
-      attemptCleanup child.kill
-      attemptCleanup <| waitForOwnedDaemonExit child exitCodeRef 20
+    match ← exitCodeRef.get with
+    | some exitCode => pure <| classifyOwnedDaemonExit exitCode
+    | none =>
+        -- `startDaemon` uses `setsid`; Lean's retained child handle therefore kills the complete
+        -- daemon process group rather than only the broker PID.
+        forceOwnedDaemonChild child exitCodeRef
   catch _ =>
-    attemptCleanup owned.child.kill
-    attemptCleanup <| waitForOwnedDaemonExit owned.child exitCodeRef 20
-  pure (← exitCodeRef.get).isSome
+    forceOwnedDaemonChild owned.child exitCodeRef
 
 private def markOwnedRegistryDraining
     (root controlDir : System.FilePath)
     (entry : SessionDescriptor) : IO Unit := do
   try
     withExistingProjectControl root (explicitControlDir? := some controlDir) fun control =>
-      markRegistryDraining control entry
+      discard <| markRegistryDraining control entry
+  catch _ =>
+    pure ()
+
+private def restoreOwnedRegistryRecoveryFence
+    (root controlDir : System.FilePath)
+    (entry : SessionDescriptor) : IO Unit := do
+  try
+    withExistingProjectControl root (explicitControlDir? := some controlDir) fun control => do
+      match ← readRegistryAt control.registry with
+      | .current current =>
+          if sameRegistryGeneration current entry && current.lifecycle == .draining then
+            -- A current `live` descriptor whose endpoint no longer responds projects to the public
+            -- `recoveryRequired` state. Restore that conservative fence after a failed drain.
+            writeExistingRegistry control { current with lifecycle := .live }
+      | .absent | .legacy | .unsupported _ | .malformed _ => pure ()
   catch _ =>
     pure ()
 
@@ -1133,8 +1191,13 @@ private def finishOwnedProjectDaemon
     pure ()
   else
     markOwnedRegistryDraining root controlDir owned.entry
-    if ← finishOwnedDaemonChild owned exitCodeRef then
-      removeOwnedRegistry root controlDir owned.entry
+    match ← finishOwnedDaemonChild owned exitCodeRef with
+    | .exitedCleanly | .forcedReaped =>
+        removeOwnedRegistry root controlDir owned.entry
+    | .exitedAbnormally _ =>
+        restoreOwnedRegistryRecoveryFence root controlDir owned.entry
+    | .unreaped =>
+        pure ()
 
 def withProjectDaemonOwner
     (home root : System.FilePath)
