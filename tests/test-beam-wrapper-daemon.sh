@@ -162,6 +162,8 @@ for tmp in "$tmp1" "$tmp2"; do
   mkdir -p "$tmp/tests/scenario/docs"
   cp tests/scenario/docs/SlowPoll.lean "$tmp/tests/scenario/docs/SlowPoll.lean"
 done
+resolved_tmp1="$(beam_test_realpath "$tmp1")"
+resolved_tmp2="$(beam_test_realpath "$tmp2")"
 
 fixture_toolchain="$(awk 'NR==1 {print $1}' tests/save_olean_project/lean-toolchain)"
 "$beam_cli" bundle-install "$fixture_toolchain"
@@ -189,8 +191,9 @@ if "$beam_script" --root "$tmp1" stats > "$missing_owner_out" 2> "$missing_owner
   cat "$missing_owner_out" >&2
   exit 1
 fi
-if ! grep -Fq "lean-beam serve" "$missing_owner_err"; then
-  echo "expected missing-owner error to name the recovery command" >&2
+missing_owner_command="lean-beam --root '$resolved_tmp1' --session-dir '$resolved_tmp1/.beam' serve"
+if ! grep -Fq "$missing_owner_command" "$missing_owner_err"; then
+  echo "expected missing-owner error to preserve the exact session selector" >&2
   cat "$missing_owner_err" >&2
   exit 1
 fi
@@ -202,7 +205,9 @@ assert_json_field_equals "absent session stop response" "$absent_stop" ok true
 assert_json_field_equals "absent session stop state" "$absent_stop" result.state absent
 assert_json_field_equals "absent session stop changed" "$absent_stop" result.changed false
 absent_recover="$("$beam_script" --root "$tmp1" recover --force)"
-assert_json_field_equals "absent session recovery" "$absent_recover" recovered false
+assert_json_field_equals "absent session recovery response" "$absent_recover" ok true
+assert_json_field_equals "absent session recovery state" "$absent_recover" result.state absent
+assert_json_field_equals "absent session recovery change" "$absent_recover" result.changed false
 if [ -e "$tmp1/.beam" ]; then
   echo "expected absent status, stop, and recovery not to create the project session directory" >&2
   find "$tmp1/.beam" -maxdepth 2 -print >&2 || true
@@ -280,6 +285,17 @@ start_owner() {
     exit 1
   fi
   assert_json_field_equals "serve response" "$(cat "$out")" ok true "$err"
+  assert_json_field_equals "serve state" "$(cat "$out")" result.state running "$err"
+  assert_json_field_equals \
+    "serve workspace" "$(cat "$out")" result.workspace "$(beam_test_realpath "$root")" "$err"
+  assert_json_field_equals \
+    "serve session directory" "$(cat "$out")" result.sessionDir \
+    "$(beam_test_realpath "$root")/.beam" "$err"
+  assert_json_field_equals \
+    "serve generation" "$(cat "$out")" result.generation \
+    "$(read_json_field "$registry" daemonId)" "$err"
+  assert_json_field_absent "serve response" "$(cat "$out")" result.workspace_id "$err"
+  assert_json_field_absent "serve response" "$(cat "$out")" result.epoch "$err"
 }
 
 registry="$tmp1/.beam/beam-daemon.json"
@@ -303,7 +319,6 @@ fi
 stats_json="$("$beam_script" --root "$tmp1" stats)"
 assert_json_field_equals "owned stats response" "$stats_json" ok true
 status_json="$("$beam_script" --root "$tmp1" status)"
-resolved_tmp1="$(beam_test_realpath "$tmp1")"
 assert_json_field_equals "running session status response" "$status_json" ok true
 assert_json_field_equals "running session status state" "$status_json" result.state running
 assert_json_field_equals "running session status generation" "$status_json" result.generation "$daemon1_id"
@@ -611,12 +626,14 @@ if [ "$(cat "$stale_registry")" != "$legacy_before" ]; then
   exit 1
 fi
 legacy_recover_json="$("$beam_script" --root "$tmp2" recover --force)"
-assert_json_field_equals "opaque registry recovery" "$legacy_recover_json" recovered true
+assert_json_field_equals "opaque registry recovery response" "$legacy_recover_json" ok true
+assert_json_field_equals "opaque registry recovery state" "$legacy_recover_json" result.state absent
+assert_json_field_equals "opaque registry recovery change" "$legacy_recover_json" result.changed true
 if [ -e "$stale_registry" ]; then
   echo "expected explicit opaque recovery to quarantine the legacy descriptor" >&2
   exit 1
 fi
-legacy_quarantine="$(json_text_field "$legacy_recover_json" quarantinedPath)"
+legacy_quarantine="$(json_text_field "$legacy_recover_json" result.quarantinedPath)"
 if [ ! -f "$legacy_quarantine" ]; then
   echo "expected opaque recovery to preserve quarantined evidence" >&2
   printf '%s\n' "$legacy_recover_json" >&2
@@ -855,7 +872,9 @@ if "$beam_script" --root "$tmp1" serve \
   exit 1
 fi
 crash_recovery_json="$("$beam_script" --root "$tmp1" recover --generation "$daemon2_id")"
-assert_json_field_equals "unexpected-crash recovery" "$crash_recovery_json" recovered true
+assert_json_field_equals "unexpected-crash recovery response" "$crash_recovery_json" ok true
+assert_json_field_equals "unexpected-crash recovery state" "$crash_recovery_json" result.state absent
+assert_json_field_equals "unexpected-crash recovery change" "$crash_recovery_json" result.changed true
 if [ -e "$registry" ]; then
   echo "expected exact-generation crash recovery to quarantine the fence" >&2
   exit 1
@@ -980,7 +999,7 @@ assert_json_field_equals \
   "owner-loss session status" "$owner_loss_status" result.state recoveryRequired
 assert_json_field_equals \
   "owner-loss session status generation" "$owner_loss_status" result.generation "$owner_loss_generation"
-if ! grep -Fq "recover --generation $owner_loss_generation" "$owner_loss_err"; then
+if ! grep -Fq "recover --generation '$owner_loss_generation'" "$owner_loss_err"; then
   echo "expected owner-loss diagnostics to name exact-generation recovery" >&2
   cat "$owner_loss_err" >&2
   exit 1
@@ -999,12 +1018,14 @@ if [ ! -e "$registry" ]; then
   exit 1
 fi
 recover_json="$("$beam_script" --root "$tmp1" recover --generation "$owner_loss_generation")"
-assert_json_field_equals "exact-generation recovery" "$recover_json" recovered true
+assert_json_field_equals "exact-generation recovery response" "$recover_json" ok true
+assert_json_field_equals "exact-generation recovery state" "$recover_json" result.state absent
+assert_json_field_equals "exact-generation recovery change" "$recover_json" result.changed true
 if [ -e "$registry" ]; then
   echo "expected explicit recovery to quarantine the stale session descriptor" >&2
   exit 1
 fi
-quarantined_registry="$(json_text_field "$recover_json" quarantinedPath)"
+quarantined_registry="$(json_text_field "$recover_json" result.quarantinedPath)"
 if [ ! -f "$quarantined_registry" ]; then
   echo "expected explicit recovery to preserve quarantined evidence" >&2
   printf '%s\n' "$recover_json" >&2
@@ -1013,12 +1034,35 @@ fi
 
 explicit_control="$tmp2/shared-control"
 nonprivate_control="$tmp2/nonprivate-control"
+explicit_symlink="$tmp2/session-link"
+ln -s "$tmp2/.beam" "$explicit_symlink"
+if "$beam_script" --root "$tmp2" --session-dir "$explicit_symlink" stats \
+    > "$tmp2/symlink-session.out" 2> "$tmp2/symlink-session.err"; then
+  echo "expected an explicit symbolic-link session directory to be rejected" >&2
+  exit 1
+fi
+if ! grep -Fq "does not accept a symbolic-link leaf" "$tmp2/symlink-session.err"; then
+  echo "expected explicit session-directory rejection to name the symbolic-link boundary" >&2
+  cat "$tmp2/symlink-session.err" >&2
+  exit 1
+fi
+rm -f -- "$explicit_symlink"
 mkdir -p "$nonprivate_control"
 chmod 755 "$nonprivate_control"
 nonprivate_mode_before="$(file_mode "$nonprivate_control")"
 if "$beam_script" --root "$tmp2" --session-dir "$nonprivate_control" recover --force \
     > "$tmp2/nonprivate-control.out" 2> "$tmp2/nonprivate-control.err"; then
   echo "expected an existing non-private control directory to be rejected" >&2
+  exit 1
+fi
+if "$beam_script" --root "$tmp2" --session-dir "$nonprivate_control" stats \
+    > "$tmp2/nonprivate-observation.out" 2> "$tmp2/nonprivate-observation.err"; then
+  echo "expected ordinary attachment to reject a non-private session directory" >&2
+  exit 1
+fi
+if ! grep -Fq "existing mode is 0755, expected 0700" "$tmp2/nonprivate-observation.err"; then
+  echo "expected ordinary attachment to apply the session-directory security boundary" >&2
+  cat "$tmp2/nonprivate-observation.err" >&2
   exit 1
 fi
 if ! grep -Fq "existing mode is 0755, expected 0700" "$tmp2/nonprivate-control.err"; then
@@ -1050,6 +1094,25 @@ assert_json_field_equals "explicit control-directory attachment" "$explicit_stat
 if [ "$(file_mode "$explicit_control")" != "700" ] || \
     [ "$(file_mode "$explicit_registry")" != "600" ]; then
   echo "expected a newly created explicit control directory and descriptor to use modes 700/600" >&2
+  exit 1
+fi
+chmod 755 "$explicit_control"
+if "$beam_script" --root "$tmp2" --session-dir "$explicit_control" stats \
+    > "$tmp2/changed-mode.out" 2> "$tmp2/changed-mode.err"; then
+  chmod 700 "$explicit_control"
+  echo "expected attachment to reject session-directory permission drift" >&2
+  exit 1
+fi
+chmod 700 "$explicit_control"
+if ! grep -Fq "existing mode is 0755, expected 0700" "$tmp2/changed-mode.err"; then
+  echo "expected permission-drift rejection to explain the session-directory boundary" >&2
+  cat "$tmp2/changed-mode.err" >&2
+  exit 1
+fi
+explicit_stop_command="lean-beam --root '$resolved_tmp2' --session-dir '$(beam_test_realpath "$explicit_control")' stop"
+if ! grep -Fq "$explicit_stop_command" "$tmp2/explicit-control-owner.err"; then
+  echo "expected the foreground owner to print its exact stop command" >&2
+  cat "$tmp2/explicit-control-owner.err" >&2
   exit 1
 fi
 if "$beam_script" --root "$tmp2" stats \

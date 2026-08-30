@@ -49,6 +49,25 @@ private structure SessionTransitionResult where
   changed : Bool
   deriving ToJson
 
+private structure SessionRecoveryResult where
+  state : SessionState
+  changed : Bool
+  generation? : Option String := none
+  quarantinedPath? : Option String := none
+  reason? : Option String := none
+  deriving ToJson
+
+private def mkSessionStatus
+    (state : SessionState)
+    (workspace sessionDir : System.FilePath)
+    (generation? detail? : Option String := none) : SessionStatus := {
+  state
+  workspace := workspace.toString
+  sessionDir := sessionDir.toString
+  generation?
+  detail?
+}
+
 private def wrapperDisplayAction (fallback : String) : IO String := do
   match ← IO.getEnv "BEAM_WRAPPER_COMMAND" with
   | some action => pure action
@@ -145,7 +164,13 @@ private def recoverProjectSession (opts : CliOptions) (args : List String) : IO 
         throw <| IO.userError
           "usage: beam --root PATH [--session-dir DIR] recover --generation ID | --force"
   let result ← recoverProjectDaemon root generation? forceOpaque opts.explicitControlDir?
-  printJsonLine (toJson result)
+  printResponse <| Response.success <| toJson ({
+    state := .absent
+    changed := result.recovered
+    generation? := result.generation?
+    quarantinedPath? := result.quarantinedPath?
+    reason? := result.reason?
+  } : SessionRecoveryResult)
 
 private def parseProjectRequestArg (raw : String) : IO ProjectRequest := do
   let text ← if raw == "-" then (← IO.getStdin).readToEnd else pure raw
@@ -201,36 +226,35 @@ private def serveBackend
   let root ← projectRoot opts backend
   withProjectDaemonOwner home root backend opts fun owner =>
     runThenHoldUntilInterrupted owner do
-      callBroker root owner.client {
+      callBrokerQuiet root owner.client {
         op := .ensure, backend := backend, root? := some root.toString
       }
+      printResponse <| Response.success <| toJson <|
+        mkSessionStatus .running root owner.client.controlDir (some owner.generation)
       (← IO.getStdout).flush
       IO.eprintln <|
-        s!"beam: serving Beam session; interrupt this process or run " ++
-        s!"`lean-beam --root {shellQuote root.toString} stop` when finished"
+        "beam: serving Beam session; interrupt this process or run when finished:\n" ++
+        wrapperSessionCommand root owner.client.controlDir "stop"
 
 private def sessionStatus (opts : CliOptions) : IO Unit := do
   let root ← projectRootAny opts
   let sessionDir ← Beam.Daemon.controlDirFor root opts.explicitControlDir?
-  let status (state : SessionState) (generation? detail? : Option String := none) : SessionStatus := {
-    state
-    workspace := root.toString
-    sessionDir := sessionDir.toString
-    generation?
-    detail?
-  }
   let result : SessionStatus ←
     match ← observeProjectRegistry root opts.explicitControlDir? with
-    | .absent => pure <| status .absent
-    | .live entry => pure <| status .running (some entry.daemonId)
-    | .draining entry => pure <| status .stopping (some entry.daemonId)
-    | .legacy => pure <| status .recoveryRequired (detail? := some "legacy session descriptor")
+    | .absent => pure <| mkSessionStatus .absent root sessionDir
+    | .live entry => pure <| mkSessionStatus .running root sessionDir (some entry.daemonId)
+    | .draining entry => pure <| mkSessionStatus .stopping root sessionDir (some entry.daemonId)
+    | .legacy =>
+        pure <| mkSessionStatus .recoveryRequired root sessionDir none
+          (some "legacy session descriptor")
     | .unsupported schemaVersion =>
-        pure <| status .recoveryRequired
-          (detail? := some s!"unsupported session descriptor schema {schemaVersion}")
-    | .malformed detail => pure <| status .recoveryRequired (detail? := some detail)
+        pure <| mkSessionStatus .recoveryRequired root sessionDir none
+          (some s!"unsupported session descriptor schema {schemaVersion}")
+    | .malformed detail =>
+        pure <| mkSessionStatus .recoveryRequired root sessionDir none (some detail)
     | .unusable entry reason =>
-        pure <| status .recoveryRequired (some entry.daemonId) (some reason.message)
+        pure <| mkSessionStatus .recoveryRequired root sessionDir
+          (some entry.daemonId) (some reason.message)
   printResponse <| Response.success (toJson result)
 
 def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit := do

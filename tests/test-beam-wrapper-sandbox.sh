@@ -176,8 +176,10 @@ if sandbox_beam stats >"$missing_out" 2>"$missing_err"; then
   sed -n '1,160p' "$missing_out" >&2
   exit 1
 fi
-if ! grep -Fq "start 'lean-beam serve'" "$missing_err"; then
-  echo "expected the missing-owner error to provide the ownership command" >&2
+if ! grep -Fq "lean-beam --root '$project_root'" "$missing_err" || \
+    ! grep -Fq -- "--session-dir '$control_root/" "$missing_err" || \
+    ! grep -Fq " serve" "$missing_err"; then
+  echo "expected the missing-owner error to preserve the exact sandbox session selector" >&2
   sed -n '1,160p' "$missing_err" >&2
   exit 1
 fi
@@ -312,7 +314,9 @@ fi
 # This test harness supervised the complete bwrap owner namespace and observed its exit, so it can
 # now authorize exact-generation recovery that an ordinary client must refuse to infer.
 recovery_json="$(sandbox_beam recover --generation "$daemon_id_2")"
-if [ "$(json_text_field "$recovery_json" recovered)" != "true" ]; then
+if [ "$(json_text_field "$recovery_json" ok)" != "true" ] || \
+    [ "$(json_text_field "$recovery_json" result.changed)" != "true" ] || \
+    [ "$(json_text_field "$recovery_json" result.state)" != "absent" ]; then
   echo "expected exact-generation sandbox recovery to quarantine the descriptor" >&2
   printf '%s\n' "$recovery_json" >&2
   exit 1
@@ -321,7 +325,7 @@ if [ -e "$registry" ]; then
   echo "expected exact-generation recovery to remove the authoritative fence" >&2
   exit 1
 fi
-recovery_path="$(json_text_field "$recovery_json" quarantinedPath)"
+recovery_path="$(json_text_field "$recovery_json" result.quarantinedPath)"
 if [ ! -f "$recovery_path" ]; then
   echo "expected sandbox recovery to preserve quarantined evidence" >&2
   printf '%s\n' "$recovery_json" >&2

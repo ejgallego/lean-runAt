@@ -35,7 +35,10 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 
 - Wrapper lifecycle commands now use the explicit `serve`, `status`, and `stop` vocabulary;
   `stop` and `recover` require `--root`, alternate selectors use `--session-dir`, and wrapper
-  descriptors contain exactly one frozen workspace.
+  descriptors contain exactly one frozen workspace. Successful lifecycle commands use typed
+  `ok`/`result` envelopes, diagnostics preserve the complete session selector, and every wrapper
+  observation revalidates the selected directory without following a symbolic-link leaf
+  ([#243](https://github.com/leanprover/lean-beam/pull/243), @ejgallego).
 - Wrapper daemons now have explicit session ownership: only the foreground owner command starts a
   generation, ordinary wrapper commands attach to it, `--port` is owner-only, and holder exit
   cancels admitted requests before closing the daemon through an inherited pipe without heartbeat

@@ -250,8 +250,8 @@ Broker requests remain a shared record for the CLI, MCP projection, and daemon t
 ownership is operation-specific. Update `Op.optionalRequestFields` with every new broker field and
 keep `Request.validateFields` at both the JSON decoder and direct dispatch boundary. Do not let an
 operation silently ignore a field owned by another operation. The broker protocol's `.cancel`
-operation is process-wide and is identified only by `cancelRequestId`; it does not carry a workspace
-or root selector.
+operation is workspace-scoped and is identified by that workspace plus `cancelRequestId`; the
+supported wrapper machine surface injects its fixed workspace and does not let callers select one.
 
 Broker `Response` and `StreamMessage` values are tagged unions internally. Their explicit JSON
 codecs retain the public `ok` and `kind` discriminants while preventing mismatched payloads from

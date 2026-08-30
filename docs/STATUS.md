@@ -196,7 +196,7 @@ Exact event ordering and examples live in
   happens without heartbeat timeouts or filesystem leases and works across PID namespaces because
   authority does not depend on observing persisted PIDs. Endpoint, root, and generation-identity
   validation are authoritative. Each wrapper request carries a random per-generation capability
-  from a mode-`0600` registry inside a mode-`0700` control directory. A paused owner retains the
+  from a mode-`0600` descriptor inside a mode-`0700` session directory. A paused owner retains the
   session; a killed owner closes the pipe; explicit
   `lean-beam --root ROOT stop` changes the descriptor to `draining`, and that fence remains until normal
   owner cleanup has reaped the daemon leader after graceful or process-group teardown.
@@ -206,7 +206,9 @@ Exact event ordering and examples live in
 - `lean-beam status` projects internal descriptor observations onto four public states: `absent`,
   `running`, `stopping`, and `recoveryRequired`. Backend-neutral root inference accepts a unique
   Lean/Rocq candidate and rejects different candidates as ambiguous. Machine requests, `stop`, and
-  `recover` require an explicit canonical `--root`.
+  `recover` require an explicit canonical `--root`. Successful lifecycle commands use one
+  top-level `ok`/`result` envelope; `serve` projects its private backend warm-up onto the public
+  running-session result instead of exposing broker workspace or epoch fields.
 - Abnormal or ambiguous state is never reclaimed automatically. The descriptor remains as a fence
   after an unexpected broker/owner exit. Once the operator has established that the matching
   session is no longer authoritative, `lean-beam --root ROOT recover --generation ID` quarantines
@@ -224,7 +226,8 @@ Exact event ordering and examples live in
   directory to be account-private (`0700`) before creating its lock or capability descriptor: it
   creates and privatizes a missing leaf, but accepts an existing path only when it is a real,
   non-symlinked mode-`0700` directory. It rejects broader existing permissions without changing
-  them.
+  them. Explicit symbolic-link leaves are rejected before canonicalization, and read-only status or
+  attachment operations revalidate the exact leaf and its permissions without mutating it.
   Wrapper sessions contain exactly one frozen workspace; dynamic workspace mutation remains
   unavailable in wrapper mode. Standalone broker and MCP runtimes retain their independent
   multi-workspace behavior.

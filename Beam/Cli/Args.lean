@@ -194,6 +194,13 @@ def parseLeanTodoArgs (args : List String) :
 def shellQuote (text : String) : String :=
   "'" ++ text.replace "'" "'\\''" ++ "'"
 
+/-- Render one exact public wrapper-session command selector. -/
+def wrapperSessionCommand
+    (root sessionDir : System.FilePath)
+    (action : String) : String :=
+  s!"lean-beam --root {shellQuote root.toString} " ++
+    s!"--session-dir {shellQuote sessionDir.toString} {action}"
+
 def parseEnvFlag (raw : String) : Bool :=
   let normalized := raw.trimAscii.toString.toLower
   !(normalized.isEmpty || normalized == "0" || normalized == "false" || normalized == "no")
@@ -213,10 +220,17 @@ private def resolveSessionDirArg (dir : String) : IO System.FilePath := do
   let path := System.FilePath.mk dir
   unless path.isAbsolute do
     throw <| IO.userError s!"--session-dir requires an absolute path, got '{path}'"
-  if ← path.pathExists then
-    Beam.resolveExistingPath path
-  else
-    pure path.normalize
+  try
+    let metadata ← path.symlinkMetadata
+    match metadata.type with
+    | .symlink =>
+        throw <| IO.userError <|
+          s!"--session-dir does not accept a symbolic-link leaf: '{path}'"
+    | .dir | .file | .other =>
+        Beam.resolveExistingPath path
+  catch
+  | .noFileOrDirectory .. => pure path.normalize
+  | err => throw err
 
 partial def parseCliOptions (opts : CliOptions) : List String → IO CliOptions
   | [] => pure opts

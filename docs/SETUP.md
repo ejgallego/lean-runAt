@@ -236,6 +236,11 @@ commands may infer a root only when the result is unique. If Lean and Rocq marke
 different candidate roots, Beam lists the ambiguity and requires `--root`. Machine requests,
 `stop`, and `recover` always require an explicit root.
 
+Successful `serve`, `status`, `stop`, and `recover` commands emit the same top-level
+`{"ok": true, "result": ...}` shape. `serve` reports the public running session rather than its
+private backend warm-up request. Recovery reports `state: "absent"` and whether it changed the
+selected session fence.
+
 The default session descriptor and lock live in `<root>/.beam`. This is intentional for
 project-scoped agent sandboxes: clients that can access the same workspace can discover the same
 session. Before creating a lock or capability-bearing descriptor, Beam makes the selected session
@@ -261,6 +266,10 @@ search alternate session directories. If the exact directory already exists, pre
 Beam will not adopt it by silently changing permissions. `BEAM_SESSION_ROOT=/writable/base` is the
 sandbox convenience form and must be absolute: Beam derives a separate hashed directory for each
 canonical root below that base.
+
+Beam rejects an explicit symbolic-link leaf before canonicalizing `--session-dir` and revalidates
+the selected leaf without following links before every status or attachment operation. Permission
+drift therefore fails closed instead of silently weakening an already published session boundary.
 
 Each wrapper session publishes exactly one frozen workspace. Wrapper mode does not allow runtime
 `init_workspace`, `list_workspaces`, or `drop_workspace` requests. The

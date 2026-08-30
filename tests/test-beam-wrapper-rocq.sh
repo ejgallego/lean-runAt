@@ -107,8 +107,9 @@ rsync -a \
     echo "expected an ordinary Rocq command to require a session owner" >&2
     exit 1
   fi
-  if ! grep -Fq "lean-beam serve rocq" "$rocq_missing_err"; then
-    echo "expected Rocq missing-owner recovery to name the Rocq ownership command" >&2
+  if ! grep -Fq -- "--session-dir" "$rocq_missing_err" || \
+      ! grep -Fq "serve rocq" "$rocq_missing_err"; then
+    echo "expected Rocq missing-owner recovery to preserve the exact ownership selector" >&2
     cat "$rocq_missing_err" >&2
     exit 1
   fi
