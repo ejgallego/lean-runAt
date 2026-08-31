@@ -245,7 +245,7 @@ def leanSaveResult
     (spec : LeanSaveSpec)
     (sourceHash : Lake.Hash)
     (sync : SyncFileResult) : SaveOleanResult := {
-  module := spec.moduleName.toString
+  module := spec.moduleName
   sourceHash := sourceHash.toString
   olean := spec.oleanPath.toString
   ilean := spec.ileanPath.toString

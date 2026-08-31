@@ -30,7 +30,7 @@ def command (config : BrokerConfig) : IO (String × Array String × Array (Strin
   let some cmd := config.leanCmd?
     | throw <| IO.userError "missing Beam daemon --lean-cmd configuration"
   let plugin := ← pluginPath config
-  let lakeEnv ← leanServerLakeEnv config.root config.leanCmd?
+  let lakeEnv ← leanServerLakeEnv config.root config.leanCmd? config.leanLakeHelper?
   pure (
     cmd,
     #["--server"] ++ lakeEnv.moreServerArgs ++

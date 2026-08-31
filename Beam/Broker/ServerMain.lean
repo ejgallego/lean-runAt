@@ -5,5 +5,9 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Beam.Broker.Server
+import Beam.Broker.LakeHelperMain
 
-def main := Beam.Broker.main
+def main (args : List String) : IO Unit :=
+  match args with
+  | "lake-helper" :: helperArgs => Beam.Broker.LakeHelperMain.main helperArgs
+  | _ => Beam.Broker.main args

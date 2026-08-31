@@ -165,6 +165,9 @@ Exact event ordering and examples live in
   must build and pass a local plugin load/elaboration probe for their exact fingerprint.
 - The supported fast path is the Lean toolchain pinned by this repository's `lean-toolchain`, because
   the plugin uses internal Lean APIs.
+- MCP sync, probe, `lean_save`, and `lean_close_save` operations can use a target runtime built from
+  a different Lean commit than the MCP server. The target bundle computes Lake server arguments and
+  authors save traces in its own process; live Lake workspace values never cross Lean builds.
 - The installer prebuilds the pinned validated toolchain by default and can prebuild additional
   validated, release-line-compatible, or explicitly custom toolchains; setup flags and offline notes live in
   [SETUP.md](SETUP.md).

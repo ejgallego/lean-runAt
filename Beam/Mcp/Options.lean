@@ -15,8 +15,8 @@ structure Options where
 
 def usage : String :=
   String.intercalate "\n" [
-    "usage: lean-beam-mcp [--beam-cli PATH] [--lean-cmd CMD] [--lean-plugin PATH]",
-    "       lean-beam-mcp [--beam-cli PATH] --self-check <lean-file>",
+    "usage: lean-beam-mcp [--beam-cli PATH | --lean-cmd CMD --lean-plugin PATH]",
+    "       lean-beam-mcp [--beam-cli PATH | --lean-cmd CMD --lean-plugin PATH] --self-check <lean-file>",
     "       lean-beam-mcp --version",
     "",
     "Runs the experimental Lean Beam MCP server over newline-delimited JSON-RPC on stdio.",

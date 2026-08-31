@@ -8,9 +8,11 @@ import Lake.Config.Env
 import Lake.Config.InstallPath
 import Lake.CLI.Serve
 import Lake.Load.Workspace
+import Beam.Broker.LakeHelper
 
 open System
 open Std
+open Lean
 
 namespace Beam.Broker
 
@@ -40,6 +42,10 @@ private def computeLakeEnv (leanCmd? : Option String) : IO Lake.Env := do
   match ← (Lake.Env.compute lake lean elan?).toBaseIO with
   | .ok env => pure env
   | .error err => throw <| IO.userError s!"failed to compute Lake environment: {err}"
+
+/-- A `Workspace` contains live Lean values, so only load it across an exact Lean ABI match. -/
+private def canLoadWorkspaceInProcess (lakeEnv : Lake.Env) : Bool :=
+  !lakeEnv.lean.githash.isEmpty && lakeEnv.lean.githash == Lean.githash
 
 private def detectConfigFile? (root : FilePath) : IO (Option (FilePath × FilePath)) := do
   let leanConfig := root / "lakefile.lean"
@@ -74,31 +80,46 @@ private def loadWorkspaceWithConfig (root : FilePath) (lakeEnv : Lake.Env)
 
 private def loadWorkspaceFailureMessage
     (root : FilePath)
-    (messages : Array String)
-    (extra : Array String := #[]) : String :=
+    (messages : Array String) : String :=
   let lines :=
     #[s!"failed to load Lake workspace at {root}"] ++
-    (if messages.isEmpty then #[] else #["Lake log:"] ++ messages) ++
-    extra
+    (if messages.isEmpty then #[] else #["Lake log:"] ++ messages)
   String.intercalate "\n" lines.toList
 
-def loadWorkspaceForRoot (root : FilePath) (leanCmd? : Option String) : IO Workspace := do
+inductive WorkspaceLoadResult where
+  | loaded (workspace : Workspace)
+  | leanBuildMismatch
+
+def loadWorkspaceForRoot (root : FilePath) (leanCmd? : Option String) : IO WorkspaceLoadResult := do
   let (relConfigFile, configFile) ← detectConfigFile root
   let lakeEnv ← computeLakeEnv leanCmd?
+  unless canLoadWorkspaceInProcess lakeEnv do
+    return .leanBuildMismatch
   let (ws?, messages) ← loadWorkspaceWithConfig root lakeEnv relConfigFile configFile
   if let some ws := ws? then
-    pure ws
+    pure <| .loaded ws
   else
     throw <| IO.userError <| loadWorkspaceFailureMessage root messages
 
 structure LeanServerLakeEnv where
-  env : Array (String × Option String) := #[]
-  moreServerArgs : Array String := #[]
+  env : Array (String × Option String)
+  moreServerArgs : Array String
+  deriving FromJson, ToJson
 
-def leanServerLakeEnv (root : FilePath) (leanCmd? : Option String) : IO LeanServerLakeEnv := do
-  let some (relConfigFile, configFile) ← detectConfigFile? root
-    | pure {}
+private def leanServerLakeEnvInProcess
+    (root : FilePath)
+    (leanCmd? : Option String) : IO LeanServerLakeEnv := do
   let lakeEnv ← computeLakeEnv leanCmd?
+  -- Always preserve the target runtime environment: the Beam plugin links against target Lean/Lake
+  -- libraries even when there is no Lake configuration or this Lake version cannot load it.
+  let fallback : LeanServerLakeEnv := {
+    env := lakeEnv.vars
+    moreServerArgs := #[]
+  }
+  if !canLoadWorkspaceInProcess lakeEnv then
+    return fallback
+  let some (relConfigFile, configFile) ← detectConfigFile? root
+    | pure fallback
   let (ws?, messages) ← loadWorkspaceWithConfig root lakeEnv relConfigFile configFile
   if let some ws := ws? then
     pure {
@@ -107,8 +128,28 @@ def leanServerLakeEnv (root : FilePath) (leanCmd? : Option String) : IO LeanServ
     }
   else
     pure {
-      env := lakeEnv.baseVars.push (Lake.invalidConfigEnvVar, some <| String.intercalate "\n" messages.toList)
+      env := lakeEnv.vars.push
+        (Lake.invalidConfigEnvVar, some <| String.intercalate "\n" messages.toList)
       moreServerArgs := #[]
     }
+
+def leanServerLakeEnv
+    (root : FilePath)
+    (leanCmd? : Option String)
+    (lakeHelper? : Option FilePath := none) : IO LeanServerLakeEnv := do
+  match lakeHelper?, leanCmd? with
+  | some helper, some leanCmd =>
+      match ← runLakeHelper helper "server-env" <| toJson ({
+          root := root.toString
+          leanCmd
+        } : LakeHelperEnvRequest) with
+      | .ok result =>
+          match fromJson? result with
+          | .ok serverEnv => pure serverEnv
+          | .error err =>
+              throw <| IO.userError s!"target Lake helper returned an invalid server environment: {err}"
+      | .error failure => throw <| IO.userError failure.message
+  | _, _ =>
+      leanServerLakeEnvInProcess root leanCmd?
 
 end Beam.Broker

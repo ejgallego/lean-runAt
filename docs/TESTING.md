@@ -220,7 +220,7 @@ When investigating MCP stdio timeouts, prefer the focused descriptor-bound sync 
 rerunning the full smoke suite:
 
 ```bash
-lake build Beam.LSP:shared lean-beam-mcp
+lake build Beam.LSP:shared beam-daemon lean-beam-mcp
 PYTHONDONTWRITEBYTECODE=1 python3 tests/test-mcp-stdio.py \
   --scenario progress-sync \
   --repro-runs 100 \
@@ -238,7 +238,7 @@ context, relevant CI and Lean thread env vars, the stderr tail, and a Beam/Lean 
 For the same-process concurrency contract, run:
 
 ```bash
-lake build Beam.LSP:shared lean-beam-mcp
+lake build Beam.LSP:shared beam-daemon lean-beam-mcp
 PYTHONDONTWRITEBYTECODE=1 python3 tests/test-mcp-stdio.py \
   --scenario concurrent-dispatch \
   --timeout 40
