@@ -176,18 +176,18 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
       IO.println "daemon status: draining"
       IO.println s!"daemon generation: {entry.daemonId}"
   | .absent => IO.println "daemon status: absent"
-  | .legacy => IO.println "daemon status: legacy registry"
-  | .unsupported schemaVersion =>
+  | .blocked .legacy => IO.println "daemon status: legacy registry"
+  | .blocked (.unsupported schemaVersion) =>
       IO.println "daemon status: unsupported registry"
       IO.println s!"registry schema version: {schemaVersion}"
-  | .malformed detail =>
+  | .blocked (.malformed detail) =>
       IO.println "daemon status: malformed registry"
       IO.println s!"registry error: {detail}"
-  | .selectorMismatch entry =>
+  | .blocked (.selectorMismatch entry) =>
       IO.println "daemon status: session selector mismatch"
       IO.println <| sessionSelectorMismatchMessage root
         (← Beam.Daemon.controlDirFor root opts.explicitControlDir?) entry
-  | .unusable _ reason =>
+  | .blocked (.unusable _ reason) =>
       IO.println "daemon status: unsafe"
       IO.println s!"daemon safety error: {reason.message}"
   printDaemonFailureIncidentDoctorInfo root opts.explicitControlDir?

@@ -14,15 +14,6 @@ namespace Beam.Cli
 
 open Beam.Broker
 
-private def inWorkspace (workspaceId : WorkspaceId) (req : Request) : Request :=
-  match req.op.workspaceScope with
-  | .none => req
-  | .optional | .required => { req with workspaceId? := some workspaceId }
-
-/-- Address a wrapper request to the workspace selected from its session descriptor. -/
-def inSelectedDaemonWorkspace (client : ProjectDaemonClient) (req : Request) : Request :=
-  inWorkspace client.workspaceId req
-
 private def withBrokerErrorContext
     {α}
     (root : System.FilePath)
@@ -116,24 +107,23 @@ private def withWrapperClientRequestId (req : Request) : IO WrapperBrokerRequest
 private def prepareWrapperBrokerRequest
     (client : ProjectDaemonClient)
     (req : Request) : IO WrapperBrokerRequest := do
-  let wrapper ← withWrapperClientRequestId <| inSelectedDaemonWorkspace client req
-  pure { wrapper with request := client.authorize wrapper.request }
+  withWrapperClientRequestId <| client.sealRequest req
 
-def decodeCancelAcknowledged? (resp : Response) : Option Bool := do
-  let result ← resp.result?
-  result.getObjValAs? Bool "cancelled" |>.toOption
+def decodeCancelAcknowledged? (resp : Response) : Option Bool :=
+  match resp with
+  | .successResult result _ => result.getObjValAs? Bool "cancelled" |>.toOption
+  | .errorResult _ => none
 
 private def sendBrokerCancellation
     (client : ProjectDaemonClient)
     (clientRequestId : String) : IO (Option Bool) := do
   let cancelReq : Request := {
     op := .cancel
-    workspaceId? := some client.workspaceId
     cancelRequestId? := some clientRequestId
   }
   try
     let req ← withEnvClientRequestId cancelReq
-    let resp ← sendRequest client.endpoint (client.authorize req)
+    let resp ← sendRequest client.endpoint (client.sealRequest req)
     pure <| decodeCancelAcknowledged? resp
   catch _ =>
     pure none

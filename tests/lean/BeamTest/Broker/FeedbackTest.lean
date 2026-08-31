@@ -5,6 +5,7 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Beam.Feedback
+import Beam.Feedback.Broker
 import Beam.Version
 import BeamTest.Broker.JsonAssert
 
@@ -16,6 +17,17 @@ namespace BeamTest.Broker.FeedbackTest
 private def homeFixture : IO String := do
   let home? ← IO.getEnv "HOME"
   pure <| home?.getD "/tmp/beam-feedback-home"
+
+private def checkBestEffortBrokerWarning : IO Unit := do
+  let warnings := #["existing warning"]
+  let (payload, warnings) := Beam.Feedback.clientResponsePayloadOrWarning "stats"
+    (.error (.responseTimeout 250)) warnings
+  requireJsonNull "timed-out feedback broker payload" "payload"
+    (Json.mkObj [("payload", payload)])
+  require "feedback should preserve existing warnings" (warnings[0]? == some "existing warning")
+  require "feedback should turn a typed timeout into a warning"
+    (warnings[1]?.any (fun warning =>
+      warning.contains "stats unavailable" && warning.contains "timed out after 250 ms"))
 
 private def localPathFromResult (home path : String) : System.FilePath :=
   if path.startsWith "~/" then
@@ -550,6 +562,7 @@ private def checkUnredactedBundlePaths : IO Unit := do
       requireJsonString "unredacted feedback bundle report" "bundle_dir" bundleDirText report
 
 def main : IO Unit := do
+  checkBestEffortBrokerWarning
   checkRenderAndRedaction
   checkInputRoundTrip
   checkConfidentialOutput

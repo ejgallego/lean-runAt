@@ -252,7 +252,7 @@ ownership is operation-specific. Update `Op.optionalRequestFields` with every ne
 keep `Request.validateFields` at both the JSON decoder and direct dispatch boundary. Do not let an
 operation silently ignore a field owned by another operation. The broker protocol's `.cancel`
 operation is workspace-scoped and is identified by that workspace plus `cancelRequestId`; the
-supported wrapper machine surface injects its fixed workspace and does not let callers select one.
+CLI wrapper adapter injects its fixed workspace and does not let callers select one.
 
 Broker `Response` and `StreamMessage` values are tagged unions internally. Their explicit JSON
 codecs retain the public `ok` and `kind` discriminants while preventing mismatched payloads from
@@ -271,6 +271,17 @@ save/close-save operation inputs separate: only sync-like inputs may carry final
 control. Likewise, keep redundant wire observations derived internally: diagnostic `total` is the
 severity sum, save `path` and `version` come from its nested sync result, and a decoded close-save
 result is always closed.
+
+### Internal Broker Stream Contract
+
+The daemon transport is a private implementation boundary. One request may emit any number of
+`fileProgress` and `diagnostic` messages followed by exactly one terminal `response`; nothing after
+that response belongs to the request. Every variant uses the same `kind`, `payload`, and optional
+`clientRequestId` envelope, while the semantic response payload never owns transport correlation.
+The terminal response carries the latest progress observation available when it was constructed,
+which may be newer than the last live progress event. Keep these invariants exhaustive in
+`Beam.Broker.StreamMessage` and encode their exact wire behavior in `StreamContractTest`; do not
+promote this stream to an installed client API.
 
 Lean/Lake root validation remains shared with the CLI. MCP descriptors use
 `Beam.Lean.Workspace.resolveRoot`, which requires absolute paths; ordinary `lean-beam` CLI paths use
@@ -437,7 +448,9 @@ exact conservative fence instead of clearing it; a controlled process-group kill
 leader completes normal owner cleanup. An unexpected daemon exit preserves its exact live
 descriptor so endpoint observation reports recovery-required state. An unexpected owner exit also
 deliberately leaves the descriptor fenced: startup does not infer complete process-tree exit from
-persisted PIDs. Once
+persisted PIDs. Normal foreground-owner cleanup has a hard deadline because it retains the child
+handle; after abrupt owner death, the daemon closes cooperatively on owner-pipe EOF, but there is no
+independent supervisor imposing that same hard bound. Once
 the operator establishes that the old session is no longer authoritative,
 `lean-beam --root ROOT recover --generation ID` quarantines that exact descriptor without signalling
 any recorded process. Opaque legacy, unsupported, or malformed state requires `recover --force`.
@@ -446,12 +459,20 @@ disappears, cleanup uses the already resolved control path without recreating th
 
 Human commands may infer a project root only when the Lean and Rocq candidates agree or exactly one
 exists; otherwise they report every candidate and require `--root`. Automated callers should pass
-an explicit root, invoke typed wrapper commands, and consume final stdout JSON. Lifecycle shutdown
+an explicit root, invoke typed wrapper commands, check exit status, and parse final stdout JSON only
+when present. Pre-dispatch selector, setup, and transport failures may report only human stderr.
+Lifecycle shutdown
 remains the dedicated `lean-beam --root ROOT stop` command so it can publish `draining` first. Beam
 does not install a raw port-oriented generic broker client. A wrapper-owned daemon rejects
 `initWorkspace`, `listWorkspaces`, and `dropWorkspace`; a separately launched broker retains the
 generic multi-workspace surface and has its own explicit owner. Broker runtime ownership is a typed
 `ServerMode`: wrapper identity and capability cannot be constructed independently.
+
+Direct standalone-broker behavior is an internal maintainer surface. It retains generic
+multi-workspace routing for protocol and runtime tests, while the supported wrapper session remains
+single-workspace and MCP owns its separate in-process multi-workspace runtime. Do not promote the
+standalone transport, unauthenticated launch mode, or workspace-administration operations into the
+public CLI contract.
 
 The default session directory is `<root>/.beam`, discoverable to project-scoped agents.
 An absolute `--session-dir DIR` is an exact, stateless selection that every participant must repeat.
@@ -479,7 +500,8 @@ Keep these invariants covered:
 - control preparation changes permissions only on a leaf Beam just created; an existing control
   path must be a non-symlinked mode-`0700` directory and rejection leaves it untouched
 - owner EOF, explicit shutdown, and project-root disappearance all close admission before backend
-  teardown and complete with bounded child cleanup
+  teardown; normal foreground-owner cleanup is bounded through its retained child handle, while
+  abrupt owner loss remains fenced and relies on cooperative daemon cleanup
 - persisted numeric PIDs are never signalled or used for automatic stale reclamation
 - every wrapper request is bound to its random generation capability, and transport frame, initial
   request, connection, and task counts are bounded

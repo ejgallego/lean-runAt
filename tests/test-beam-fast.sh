@@ -8,6 +8,93 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+beam_fast_state_root="$(mktemp -d "${TMPDIR:-/tmp}/beam-fast-state-XXXXXX")"
+beam_fast_pid_active() {
+  local pid="$1"
+  local state
+  state="$(ps -o stat= -p "$pid" 2>/dev/null)" || return 1
+  case "$state" in
+    *Z*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+beam_fast_wait_for_owner() {
+  local pid="$1"
+  local attempts="$2"
+  local attempt
+  for ((attempt = 0; attempt < attempts; attempt++)); do
+    if ! beam_fast_pid_active "$pid"; then
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+beam_fast_stop_owner() {
+  local pid="$1"
+  if beam_fast_wait_for_owner "$pid" 150; then
+    return
+  fi
+  echo "beam-fast cleanup: owner $pid did not exit after stop; sending SIGINT" >&2
+  kill -INT "$pid" 2>/dev/null || true
+  if beam_fast_wait_for_owner "$pid" 30; then
+    return
+  fi
+  echo "beam-fast cleanup: owner $pid ignored SIGINT; sending SIGTERM" >&2
+  kill -TERM "$pid" 2>/dev/null || true
+  if beam_fast_wait_for_owner "$pid" 30; then
+    return
+  fi
+  echo "beam-fast cleanup: owner $pid ignored SIGTERM; sending SIGKILL" >&2
+  kill -KILL "$pid" 2>/dev/null || true
+  beam_fast_wait_for_owner "$pid" 20 || true
+}
+
+beam_fast_wrapper_cleanup() {
+  local control_dir="${wrapper_todo_control_dir:-}"
+  local owner_pid="${wrapper_todo_owner_pid:-}"
+  if [ -n "$control_dir" ]; then
+    scripts/lean-beam --root tests/save_olean_project \
+      --session-dir "$control_dir" stop > /dev/null 2>&1 || true
+  fi
+  if [ -n "$owner_pid" ]; then
+    beam_fast_stop_owner "$owner_pid"
+  fi
+  if [ -n "$control_dir" ]; then
+    rm -rf -- "$control_dir"
+  fi
+  for path in \
+    "${wrapper_todo_update_out:-}" \
+    "${wrapper_todo_update_err:-}" \
+    "${wrapper_todo_out:-}" \
+    "${wrapper_todo_err:-}" \
+    "${wrapper_todo_owner_out:-}" \
+    "${wrapper_todo_owner_err:-}"
+  do
+    if [ -n "$path" ]; then
+      rm -f -- "$path"
+    fi
+  done
+  wrapper_todo_control_dir=""
+  wrapper_todo_owner_pid=""
+  wrapper_todo_update_out=""
+  wrapper_todo_update_err=""
+  wrapper_todo_out=""
+  wrapper_todo_err=""
+  wrapper_todo_owner_out=""
+  wrapper_todo_owner_err=""
+}
+beam_fast_cleanup() {
+  beam_fast_wrapper_cleanup
+  rm -rf -- "$beam_fast_state_root"
+}
+trap beam_fast_cleanup EXIT
+export BEAM_BUNDLE_DIR="$beam_fast_state_root/bundles"
+export BEAM_SESSION_ROOT="$beam_fast_state_root/sessions"
+
 bash scripts/check-daemon-safety.sh
 bash scripts/check-task-priority.sh
 bash scripts/check-markdown-links.sh
@@ -18,6 +105,20 @@ run_quiet_lake_build() {
   log="$(mktemp /tmp/beam-fast-build-log-XXXXXX)"
   # Keep successful CI logs compact, but print the full Lake output when the build fails.
   if ! lake build "$@" > "$log" 2>&1; then
+    cat "$log" >&2
+    rm -f "$log"
+    return 1
+  fi
+  rm -f "$log"
+}
+
+run_quiet_test() {
+  local label="$1"
+  shift
+  local log
+  log="$(mktemp /tmp/beam-fast-test-log-XXXXXX)"
+  if ! "$@" > "$log" 2>&1; then
+    echo "beam-fast test failed: $label" >&2
     cat "$log" >&2
     rm -f "$log"
     return 1
@@ -47,20 +148,20 @@ run_quiet_lake_build \
   beam-mcp-projection-test \
   beam-mcp-protocol-test
 
-.lake/build/bin/beam-broker-protocol-test > /dev/null
-.lake/build/bin/beam-broker-pending-test > /dev/null
-.lake/build/bin/beam-broker-document-state-test > /dev/null
-.lake/build/bin/beam-broker-open-docs-test > /dev/null
-.lake/build/bin/beam-cli-daemon-test > /dev/null
-.lake/build/bin/beam-feedback-test > /dev/null
-.lake/build/bin/beam-mcp-projection-test > /dev/null
-.lake/build/bin/beam-mcp-protocol-test > /dev/null
-.lake/build/bin/beam-daemon-smoke-test > /dev/null
-.lake/build/bin/beam-sync-concurrency-test > /dev/null
-.lake/build/bin/beam-daemon-save-stream-test > /dev/null
-.lake/build/bin/beam-daemon-stream-contract-test > /dev/null
-.lake/build/bin/beam-sync-result-test > /dev/null
-.lake/build/bin/beam-daemon-startup-handshake-test > /dev/null
+run_quiet_test broker-protocol .lake/build/bin/beam-broker-protocol-test
+run_quiet_test broker-pending .lake/build/bin/beam-broker-pending-test
+run_quiet_test broker-document-state .lake/build/bin/beam-broker-document-state-test
+run_quiet_test broker-open-docs .lake/build/bin/beam-broker-open-docs-test
+run_quiet_test cli-daemon .lake/build/bin/beam-cli-daemon-test
+run_quiet_test feedback .lake/build/bin/beam-feedback-test
+run_quiet_test mcp-projection .lake/build/bin/beam-mcp-projection-test
+run_quiet_test mcp-protocol .lake/build/bin/beam-mcp-protocol-test
+run_quiet_test daemon-smoke .lake/build/bin/beam-daemon-smoke-test
+run_quiet_test sync-concurrency .lake/build/bin/beam-sync-concurrency-test
+run_quiet_test daemon-save-stream .lake/build/bin/beam-daemon-save-stream-test
+run_quiet_test daemon-stream-contract .lake/build/bin/beam-daemon-stream-contract-test
+run_quiet_test sync-result .lake/build/bin/beam-sync-result-test
+run_quiet_test daemon-startup-handshake .lake/build/bin/beam-daemon-startup-handshake-test
 
 assert_output_contains() {
   local label="$1"
@@ -355,16 +456,6 @@ wrapper_todo_err="$(mktemp /tmp/lean-beam-wrapper-todo-err-XXXXXX)"
 wrapper_todo_owner_out="$(mktemp /tmp/lean-beam-wrapper-todo-owner-out-XXXXXX)"
 wrapper_todo_owner_err="$(mktemp /tmp/lean-beam-wrapper-todo-owner-err-XXXXXX)"
 wrapper_todo_owner_pid=""
-wrapper_todo_cleanup() {
-  scripts/lean-beam --root tests/save_olean_project \
-    --session-dir "$wrapper_todo_control_dir" stop > /dev/null 2>&1 || true
-  if [ -n "$wrapper_todo_owner_pid" ]; then
-    wait "$wrapper_todo_owner_pid" 2>/dev/null || true
-  fi
-  rm -rf -- "$wrapper_todo_control_dir"
-  rm -f "$wrapper_todo_update_out" "$wrapper_todo_update_err" "$wrapper_todo_out" "$wrapper_todo_err" \
-    "$wrapper_todo_owner_out" "$wrapper_todo_owner_err"
-}
 
 scripts/lean-beam --root tests/save_olean_project \
   --session-dir "$wrapper_todo_control_dir" serve \
@@ -377,7 +468,7 @@ for _ in $(seq 1 600); do
   if ! kill -0 "$wrapper_todo_owner_pid" 2>/dev/null; then
     echo "expected lean-beam todo wrapper owner to remain alive" >&2
     cat "$wrapper_todo_owner_err" >&2
-    wrapper_todo_cleanup
+    beam_fast_wrapper_cleanup
     exit 1
   fi
   sleep 0.1
@@ -385,7 +476,7 @@ done
 if ! grep -Fq "serving Beam session" "$wrapper_todo_owner_err"; then
   echo "timed out waiting for lean-beam todo wrapper owner" >&2
   cat "$wrapper_todo_owner_err" >&2
-  wrapper_todo_cleanup
+  beam_fast_wrapper_cleanup
   exit 1
 fi
 
@@ -395,7 +486,7 @@ if ! scripts/lean-beam --root tests/save_olean_project \
     > "$wrapper_todo_update_out" 2>"$wrapper_todo_update_err"; then
   echo "expected lean-beam update wrapper smoke to succeed before todo" >&2
   cat "$wrapper_todo_update_err" >&2
-  wrapper_todo_cleanup
+  beam_fast_wrapper_cleanup
   exit 1
 fi
 
@@ -416,7 +507,7 @@ if not isinstance(version, int):
 print(version)
 PY
 )"; then
-  wrapper_todo_cleanup
+  beam_fast_wrapper_cleanup
   exit 1
 fi
 
@@ -426,7 +517,7 @@ if ! scripts/lean-beam --root tests/save_olean_project \
     > "$wrapper_todo_out" 2>"$wrapper_todo_err"; then
   echo "expected lean-beam todo wrapper smoke to succeed" >&2
   cat "$wrapper_todo_err" >&2
-  wrapper_todo_cleanup
+  beam_fast_wrapper_cleanup
   exit 1
 fi
 
@@ -461,10 +552,10 @@ if "runAtText" in item:
     sys.exit(1)
 PY
 then
-  wrapper_todo_cleanup
+  beam_fast_wrapper_cleanup
   exit 1
 fi
-wrapper_todo_cleanup
+beam_fast_wrapper_cleanup
 
 python3 - <<'PY'
 import json

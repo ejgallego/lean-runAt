@@ -132,18 +132,18 @@ reuse matching speculative execution rather than replaying it from scratch. Beam
 apply the source edit.
 
 Programmatic wrapper consumers invoke the same typed `lean-beam` operations as human callers and
-use their final stdout JSON. Wrapper stderr is human-facing; clients that require structured live
-progress and diagnostic notifications should use MCP. Beam does not install a raw generic broker
-client. A wrapper daemon exists only while its foreground `lean-beam serve` owner is alive.
-Attaching requests do not acquire daemon ownership. A separately launched standalone daemon has
-its own explicit process owner. Broker
-responses require an explicit top-level `ok` boolean, giving projection layers an unambiguous
+must check the process exit status before parsing stdout. Completed broker operations, including
+semantic failures, print final JSON; selector, setup, or transport failures can exit nonzero with a
+human-readable stderr diagnostic and no JSON. Clients that require structured live progress,
+diagnostics, and failures should use MCP. Beam does not install a raw generic broker client. A
+wrapper daemon exists only while its foreground `lean-beam serve` owner is alive.
+Attaching requests do not acquire daemon ownership. Broker responses require an explicit top-level
+`ok` boolean, giving projection layers an unambiguous
 success/error discriminator. A successful response always includes `result`; response and stream
 envelopes reject undeclared fields, and typed save/close-save results reject incomplete or extended
-artifact shapes. Internal stream envelopes use the same `kind`, `payload`, and optional outer
-`clientRequestId` fields; the terminal response payload does not duplicate transport correlation.
-The wrapper and daemon still use a streamed internal transport whose exact event ordering is tested
-as an implementation boundary.
+artifact shapes. The wrapper and daemon use a streamed private transport whose correlation and
+event-ordering contract is tested as an implementation boundary rather than exposed as a supported
+client protocol.
 
 `lean-beam-mcp` is the experimental stdio MCP entry point. User setup lives in
 [SETUP.md](SETUP.md#mcp-setup); implementation, protocol, tool-list, and conformance notes live in
@@ -234,36 +234,30 @@ as an implementation boundary.
   them. Explicit symbolic-link leaves are rejected before canonicalization, and read-only status or
   attachment operations revalidate the exact leaf and its permissions without mutating it.
   Wrapper sessions contain exactly one frozen workspace; dynamic workspace mutation remains
-  unavailable in wrapper mode. Standalone broker and MCP runtimes retain their independent
-  multi-workspace behavior.
+  unavailable in wrapper mode. MCP retains its independent multi-workspace behavior.
 - Deleting the project tree also deletes its default project-local fence. Workflows that may remove
   and immediately recreate the same canonical path, and need exclusion to survive that operation,
   should select a stable external `--session-dir`; this tradeoff keeps the default usable from
   project-scoped agent sandboxes without assuming access to a host-global runtime directory.
 - Wrapper-owned brokers currently use authenticated loopback TCP. The supported trust boundary is
-  one local OS account with a private session directory and descriptor-file permissions; another user who can only discover
-  the port cannot issue requests without the generation capability. A manually launched standalone
-  `beam-daemon` has no wrapper registry capability and is maintainer tooling, not a shared-host
-  service. Unix-domain/per-user native IPC remains a possible later transport improvement.
+  one local OS account with a private session directory and descriptor-file permissions; another
+  user who can only discover the port cannot issue requests without the generation capability.
+  Direct `beam-daemon` use is maintainer tooling, not a supported shared-host service.
+  Unix-domain/per-user native IPC remains a possible later transport improvement.
 - A startup failure that reports `operation not permitted` through `.beam/beam-daemon-startup.log` is
   usually an environment restriction, not a bundle-resolution mismatch.
 - Once the Beam daemon is running, a Lean or Rocq backend handshake failure is returned with the
   bounded tail of that backend's stderr. This backend diagnostic is separate from the selected
   session directory's daemon startup log, which covers startup of the Beam daemon process itself.
 - Typed broker transport, invalid-response, and response-timeout failures include registry/log
-  context and write a JSON incident record below the selected session directory. Incident kinds are `brokerTransportFailure`,
-  `invalidBrokerResponse`, and `brokerResponseTimeout`; callback/display failures do not create
-  daemon incidents. Beam keeps the latest 50 incident records, and `lean-beam doctor` lists recent
-  incident paths.
-- A standalone Beam daemon watches its canonical project root. If a git worktree or project
-  directory is removed while the daemon is active, it shuts down its backend sessions and exits
-  instead of remaining undiscoverable after its project-local registry disappears. A later wrapper
-  request for that path fails root validation with a direct `workspace root does not resolve`
-  error; it does not start a replacement daemon for a missing directory.
+  context and, while the selected private session directory still exists, write a JSON incident
+  record below it. Incident kinds are `brokerTransportFailure`, `invalidBrokerResponse`, and
+  `brokerResponseTimeout`; callback/display failures do not create daemon incidents. Beam keeps the
+  latest 50 incident records, and `lean-beam doctor` lists recent incident paths. Incident logging
+  never recreates a deleted project or session directory.
 - Cancellation is cooperative; prompt stopping depends on inner elaboration polling interruption.
-- Standalone Beam brokers and MCP runtimes can manage multiple local workspaces, with one active
-  session per backend per workspace. Wrapper sessions deliberately publish one frozen workspace.
-  Remote workspaces and same-source multi-toolchain mirrors are not implemented yet.
+- Wrapper sessions deliberately publish one frozen workspace. Remote workspaces and same-source
+  multi-toolchain mirrors are not implemented yet.
 
 ### MCP
 

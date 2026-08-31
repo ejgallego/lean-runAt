@@ -305,10 +305,12 @@ For a current descriptor, the selected `--root` must match its recorded workspac
 using the same session directory with an unrelated root cannot quarantine the session. `status`
 reports this as `sessionSelectorMismatch`, not as a lifecycle state or recovery requirement.
 
-Machine clients should pass an explicit `--root`, invoke the typed wrapper operations, and consume
-their final stdout JSON. Wrapper stderr remains human-facing. Use MCP when a client requires
-structured live progress or diagnostic notifications; Beam intentionally does not expose its raw
-port, session capability, or generic broker request record as an installed client interface.
+Machine clients should pass an explicit `--root`, invoke the typed wrapper operations, and check
+the process exit status before parsing stdout. Completed broker operations print final JSON,
+including typed semantic failures. Selector, setup, and transport failures can exit nonzero with a
+human-readable stderr diagnostic and no JSON. Use MCP when a client requires structured live
+progress, diagnostics, or failures; Beam intentionally does not expose its raw port, session
+capability, or generic broker request record as an installed client interface.
 
 The `python3` line extracts `result.version` for shell examples. You can also copy that version
 number from the printed `lean-beam update` JSON.

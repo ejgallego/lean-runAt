@@ -119,13 +119,14 @@ def maybeEmitTextDebug
     IO.eprintln <| annotateRunatMessage clientRequestId?
       s!"beam: debug text utf8Hex={utf8Hex bytes}"
 
+/-- Decode the payload of a successful broker response without weakening the response sum. -/
+def decodeResponseResult? [FromJson α] (resp : Response) : Option α :=
+  match resp with
+  | .successResult result _ => fromJson? result |>.toOption
+  | .errorResult _ => none
+
 def decodeRunAtResult? (resp : Response) : Option Beam.LSP.RunAt.Result :=
-  match resp.result? with
-  | none => none
-  | some result =>
-      match fromJson? result with
-      | .ok payload => some payload
-      | .error _ => none
+  decodeResponseResult? resp
 
 def responseErrorSummary? (action failureBoundary : String) (resp : Response) : Option String :=
   resp.error?.map fun err =>
@@ -199,13 +200,11 @@ def maybeEmitLiteralBackslashNewlineHint
   | _ =>
       pure ()
 
-def decodeSyncFileResult? (resp : Response) : Option SyncFileResult := do
-  let result ← resp.result?
-  fromJson? result |>.toOption
+def decodeSyncFileResult? (resp : Response) : Option SyncFileResult :=
+  decodeResponseResult? resp
 
-def decodeUpdateFileResult? (resp : Response) : Option UpdateFileResult := do
-  let result ← resp.result?
-  fromJson? result |>.toOption
+def decodeUpdateFileResult? (resp : Response) : Option UpdateFileResult :=
+  decodeResponseResult? resp
 
 def responseFileProgress? (resp : Response) : Option SyncFileProgress :=
   resp.fileProgress?

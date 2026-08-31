@@ -91,52 +91,42 @@ private def versionIdentityJson (home : System.FilePath) : IO Json := do
     (beamCli? := some appPath.toString)
   pure identity.asJson
 
+private def feedbackDaemonResponseTimeoutMs : Nat :=
+  5000
+
+private def collectDaemonRequest
+    (label : String)
+    (client : ProjectDaemonClient)
+    (request : Request)
+    (warnings : Array String) : IO (Json × Array String) := do
+  let response ← sendRequestWithStreamTimeoutResult client.endpoint
+    (client.sealRequest request) feedbackDaemonResponseTimeoutMs (fun _ => pure ())
+  pure <| Beam.Feedback.clientResponsePayloadOrWarning label response warnings
+
 private def collectDaemonPayload
     (root : System.FilePath)
     (explicitControlDir? : Option System.FilePath)
     (warnings : Array String) : IO (Json × Json × Array String) := do
   match ← observeProjectRegistry root explicitControlDir? with
   | .live entry =>
-      let endpoint := Beam.Daemon.registryEndpoint entry
-      let some workspace ← Beam.Cli.sessionWorkspaceForRoot? entry root
-        | return (Json.null, Json.null,
-            warnings.push "the Beam session does not contain the selected project root")
       let controlDir ← Beam.Daemon.controlDirFor root explicitControlDir?
-      let client : ProjectDaemonClient := {
-        endpoint
-        capability := entry.capability
-        workspaceId := workspace.workspaceId
-        controlDir
-      }
-      let statsResp ← sendRequest endpoint <| client.authorize {
+      let client := ProjectDaemonClient.ofSessionDescriptor entry controlDir
+      let (stats, warnings) ← collectDaemonRequest "stats" client {
         op := .stats
-        workspaceId? := some client.workspaceId
         root? := some root.toString
-      }
-      let (stats, warnings) := Beam.Feedback.responsePayloadOrWarning "stats" statsResp warnings
-      let openResp ← sendRequest endpoint <| client.authorize {
+      } warnings
+      let (openDocs, warnings) ← collectDaemonRequest "open-files" client {
         op := .openDocs
-        workspaceId? := some client.workspaceId
         root? := some root.toString
-      }
-      let (openDocs, warnings) := Beam.Feedback.responsePayloadOrWarning "open-files" openResp warnings
+      } warnings
       pure (stats, openDocs, warnings)
   | .absent =>
       pure (Json.null, Json.null, warnings.push "no live Beam daemon was available for stats/open-files")
   | .draining _ =>
       pure (Json.null, Json.null, warnings.push "the Beam daemon is draining")
-  | .legacy =>
-      pure (Json.null, Json.null, warnings.push "the Beam daemon registry is legacy and unsupported")
-  | .unsupported _ =>
-      pure (Json.null, Json.null, warnings.push "the Beam daemon registry schema is unsupported")
-  | .malformed detail =>
-      pure (Json.null, Json.null, warnings.push s!"the Beam daemon registry is malformed: {detail}")
-  | .selectorMismatch entry =>
+  | .blocked blocker =>
       let controlDir ← Beam.Daemon.controlDirFor root explicitControlDir?
-      pure (Json.null, Json.null, warnings.push <|
-        sessionSelectorMismatchMessage root controlDir entry)
-  | .unusable _ reason =>
-      pure (Json.null, Json.null, warnings.push s!"the Beam daemon registry is unsafe: {reason.message}")
+      pure (Json.null, Json.null, warnings.push <| blocker.message root controlDir)
 
 private def collectNonConfidential
     (home : System.FilePath)

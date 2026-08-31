@@ -86,7 +86,6 @@ private def updateVersionForRocqGoals
   let resp ← requestBroker root client {
     op := .updateFile
     backend := .rocq
-    workspaceId? := some client.workspaceId
     root? := some root.toString
     path? := some path
   }
@@ -241,20 +240,11 @@ private def sessionStatus (opts : CliOptions) : IO Unit := do
     | .absent => pure <| mkSessionStatus .absent root sessionDir
     | .live entry => pure <| mkSessionStatus .running root sessionDir (some entry.daemonId)
     | .draining entry => pure <| mkSessionStatus .stopping root sessionDir (some entry.daemonId)
-    | .legacy =>
-        pure <| mkSessionStatus .recoveryRequired root sessionDir none
-          (some "legacy session descriptor")
-    | .unsupported schemaVersion =>
-        pure <| mkSessionStatus .recoveryRequired root sessionDir none
-          (some s!"unsupported session descriptor schema {schemaVersion}")
-    | .malformed detail =>
-        pure <| mkSessionStatus .recoveryRequired root sessionDir none (some detail)
-    | .selectorMismatch entry =>
-        throw <| IO.userError <|
-          sessionSelectorMismatchMessage root sessionDir entry
-    | .unusable entry reason =>
-        pure <| mkSessionStatus .recoveryRequired root sessionDir
-          (some entry.daemonId) (some reason.message)
+    | .blocked (.selectorMismatch entry) =>
+        throw <| IO.userError <| sessionSelectorMismatchMessage root sessionDir entry
+    | .blocked blocker =>
+        pure <| mkSessionStatus .recoveryRequired root sessionDir blocker.generation?
+          (some blocker.statusDetail)
   printResponse <| Response.success (toJson result)
 
 def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit := do

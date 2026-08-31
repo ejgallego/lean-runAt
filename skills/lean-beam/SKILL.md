@@ -127,7 +127,8 @@ Core workflow contract:
   to `leanOptions`, or use `lake build` when the arguments are intentionally batch-only
 - after changing a lakefile or related Lake workspace configuration, run `lean-beam --root ROOT stop`
   before the next command that uses the Lean server; `lean-beam refresh` does not restart it
-- treat wrapper `stderr` as human-facing only; use final stdout JSON for machine decisions
+- check wrapper exit status before parsing output; completed broker operations use final stdout JSON,
+  while selector, setup, or transport failures may have human-facing stderr and no JSON
 - use MCP when a client requires structured live progress or diagnostic notifications
 - `lean-beam feedback-report` and `beam_feedback_report` return a report to the caller; Beam does not
   upload or submit it; before posting non-confidential output, review caller-authored narrative,
@@ -447,7 +448,7 @@ Surface rule:
 
 - wrapper `stderr` is the human-facing diagnostic surface
 - wrapper `stderr` may distinguish request-level failures from a completed request whose payload
-  failed inside Lean; use stdout JSON for machine decisions
+  failed inside Lean; check exit status first, then use stdout JSON when the broker completed
 - do not parse wrapper `stderr` in tooling
 - MCP clients can attach `tools/call` `_meta.progressToken` for detailed live updates; without one,
   Beam keeps fast broker-backed Lean operations, feedback collection, and workspace drops quiet and

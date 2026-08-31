@@ -63,8 +63,7 @@ def runClientWithProgress
   pure (resp, ← progressRef.get)
 
 def runClient (endpoint : Beam.Broker.Endpoint) (req : Beam.Broker.Request) : IO Beam.Broker.Response := do
-  let (resp, _) ← runClientWithProgress endpoint req
-  pure resp
+  Beam.Broker.sendRequest endpoint (inFixtureWorkspace req)
 
 def requireFileProgress (label : String) (resp : Beam.Broker.Response) :
     IO Beam.Broker.SyncFileProgress := do

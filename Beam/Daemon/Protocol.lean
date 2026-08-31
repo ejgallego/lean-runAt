@@ -34,10 +34,10 @@ instance : FromJson RegistryLifecycle where
     | .str "draining" => .ok .draining
     | json => .error s!"expected registry lifecycle 'live' or 'draining', got {json.compress}"
 
-private instance : ToJson UInt16 where
+local instance : ToJson UInt16 where
   toJson port := toJson port.toNat
 
-private instance : FromJson UInt16 where
+local instance : FromJson UInt16 where
   fromJson? json := do
     let port ← fromJson? (α := Nat) json
     if port < UInt16.size then
@@ -85,6 +85,12 @@ def SessionDescriptor.identity (entry : SessionDescriptor) : DaemonIdentity := {
 def SessionDescriptor.redactedJson (entry : SessionDescriptor) : Json :=
   (toJson entry).setObjVal! "capability" (toJson "<redacted>")
 
+/-- Whether this single-workspace descriptor belongs to a canonical or equivalent project root. -/
+def SessionDescriptor.matchesRoot
+    (entry : SessionDescriptor)
+    (root : System.FilePath) : IO Bool := do
+  Beam.sameFilePath (System.FilePath.mk entry.workspace.root) root
+
 structure DesiredConfig where
   root : System.FilePath
   leanCmd? : Option String := none
@@ -109,24 +115,24 @@ private structure DaemonProbe where
 private def daemonProbeResponseTimeoutMs : Nat :=
   2000
 
-private def daemonProbeOfResponse (resp : Response) : Except BrokerClientFailure DaemonProbe := do
-  unless resp.ok do
-    throw <| .invalidResponse s!"Beam daemon stats probe failed: {(toJson resp).compress}"
-  let some result := resp.result?
-    | throw <| .invalidResponse "Beam daemon stats probe omitted its result"
-  let root ←
-    match result.getObjValAs? String "root" with
-    | .ok root => pure root
-    | .error err => throw <| .invalidResponse s!"invalid Beam daemon stats root: {err}"
-  let identity? ←
-    match result.getObjVal? "daemonIdentity" with
-    | .error _ => pure none
-    | .ok identityJson =>
-        match fromJson? identityJson with
-        | .ok identity => pure (some identity)
-        | .error err =>
-            throw <| .invalidResponse s!"invalid Beam daemon identity: {err}"
-  pure { root, identity? }
+private def daemonProbeOfResponse (resp : Response) : Except BrokerClientFailure DaemonProbe :=
+  match resp with
+  | .errorResult _ =>
+      .error <| .invalidResponse s!"Beam daemon stats probe failed: {(toJson resp).compress}"
+  | .successResult result _ => do
+    let root ←
+      match result.getObjValAs? String "root" with
+      | .ok root => pure root
+      | .error err => throw <| .invalidResponse s!"invalid Beam daemon stats root: {err}"
+    let identity? ←
+      match result.getObjVal? "daemonIdentity" with
+      | .error _ => pure none
+      | .ok identityJson =>
+          match fromJson? identityJson with
+          | .ok identity => pure (some identity)
+          | .error err =>
+              throw <| .invalidResponse s!"invalid Beam daemon identity: {err}"
+    pure { root, identity? }
 
 private def daemonProbe
     (endpoint : Transport.Endpoint)
