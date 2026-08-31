@@ -476,173 +476,167 @@ instance : FromJson SaveInput where
 def RunAtInput.toBrokerRequest
     (input : RunAtInput)
     (storeHandle : Bool := false) : Beam.Broker.Request := {
-  op := .runAt
-  backend := .lean
-  path? := some input.path
-  version? := some input.version
-  line? := some input.line
-  character? := some input.character
-  text? := some input.text
-  storeHandle? := if storeHandle then some true else none
+  payload := .runAt {
+    path := input.path
+    version := input.version
+    line := input.line
+    character := input.character
+    text := input.text
+    storeHandle? := if storeHandle then some true else none
+  }
 }
 
 def PositionInput.toHoverBrokerRequest (input : PositionInput) : Beam.Broker.Request := {
-  op := .hover
-  backend := .lean
-  path? := some input.path
-  version? := some input.version
-  line? := some input.line
-  character? := some input.character
+  payload := .hover {
+    path := input.path
+    version := input.version
+    line := input.line
+    character := input.character
+  }
 }
 
 def PositionInput.toSignatureHelpBrokerRequest (input : PositionInput) :
     Beam.Broker.Request := {
-  op := .signatureHelp
-  backend := .lean
-  path? := some input.path
-  version? := some input.version
-  line? := some input.line
-  character? := some input.character
+  payload := .signatureHelp {
+    path := input.path
+    version := input.version
+    line := input.line
+    character := input.character
+  }
 }
 
 def PositionInput.toDefinitionBrokerRequest (input : PositionInput) : Beam.Broker.Request := {
-  op := .definition
-  backend := .lean
-  path? := some input.path
-  version? := some input.version
-  line? := some input.line
-  character? := some input.character
+  payload := .definition {
+    path := input.path
+    version := input.version
+    line := input.line
+    character := input.character
+  }
 }
 
 def ReferencesInput.toBrokerRequest (input : ReferencesInput) : Beam.Broker.Request := {
-  op := .references
-  backend := .lean
-  path? := some input.path
-  version? := some input.version
-  line? := some input.line
-  character? := some input.character
-  includeDeclaration? := input.includeDeclaration?
+  payload := .references {
+    path := input.path
+    version := input.version
+    line := input.line
+    character := input.character
+    includeDeclaration? := input.includeDeclaration?
+  }
 }
 
 def DocumentSymbolsInput.toBrokerRequest (input : DocumentSymbolsInput) :
     Beam.Broker.Request := {
-  op := .documentSymbols
-  backend := .lean
-  path? := some input.path
-  version? := some input.version
+  payload := .documentSymbols {
+    path := input.path
+    version := input.version
+  }
 }
 
 def WorkspaceSymbolsInput.toBrokerRequest (input : WorkspaceSymbolsInput) :
     Beam.Broker.Request := {
-  op := .workspaceSymbols
-  backend := .lean
-  query? := some input.query
+  payload := .workspaceSymbols { query := input.query }
 }
 
 def PositionInput.toGoalsBrokerRequest
     (input : PositionInput)
     (mode : Beam.Broker.GoalMode) : Beam.Broker.Request := {
-  op := .goals
-  backend := .lean
-  path? := some input.path
-  version? := some input.version
-  line? := some input.line
-  character? := some input.character
-  mode? := some mode
+  payload := .goals {
+    path := input.path
+    version := input.version
+    line := input.line
+    character := input.character
+    mode? := some mode
+  }
 }
 
 def GoalsInput.toBrokerRequest (input : GoalsInput) : Beam.Broker.Request := {
-  op := .goals
-  backend := .lean
-  path? := some input.path
-  version? := some input.version
-  line? := some input.line
-  character? := some input.character
-  mode? := some input.mode.toBrokerMode
+  payload := .goals {
+    path := input.path
+    version := input.version
+    line := input.line
+    character := input.character
+    mode? := some input.mode.toBrokerMode
+  }
 }
 
 def TodoInput.toBrokerRequest (input : TodoInput) : Beam.Broker.Request := {
-  op := .todo
-  backend := .lean
-  path? := some input.path
-  version? := some input.version
-  line? := some input.startLine
-  character? := some input.startCharacter
-  endLine? := some input.endLine
-  endCharacter? := some input.endCharacter
-  kinds? := input.kinds?
-  suggest? := input.suggest?
+  payload := .todo {
+    path := input.path
+    version := input.version
+    line := input.startLine
+    character := input.startCharacter
+    endLine := input.endLine
+    endCharacter := input.endCharacter
+    kinds? := input.kinds?
+    suggest? := input.suggest?
+  }
 }
 
 def CodeActionResolveInput.toBrokerRequest
     (input : CodeActionResolveInput) : Beam.Broker.Request := {
-  op := .codeActionResolve
-  backend := .lean
-  path? := some input.path
-  version? := some input.version
-  codeAction? := some input.codeAction
+  payload := .codeActionResolve {
+    path := input.path
+    version := input.version
+    codeAction := input.codeAction
+  }
 }
 
 def RunWithInput.toBrokerRequest
     (input : RunWithInput)
     (linear : Bool := false) : Beam.Broker.Request := {
-  op := .runWith
-  backend := .lean
-  path? := some input.path
-  text? := some input.text
-  storeHandle? := some true
-  linear? := some linear
-  handle? := some input.handle
+  payload := .runWith {
+    path := input.path
+    text := input.text
+    storeHandle? := some true
+    linear? := some linear
+    handle := input.handle
+  }
 }
 
 def ReleaseInput.toBrokerRequest (input : ReleaseInput) : Beam.Broker.Request := {
-  op := .release
-  backend := .lean
-  path? := some input.path
-  handle? := some input.handle
+  payload := .release {
+    path := input.path
+    handle := input.handle
+  }
 }
 
 def PathInput.toCloseBrokerRequest (input : PathInput) : Beam.Broker.Request := {
-  op := .close
-  backend := .lean
-  path? := some input.path
+  payload := .close { path := input.path }
 }
 
 def PathInput.toUpdateBrokerRequest (input : PathInput) : Beam.Broker.Request := {
-  op := .updateFile
-  backend := .lean
-  path? := some input.path
+  payload := .updateFile { path := input.path }
 }
 
 def SyncInput.toSyncBrokerRequest (input : SyncInput) : Beam.Broker.Request := {
-  op := .syncFile
-  backend := .lean
-  path? := some input.path
-  diagnosticScope? := input.diagnosticScope?
-  diagnosticsInResult? := input.diagnosticsInResult?
+  payload := .syncFile {
+    path := input.path
+    diagnosticScope? := input.diagnosticScope?
+    diagnosticsInResult? := input.diagnosticsInResult?
+  }
 }
 
 def SyncInput.toRefreshBrokerRequest (input : SyncInput) : Beam.Broker.Request := {
-  op := .refreshFile
-  backend := .lean
-  path? := some input.path
-  diagnosticScope? := input.diagnosticScope?
-  diagnosticsInResult? := input.diagnosticsInResult?
+  payload := .refreshFile {
+    path := input.path
+    diagnosticScope? := input.diagnosticScope?
+    diagnosticsInResult? := input.diagnosticsInResult?
+  }
 }
 
 def SaveInput.toSaveBrokerRequest (input : SaveInput) : Beam.Broker.Request := {
-  op := .saveOlean
-  backend := .lean
-  path? := some input.path
-  diagnosticScope? := input.diagnosticScope?
+  payload := .saveOlean {
+    path := input.path
+    diagnosticScope? := input.diagnosticScope?
+  }
 }
 
 def SaveInput.toCloseSaveBrokerRequest (input : SaveInput) : Beam.Broker.Request := {
-  op := .close
-  backend := .lean
-  path? := some input.path
-  saveArtifacts? := some true
-  diagnosticScope? := input.diagnosticScope?
+  payload := .close {
+    path := input.path
+    saveArtifacts? := some true
+    diagnosticScope? := input.diagnosticScope?
+  }
 }
 
 def Operation.toBrokerRequest

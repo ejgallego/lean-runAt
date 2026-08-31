@@ -5,9 +5,9 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Beam.Broker.Errors
+import Beam.Broker.Lean
 import Beam.Broker.Protocol
 import Beam.Broker.Readiness
-import Beam.Broker.RequestArgs
 import Beam.Broker.Server
 import Beam.Daemon.Startup
 import Beam.JsonPretty
@@ -126,15 +126,70 @@ private def requireErrorData (label : String) (err : Error) : IO Json := do
   | some data => pure data
   | none => throw <| IO.userError s!"{label}: expected error data, got {(toJson err).compress}"
 
-private def expectRequestArgError
+private def expectMethodError
     (label : String)
     (expectedMessage : String)
-    (result : Except ResponseFailure α) : IO Unit := do
+    (result : Except String String) : IO Unit := do
   match result with
   | .ok _ =>
-      throw <| IO.userError s!"{label}: expected invalidParams response"
-  | .error failure =>
-      discard <| requireError label "invalidParams" expectedMessage failure.toResponse
+      throw <| IO.userError s!"{label}: expected method selection failure"
+  | .error message =>
+      unless message == expectedMessage do
+        throw <| IO.userError s!"{label}: expected '{expectedMessage}', got '{message}'"
+
+private def sampleHandle : Handle := {
+  workspaceId := "handle-workspace"
+  backend := .lean
+  epoch := 1
+  session := "session"
+  raw := Json.mkObj [("value", toJson ("raw" : String))]
+}
+
+private def sampleRequest : Op → Request
+  | .ensure => Request.ensure
+  | .openDocs => Request.openDocs
+  | .cancel => Request.cancel "request"
+  | .updateFile => { payload := .updateFile { path := "Demo.lean" } }
+  | .syncFile => { payload := .syncFile { path := "Demo.lean" } }
+  | .refreshFile => { payload := .refreshFile { path := "Demo.lean" } }
+  | .close => { payload := .close { path := "Demo.lean" } }
+  | .runAt => { payload := .runAt {
+      path := "Demo.lean", version := 7, line := 1, character := 2, text := "exact trivial"
+    } }
+  | .hover => { payload := .hover {
+      path := "Demo.lean", version := 7, line := 1, character := 2
+    } }
+  | .signatureHelp => { payload := .signatureHelp {
+      path := "Demo.lean", version := 7, line := 1, character := 2
+    } }
+  | .definition => { payload := .definition {
+      path := "Demo.lean", version := 7, line := 1, character := 2
+    } }
+  | .references => { payload := .references {
+      path := "Demo.lean", version := 7, line := 1, character := 2
+    } }
+  | .documentSymbols => { payload := .documentSymbols { path := "Demo.lean", version := 7 } }
+  | .workspaceSymbols => { payload := .workspaceSymbols { query := "Demo" } }
+  | .codeActionResolve => { payload := .codeActionResolve {
+      path := "Demo.lean", version := 7, codeAction := { title := "Resolve" }
+    } }
+  | .saveOlean => { payload := .saveOlean { path := "Demo.lean" } }
+  | .goals => { payload := .goals {
+      path := "Demo.lean", version := 7, line := 1, character := 2
+    } }
+  | .todo => { payload := .todo {
+      path := "Demo.lean", version := 7, line := 1, character := 2,
+      endLine := 3, endCharacter := 4
+    } }
+  | .runWith => { payload := .runWith {
+      path := "Demo.lean", text := "exact trivial", handle := sampleHandle
+    } }
+  | .release => { payload := .release { path := "Demo.lean", handle := sampleHandle } }
+  | .initWorkspace => { payload := .initWorkspace { root := "/workspace" } }
+  | .listWorkspaces => Request.listWorkspaces
+  | .dropWorkspace => Request.dropWorkspace
+  | .stats => Request.stats
+  | .shutdown => Request.shutdown
 
 private def lspPos (line character : Nat) : Lsp.Position :=
   { line, character }
@@ -452,6 +507,12 @@ private def checkSyncFileResultDecode : IO Unit := do
     syncFileResultJson 7 incompleteReadiness
 
 private def checkFailureResponseConversions : IO Unit := do
+  for code in BrokerFailureCode.all do
+    require s!"broker failure code '{code.name}' should round-trip from its wire name"
+      (BrokerFailureCode.ofName? code.name == some code)
+  require "unknown broker failure code should remain unknown"
+    (BrokerFailureCode.ofName? "not-a-broker-failure" |>.isNone)
+
   let data := Json.mkObj [("uri", toJson "file:///A.lean")]
   let failure : BrokerFailure := {
     code := .contentModified
@@ -480,6 +541,41 @@ private def checkFailureResponseConversions : IO Unit := do
         (failure.error.code == "backendSpecific")
       require "response failure preserves progress metadata"
         (failure.fileProgress? == some progress)
+
+private def checkTypedLakeSaveTraceFailure : IO Unit := do
+  let missingHelper :=
+    System.FilePath.mk s!"/tmp/beam-missing-lake-helper-{← IO.monoNanosNow}"
+  let unusedPath := System.FilePath.mk "/tmp/beam-unused-save-artifact"
+  let request : LakeHelperWriteTraceRequest := {
+    oleanPath := unusedPath.toString
+    ileanPath := unusedPath.toString
+    cPath := unusedPath.toString
+    tracePath := unusedPath.toString
+    traceMetadata := Json.null
+  }
+  let spec : LeanSaveSpec := {
+    relPath := "Unused.lean"
+    moduleName := "Unused"
+    oleanPath := unusedPath
+    ileanPath := unusedPath
+    cPath := unusedPath
+    tracePath := unusedPath
+    tracePlan := .targetProcess missingHelper request
+  }
+  let expected ← runLakeHelperWriteSaveTrace missingHelper request
+  let actual ← writeLeanSaveTrace spec
+  match expected, actual with
+  | .error expected, .error actual =>
+      require "write save trace should preserve the helper failure code"
+        (actual.code == expected.code)
+      require "write save trace should preserve the helper failure message"
+        (actual.message == expected.message)
+      require "write save trace should preserve the helper failure data"
+        (actual.data? == expected.data?)
+  | .ok _, _ =>
+      throw <| IO.userError "missing target Lake helper unexpectedly succeeded"
+  | _, .ok _ =>
+      throw <| IO.userError "write save trace unexpectedly discarded the helper failure"
 
 private def checkDocumentVersionMismatchErrorData : IO Unit := do
   let data := documentVersionMismatchErrorData 1 2
@@ -656,62 +752,40 @@ private def checkStaleDirectDepHints : IO Unit := do
   require "no-op dependency sync after target should not create stale hint"
     noopSyncHints.isEmpty
 
-private def checkRequestArgsBoundary : IO Unit := do
-  let runAtMissingVersion : Request := {
-    op := .runAt
-    path? := some "Demo.lean"
-    line? := some 1
-    character? := some 2
-    text? := some "exact trivial"
-  }
-  expectRequestArgError "run_at args missing version" "missing 'version'" runAtMissingVersion.runAtArgs
+private def checkRequestBoundary : IO Unit := do
+  expectDecodeFailure Request "run_at request missing version" <| Json.mkObj [
+    ("op", toJson "run_at"),
+    ("backend", toJson "lean"),
+    ("path", toJson "Demo.lean"),
+    ("line", toJson 1),
+    ("character", toJson 2),
+    ("text", toJson "exact trivial")
+  ]
+  expectDecodeFailure Request "run_at request missing text" <| Json.mkObj [
+    ("op", toJson "run_at"),
+    ("backend", toJson "lean"),
+    ("path", toJson "Demo.lean"),
+    ("version", toJson 7),
+    ("line", toJson 1),
+    ("character", toJson 2)
+  ]
 
-  let runAtMissingText : Request := {
-    op := .runAt
-    path? := some "Demo.lean"
-    version? := some 7
-    line? := some 1
-    character? := some 2
-  }
-  expectRequestArgError "run_at args missing text" "missing 'text'" runAtMissingText.runAtArgs
-
-  let runAtRocqUnsupported : Request := {
-    op := .runAt
-    backend := .rocq
-    path? := some "Demo.v"
-    version? := some 7
-    line? := some 1
-    character? := some 2
-    text? := some "Check nat."
-  }
-  expectRequestArgError
-    "rocq run_at args"
+  expectMethodError
+    "rocq run_at method"
     "rocq backend does not support run_at yet"
-    runAtRocqUnsupported.runAtArgs
+    (runAtMethod .rocq)
 
-  let codeActionResolveMissingAction : Request := {
-    op := .codeActionResolve
-    path? := some "Demo.lean"
-    version? := some 7
-  }
-  expectRequestArgError
-    "code_action_resolve args missing codeAction"
-    "missing 'codeAction'"
-    codeActionResolveMissingAction.codeActionResolveArgs
+  expectDecodeFailure Request "code_action_resolve request missing codeAction" <| Json.mkObj [
+    ("op", toJson "code_action_resolve"),
+    ("backend", toJson "lean"),
+    ("path", toJson "Demo.lean"),
+    ("version", toJson 7)
+  ]
 
-  let codeActionResolveRocqUnsupported : Request := {
-    op := .codeActionResolve
-    backend := .rocq
-    path? := some "Demo.v"
-    version? := some 7
-    codeAction? := some {
-      title := "Resolve"
-    }
-  }
-  expectRequestArgError
-    "rocq code_action_resolve args"
+  expectMethodError
+    "rocq code_action_resolve method"
     "rocq backend does not support code action resolution"
-    codeActionResolveRocqUnsupported.codeActionResolveArgs
+    (codeActionResolveMethod .rocq)
 
 private def checkWorkspaceRoutingFields : IO Unit := do
   let processWideOps := #[Op.listWorkspaces, .shutdown]
@@ -730,65 +804,72 @@ private def checkWorkspaceRoutingFields : IO Unit := do
     let expectedTracking := op != .cancel && op != .shutdown
     require s!"{op.key} has the wrong active-request tracking policy"
       (op.tracksActiveRequest == expectedTracking)
-    let request : Request := { op }
+    let request := sampleRequest op
+    let requestJson := toJson request
+    requireFieldAbsent s!"flat {op.key} request" "payload" requestJson
     let decoded ← expectOk s!"minimal {op.key} request round trip" <|
-      fromJson? (α := Request) (toJson request)
+      fromJson? (α := Request) requestJson
     require s!"minimal {op.key} request lost its operation" (decoded.op == op)
+    require s!"minimal {op.key} request changed its flat JSON wire shape"
+      (toJson decoded == requestJson)
 
-  let unscopedReq : Request := { op := .stats }
+  let unscopedReq := Request.stats
   require "missing workspace id remains unscoped" unscopedReq.resolvedWorkspaceId?.isNone
   requireFieldAbsent "stats request serialization" "backend" (toJson unscopedReq)
 
-  let leanReq : Request := { op := .ensure }
+  let leanReq := Request.ensure
   requireJsonString "backend-scoped request serialization" "backend" "lean" (toJson leanReq)
 
-  let explicitReq : Request := {
-    op := .stats
+  let explicitReq : Request := { Request.stats with
     workspaceId? := some "fixture"
   }
   require "explicit workspace id wins" (explicitReq.resolvedWorkspaceId? == some "fixture")
 
-  let handle : Handle := {
-    workspaceId := "handle-workspace"
-    backend := .lean
-    epoch := 1
-    session := "session"
-    raw := Json.mkObj [("value", toJson ("raw" : String))]
-  }
   let handleReq : Request := {
-    op := .runWith
-    handle? := some handle
+    payload := .runWith {
+      path := "Demo.lean"
+      text := "exact trivial"
+      handle := sampleHandle
+    }
   }
   require "handle workspace id routes omitted request workspace"
     (handleReq.resolvedWorkspaceId? == some "handle-workspace")
 
+  let releaseReq : Request := {
+    payload := .release { path := "Demo.lean", handle := sampleHandle }
+  }
+  for (label, request) in #[
+      ("run_with", handleReq),
+      ("release", releaseReq)
+    ] do
+    requireFieldAbsent s!"{label} request uses handle backend" "backend" (toJson request)
+    expectDecodeFailure Request s!"{label} request rejects redundant backend" <|
+      (toJson request).setObjVal! "backend" (toJson "lean")
+
   let explicitHandleReq : Request := {
-    op := .runWith
+    payload := .runWith {
+      path := "Demo.lean"
+      text := "exact trivial"
+      handle := sampleHandle
+    }
     workspaceId? := some "explicit"
-    handle? := some handle
   }
-  require "explicit workspace id overrides handle for validation"
-    (explicitHandleReq.resolvedWorkspaceId? == some "explicit")
-
-  let unrelatedStats : Request := {
-    op := .stats
-    query? := some "ignored-before-strict-validation"
-  }
-  match unrelatedStats.validateFields with
-  | .ok _ => throw <| IO.userError "stats accepted an unrelated query field"
+  require "handle workspace remains authoritative with an explicit workspace id"
+    (explicitHandleReq.resolvedWorkspaceId? == some "handle-workspace")
+  match explicitHandleReq.validateFields with
+  | .ok _ => throw <| IO.userError "request accepted a workspace that conflicts with its handle"
   | .error err =>
-      require "broker request field validation identifies the operation and field"
-        (err.contains "stats" && err.contains "query")
+      require "conflicting handle workspace has a specific validation error"
+        (err.contains "does not match handle workspace")
 
-  let rootOnlyStats : Request := {
-    op := .stats
-    root? := some "/workspace"
-  }
-  match rootOnlyStats.validateFields with
-  | .ok _ => throw <| IO.userError "stats accepted a root without a workspace id"
+  match fromJson? (α := Request) <| Json.mkObj [
+      ("op", toJson "stats"),
+      ("root", toJson "/workspace")
+    ] with
+  | .ok _ => throw <| IO.userError "stats decoded an obsolete request-local root"
   | .error err =>
-      require "stats rejects caller-selected workspace roots"
-        (err.contains "unrelated" && err.contains "root")
+    require "stats rejects caller-selected workspace roots"
+      (err.contains "unrelated" && err.contains "root")
 
   for (label, json, field) in #[
       ("unknown broker field", Json.mkObj [
@@ -863,11 +944,11 @@ private def checkWorkspaceLifecycleProtocol : IO Unit := do
   require "broker workspace query should reject an unknown workspace"
     ((← runtime.workspaceRoot? "unknown") == none)
   for op in #[Op.ensure, .initWorkspace, .dropWorkspace] do
-    let missingWorkspaceResp ← runtime.dispatchRequest { op }
+    let missingWorkspaceResp ← runtime.dispatchRequest (sampleRequest op)
     require s!"{op.key} should reject omitted workspace identity"
       (missingWorkspaceResp.error?.any fun err =>
         err.code == "invalidParams" && err.message.contains "workspaceId is required")
-  let processStatsResp ← runtime.dispatchRequest { op := .stats }
+  let processStatsResp ← runtime.dispatchRequest Request.stats
   let some processStats := processStatsResp.result?
     | throw <| IO.userError s!"process-wide stats failed: {(toJson processStatsResp).compress}"
   requireFieldAbsent "process-wide stats" "root" processStats
@@ -1107,7 +1188,7 @@ private def checkSessionCloseAdmission : IO Unit := do
   let root := System.FilePath.mk "/tmp/beam-session-close-admission"
   let runtime ← Beam.Broker.ServerRuntime.create
     ({ root } : Beam.Broker.BrokerConfig) "fixture"
-  let beforeClose ← runtime.dispatchRequest { op := .stats }
+  let beforeClose ← runtime.dispatchRequest Request.stats
   require "stats should be admitted before session close" beforeClose.ok
   let active ←
     match ← ActiveRequestRegistry.register runtime.activeRequests none (some "close-drain") with
@@ -1129,10 +1210,10 @@ private def checkSessionCloseAdmission : IO Unit := do
   | .ok () => pure ()
   | .error err => throw err
   runtime.close
-  let afterClose ← runtime.dispatchRequest { op := .stats }
+  let afterClose ← runtime.dispatchRequest Request.stats
   require "ordinary requests should be rejected after session close"
     (afterClose.error?.any fun err => err.code == "requestCancelled")
-  let shutdown ← runtime.dispatchRequest { op := .shutdown }
+  let shutdown ← runtime.dispatchRequest Request.shutdown
   require "shutdown remains idempotent after admission closes" shutdown.ok
   require "closed admission should leave no active request"
     ((← ActiveRequestRegistry.count runtime.activeRequests) == 0)
@@ -1140,11 +1221,8 @@ private def checkSessionCloseAdmission : IO Unit := do
 private def checkWrapperDaemonAuthorization : IO Unit := do
   let base := System.FilePath.mk s!"/tmp/beam-wrapper-daemon-authorization-{← IO.monoNanosNow}"
   let rootPath := base / "workspace"
-  let otherRootPath := base / "other-workspace"
   IO.FS.createDirAll rootPath
-  IO.FS.createDirAll otherRootPath
   let root ← Beam.resolveExistingPath rootPath
-  let otherRoot ← Beam.resolveExistingPath otherRootPath
   let capability := "generation-secret"
   let runtime ← Beam.Broker.ServerRuntime.create
     ({ root } : Beam.Broker.BrokerConfig) "fixture"
@@ -1154,41 +1232,20 @@ private def checkWrapperDaemonAuthorization : IO Unit := do
         ("missing", none),
         ("wrong", some "another-generation-secret")
       ] do
-      let response ← runtime.dispatchRequest {
-        op := .stats
+      let response ← runtime.dispatchRequest { Request.stats with
         daemonCapability? := capability?
       }
       require s!"wrapper daemon should reject {label} capability"
         (response.error?.any fun err =>
           err.code == "invalidParams" && err.message.contains "invalid Beam daemon capability")
 
-    let stats ← runtime.dispatchRequest {
-      op := .stats
+    let stats ← runtime.dispatchRequest { Request.stats with
       daemonCapability? := some capability
     }
     require "wrapper daemon should admit the exact generation capability" stats.ok
 
-    let callerSelectedRoot ← runtime.dispatchRequest {
-      op := .ensure
-      workspaceId? := some "fixture"
-      root? := some otherRoot.toString
-      daemonCapability? := some capability
-    }
-    require "authenticated wrapper request should reject caller-selected roots"
-      (callerSelectedRoot.error?.any fun err =>
-        err.code == "invalidParams" && err.message.contains "unrelated" &&
-          err.message.contains "root")
-
-    let statsAfterRejectedRoot ← runtime.dispatchRequest {
-      op := .stats
-      daemonCapability? := some capability
-    }
-    require "rejected root selection should preserve the authenticated generation"
-      statsAfterRejectedRoot.ok
-
     for op in [Op.initWorkspace, .listWorkspaces, .dropWorkspace] do
-      let response ← runtime.dispatchRequest {
-        op
+      let response ← runtime.dispatchRequest { sampleRequest op with
         workspaceId? := some "fixture"
         daemonCapability? := some capability
       }
@@ -1211,10 +1268,11 @@ def main : IO Unit := do
   checkOrderedJsonPretty
   checkSyncFileResultDecode
   checkFailureResponseConversions
+  checkTypedLakeSaveTraceFailure
   checkDocumentVersionMismatchErrorData
   checkReadinessBoundary
   checkStaleDirectDepHints
-  checkRequestArgsBoundary
+  checkRequestBoundary
   checkWorkspaceRoutingFields
   checkWorkspaceLifecycleProtocol
   checkLifecycleTeardownConcurrency

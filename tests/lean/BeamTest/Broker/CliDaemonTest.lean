@@ -220,7 +220,7 @@ private def checkPlainBrokerTaskCancellation : IO Unit := do
       serveDisconnectCancelledPlainRequest listener requestObserved
     let requestTask ← IO.asTask (prio := Task.Priority.dedicated) <|
       Beam.Cli.requestBroker (System.FilePath.mk "/tmp")
-        (projectDaemonClientForTest endpoint (System.FilePath.mk "/tmp")) { op := .stats }
+        (projectDaemonClientForTest endpoint (System.FilePath.mk "/tmp")) Beam.Broker.Request.stats
     let some _ ← IO.wait requestObserved.result?
       | throw <| IO.userError "plain wrapper request observation promise dropped"
     IO.cancel requestTask
@@ -262,15 +262,16 @@ private def checkBrokerSendInterruption : IO Unit := do
     let largeText := String.ofList (List.replicate (8 * 1024 * 1024) 'x')
     let clientTask ← IO.asTask (prio := Task.Priority.dedicated) <|
       Beam.Broker.sendRequestWithCallbacksInterruptiblyResult endpoint {
-        op := .runAt
+        payload := .runAt {
+          path := "Secret.lean"
+          version := 1
+          line := 0
+          character := 0
+          text := largeText
+        }
         workspaceId? := some Beam.Cli.projectDaemonWorkspaceId
         clientRequestId? := some "blocked-send"
         daemonCapability? := some "test-capability"
-        path? := some "Secret.lean"
-        version? := some 1
-        line? := some 0
-        character? := some 0
-        text? := some largeText
       } interrupted.get (server := .wrapper identity)
     let some _ ← IO.wait greeted.result?
       | throw <| IO.userError "blocked-send greeting promise dropped"
@@ -316,12 +317,13 @@ private def checkWrongGreetingProtectsRequest : IO Unit := do
     let msg ← expectIoErrorMessage "wrong daemon greeting" <|
       Beam.Cli.requestBroker (System.FilePath.mk "/tmp")
         (projectDaemonClientForTest endpoint (System.FilePath.mk "/tmp")) {
-          op := .runAt
-          path? := some "Secret.lean"
-          version? := some 1
-          line? := some 0
-          character? := some 0
-          text? := some "secret speculative text"
+          payload := .runAt {
+            path := "Secret.lean"
+            version := 1
+            line := 0
+            character := 0
+            text := "secret speculative text"
+          }
         }
     requireSubstring "wrong daemon greeting" "identity does not match" msg
     match ← IO.wait serverTask with
@@ -447,25 +449,21 @@ private def checkProjectDaemonRequestSealing : IO Unit := do
     workspaceId := "selected-workspace"
     controlDir := System.FilePath.mk "/tmp/beam-selected-control"
   }
-  let selectedCancel := selectedClient.sealRequest {
-    op := .cancel
-    cancelRequestId? := some "request"
-  }
+  let selectedCancel := selectedClient.sealRequest <| Beam.Broker.Request.cancel "request"
   require "selected descriptor workspace should scope cancellation"
     (selectedCancel.workspaceId? == some "selected-workspace")
   require "selected descriptor capability should authorize cancellation"
     (selectedCancel.daemonCapability? == some "test-capability")
   let overwrittenCancel := selectedClient.sealRequest {
-    op := .cancel
+    Beam.Broker.Request.cancel "request" with
     workspaceId? := some "caller-selected-workspace"
     daemonCapability? := some "caller-selected-capability"
-    cancelRequestId? := some "request"
   }
   require "selected descriptor workspace should replace caller-supplied routing"
     (overwrittenCancel.workspaceId? == some "selected-workspace")
   require "selected descriptor capability should replace caller-supplied authority"
     (overwrittenCancel.daemonCapability? == some "test-capability")
-  let selectedStats := selectedClient.sealRequest { op := .stats }
+  let selectedStats := selectedClient.sealRequest Beam.Broker.Request.stats
   require "selected descriptor workspace should scope optional workspace operations"
     (selectedStats.workspaceId? == some "selected-workspace")
 
@@ -744,6 +742,8 @@ private def checkLeanOperationRequests : IO Unit := do
 
   let closeSave := Beam.Cli.leanCloseSaveRequest path .all
   require "close-save should use close broker op" (closeSave.op == .close)
+  let .close closeSave := closeSave.payload
+    | throw <| IO.userError "close-save should carry a close payload"
   require "close-save should request artifact save" (closeSave.saveArtifacts? == some true)
   require "close-save should preserve diagnostic scope" (closeSave.diagnosticScope? == some .all)
 
@@ -1115,7 +1115,8 @@ private def checkBrokerConnectionClosedIncident : IO Unit := do
       writeTestRegistryEntry root port
       let controlDir ← Beam.Daemon.controlDir root
       let msg ← expectIoErrorMessage "broker connection close should surface daemon failure" <|
-        Beam.Cli.callBrokerQuiet root (projectDaemonClientForTest endpoint controlDir) { op := .stats }
+        Beam.Cli.callBrokerQuiet root (projectDaemonClientForTest endpoint controlDir)
+          Beam.Broker.Request.stats
       requireSubstring "broker connection close should preserve transport failure"
         "Beam daemon receive failed:" msg
       requireSubstring "broker connection close should include incident path"

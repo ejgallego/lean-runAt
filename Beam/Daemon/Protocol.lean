@@ -137,7 +137,7 @@ private def daemonProbe
     (server : ServerExpectation)
     (capability? : Option String := none) : IO (Except BrokerClientFailure DaemonProbe) := do
   match ← sendRequestWithStreamTimeoutResult endpoint
-      { op := .stats, workspaceId? := some workspaceId, daemonCapability? := capability? }
+      { Request.stats with workspaceId? := some workspaceId, daemonCapability? := capability? }
       daemonProbeRequestTimeoutMs (fun _ => pure ())
       server with
   | .ok resp => pure <| daemonProbeOfResponse resp

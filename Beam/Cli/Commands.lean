@@ -79,9 +79,7 @@ private def updateVersionForRocqGoals
     (client : ProjectDaemonClient)
     (path : String) : IO Nat := do
   let resp ← requestBroker root client {
-    op := .updateFile
-    backend := .rocq
-    path? := some path
+    payload := .updateFile { backend := .rocq, path }
   }
   match decodeUpdateFileResult resp with
   | .ok result => pure result.version
@@ -233,9 +231,7 @@ private def serveBackend
   withProjectDaemonOwner home root backend
       (explicitControlDir? := opts.explicitControlDir?) fun owner =>
     runThenHoldUntilInterrupted owner do
-      callBrokerQuiet root owner.client {
-        op := .ensure, backend := backend
-      }
+      callBrokerQuiet root owner.client <| Request.ensure backend
       printResponse <| Response.success <| toJson <|
         mkSessionStatus .running root owner.client.controlDir (some owner.generation)
       (← IO.getStdout).flush
@@ -438,32 +434,34 @@ def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit := do
       withProjectDaemon root .rocq (explicitControlDir? := opts.explicitControlDir?) fun client => do
         let version ← updateVersionForRocqGoals root client path
         callBroker root client {
-          op := .goals
-          backend := .rocq
-          path? := some path
-          version? := some version
-          line? := some (← parseNatArg "line" line)
-          character? := some (← parseNatArg "character" character)
-          mode? := some .after
-          compact? := some false
-          ppFormat? := some .str
-          text? := joinTextArgs text
+          payload := .goals {
+            backend := .rocq
+            path
+            version
+            line := ← parseNatArg "line" line
+            character := ← parseNatArg "character" character
+            mode? := some .after
+            compact? := some false
+            ppFormat? := some .str
+            text? := joinTextArgs text
+          }
         }
   | "rocq-goals-prev" :: path :: line :: character :: text =>
       let root ← projectRoot opts .rocq
       withProjectDaemon root .rocq (explicitControlDir? := opts.explicitControlDir?) fun client => do
         let version ← updateVersionForRocqGoals root client path
         callBroker root client {
-          op := .goals
-          backend := .rocq
-          path? := some path
-          version? := some version
-          line? := some (← parseNatArg "line" line)
-          character? := some (← parseNatArg "character" character)
-          mode? := some .before
-          compact? := some false
-          ppFormat? := some .str
-          text? := joinTextArgs text
+          payload := .goals {
+            backend := .rocq
+            path
+            version
+            line := ← parseNatArg "line" line
+            character := ← parseNatArg "character" character
+            mode? := some .before
+            compact? := some false
+            ppFormat? := some .str
+            text? := joinTextArgs text
+          }
         }
   | "doctor" :: [] =>
       doctor home opts .lean
@@ -472,20 +470,15 @@ def runCommand (home : System.FilePath) (opts : CliOptions) : IO Unit := do
   | "open-files" :: [] =>
       let root ← projectRootAny opts
       withExistingProjectDaemon root (explicitControlDir? := opts.explicitControlDir?) fun client =>
-        callBroker root client {
-          op := .openDocs
-        }
+        callBroker root client Request.openDocs
   | "cancel" :: requestId :: [] =>
       let root ← projectRootAny opts
       withExistingProjectDaemon root (explicitControlDir? := opts.explicitControlDir?) fun client =>
-        callBroker root client {
-          op := .cancel
-          cancelRequestId? := some requestId
-        }
+        callBroker root client <| Request.cancel requestId
   | "stats" :: [] =>
       let root ← projectRootAny opts
       withExistingProjectDaemon root (explicitControlDir? := opts.explicitControlDir?) fun client =>
-        callBroker root client { op := .stats }
+        callBroker root client Request.stats
   | "status" :: [] =>
       sessionStatus opts
   | "stop" :: [] =>

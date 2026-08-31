@@ -112,12 +112,9 @@ private def collectDaemonPayload
   | .live entry =>
       let controlDir ← Beam.Daemon.controlDirFor root explicitControlDir?
       let client := ProjectDaemonClient.ofSessionDescriptor entry controlDir
-      let (stats, warnings) ← collectDaemonRequest "stats" client {
-        op := .stats
-      } warnings
-      let (openDocs, warnings) ← collectDaemonRequest "open-files" client {
-        op := .openDocs
-      } warnings
+      let (stats, warnings) ← collectDaemonRequest "stats" client Request.stats warnings
+      let (openDocs, warnings) ←
+        collectDaemonRequest "open-files" client Request.openDocs warnings
       pure (stats, openDocs, warnings)
   | .absent =>
       pure (Json.null, Json.null, warnings.push "no live Beam daemon was available for stats/open-files")

@@ -60,9 +60,7 @@ private def updateVersion
     (endpoint : Beam.Broker.Endpoint)
     (path : String) : IO Nat := do
   let resp ← runClient endpoint {
-    op := .updateFile
-    backend := .rocq
-    path? := some path
+    payload := .updateFile { backend := .rocq, path }
   }
   let result ← requireUpdateFileResult s!"rocq update version for {path}" (← expectOk resp)
   pure result.version
@@ -73,11 +71,9 @@ def main : IO Unit := do
   let broker ← spawnRocqBroker endpoint root ((← IO.getEnv "BEAM_ROCQ_CMD").getD "coq-lsp")
   try
     waitForBrokerReadyForRoot endpoint root
-    discard <| expectOk (← runClient endpoint { op := .ensure, backend := .rocq })
+    discard <| expectOk (← runClient endpoint (Beam.Broker.Request.ensure .rocq))
     let unsupportedSync ← runClient endpoint {
-      op := .syncFile
-      backend := .rocq
-      path? := some "Demo.v"
+      payload := .syncFile { backend := .rocq, path := "Demo.v" }
     }
     expectErrCode unsupportedSync "invalidParams"
     let demoVersion ← updateVersion endpoint "Demo.v"
@@ -85,73 +81,78 @@ def main : IO Unit := do
     let errorVersion ← updateVersion endpoint "Error.v"
     let doneVersion ← updateVersion endpoint "Done.v"
     let goals ← expectOk <| ← runClient endpoint {
-      op := .goals
-      backend := .rocq
-      path? := some "Demo.v"
-      version? := some demoVersion
-      line? := some 2
-      character? := some 8
-      mode? := some .after
-      compact? := some false
+      payload := .goals {
+        backend := .rocq
+        path := "Demo.v"
+        version := demoVersion
+        line := 2
+        character := 8
+        mode? := some .after
+        compact? := some false
+      }
     }
     expectTwoTrueGoals goals
 
     let semiGoals ← expectOk <| ← runClient endpoint {
-      op := .goals
-      backend := .rocq
-      path? := some "Semi.v"
-      version? := some semiVersion
-      line? := some 2
-      character? := some 3
-      mode? := some .before
-      text? := some "split."
-      compact? := some false
+      payload := .goals {
+        backend := .rocq
+        path := "Semi.v"
+        version := semiVersion
+        line := 2
+        character := 3
+        mode? := some .before
+        text? := some "split."
+        compact? := some false
+      }
     }
     expectTwoTrueGoals semiGoals
 
     let errorGoals ← expectOk <| ← runClient endpoint {
-      op := .goals
-      backend := .rocq
-      path? := some "Error.v"
-      version? := some errorVersion
-      line? := some 2
-      character? := some 8
-      mode? := some .after
-      compact? := some false
+      payload := .goals {
+        backend := .rocq
+        path := "Error.v"
+        version := errorVersion
+        line := 2
+        character := 8
+        mode? := some .after
+        compact? := some false
+      }
     }
     expectTwoTrueGoals errorGoals
 
     let errorPayload ← expectOk <| ← runClient endpoint {
-      op := .goals
-      backend := .rocq
-      path? := some "Error.v"
-      version? := some errorVersion
-      line? := some 4
-      character? := some 2
-      mode? := some .after
-      compact? := some false
+      payload := .goals {
+        backend := .rocq
+        path := "Error.v"
+        version := errorVersion
+        line := 4
+        character := 2
+        mode? := some .after
+        compact? := some false
+      }
     }
     expectNonemptyError errorPayload
 
     let zeroGoalResp ← runClient endpoint {
-      op := .goals
-      backend := .rocq
-      path? := some "Done.v"
-      version? := some doneVersion
-      line? := some 3
-      character? := some 0
-      mode? := some .before
-      text? := some "exact I."
-      compact? := some false
+      payload := .goals {
+        backend := .rocq
+        path := "Done.v"
+        version := doneVersion
+        line := 3
+        character := 0
+        mode? := some .before
+        text? := some "exact I."
+        compact? := some false
+      }
     }
     expectSurfacedError zeroGoalResp
 
     let stats ← expectOk <| ← runClient endpoint {
-      op := .stats
+      Beam.Broker.Request.stats with
       workspaceId? := some testWorkspaceId
     }
     expectOpCountAtLeast stats "rocq" "goals" 5
-    discard <| expectOk <| ← runClient endpoint { op := .shutdown }
+    discard <| expectOk <| ← runClient endpoint Beam.Broker.Request.shutdown
   finally
     try
       broker.kill

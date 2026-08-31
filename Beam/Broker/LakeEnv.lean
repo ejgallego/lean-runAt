@@ -101,11 +101,6 @@ def loadWorkspaceForRoot (root : FilePath) (leanCmd? : Option String) : IO Works
   else
     throw <| IO.userError <| loadWorkspaceFailureMessage root messages
 
-structure LeanServerLakeEnv where
-  env : Array (String × Option String)
-  moreServerArgs : Array String
-  deriving FromJson, ToJson
-
 private def leanServerLakeEnvInProcess
     (root : FilePath)
     (leanCmd? : Option String) : IO LeanServerLakeEnv := do
@@ -139,15 +134,11 @@ def leanServerLakeEnv
     (lakeHelper? : Option FilePath := none) : IO LeanServerLakeEnv := do
   match lakeHelper?, leanCmd? with
   | some helper, some leanCmd =>
-      match ← runLakeHelper helper "server-env" <| toJson ({
+      match ← runLakeHelperServerEnv helper ({
           root := root.toString
           leanCmd
         } : LakeHelperEnvRequest) with
-      | .ok result =>
-          match fromJson? result with
-          | .ok serverEnv => pure serverEnv
-          | .error err =>
-              throw <| IO.userError s!"target Lake helper returned an invalid server environment: {err}"
+      | .ok serverEnv => pure serverEnv
       | .error failure => throw <| IO.userError failure.message
   | _, _ =>
       leanServerLakeEnvInProcess root leanCmd?

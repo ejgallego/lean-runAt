@@ -16,6 +16,11 @@ structure LakeHelperEnvRequest where
   leanCmd : String
   deriving FromJson, ToJson
 
+structure LeanServerLakeEnv where
+  env : Array (String × Option String)
+  moreServerArgs : Array String
+  deriving FromJson, ToJson
+
 structure LakeHelperSaveRequest where
   root : String
   path : String
@@ -43,37 +48,51 @@ structure LakeHelperSaveSpec extends LakeHelperWriteTraceRequest where
   unsupportedSetupReason? : Option String := none
   deriving FromJson, ToJson
 
-def BrokerFailureCode.ofName? (name : String) : Option BrokerFailureCode :=
-  if name == "invalidParams" then some .invalidParams
-  else if name == "requestCancelled" then some .requestCancelled
-  else if name == "contentModified" then some .contentModified
-  else if name == "workerExited" then some .workerExited
-  else if name == syncBarrierIncompleteCode then some .syncBarrierIncomplete
-  else if name == saveTraceStaleCode then some .saveTraceStale
-  else if name == saveUnsupportedSetupCode then some .saveUnsupportedSetup
-  else if name == saveTargetNotModuleCode then some .saveTargetNotModule
-  else if name == "internalError" then some .internalError
-  else none
+structure LakeHelperAck where
+  deriving FromJson, ToJson
+
+inductive LakeHelperOperation where
+  | serverEnv
+  | prepareSave
+  | writeSaveTrace
+  deriving BEq, Repr
+
+def LakeHelperOperation.key : LakeHelperOperation → String
+  | .serverEnv => "server-env"
+  | .prepareSave => "prepare-save"
+  | .writeSaveTrace => "write-save-trace"
+
+def LakeHelperOperation.ofString? : String → Option LakeHelperOperation
+  | "server-env" => some .serverEnv
+  | "prepare-save" => some .prepareSave
+  | "write-save-trace" => some .writeSaveTrace
+  | _ => none
 
 private def helperOutputSummary (stdout stderr : String) : String :=
   let stderr := stderr.trimAscii.toString
   let stdout := stdout.trimAscii.toString
   if !stderr.isEmpty then stderr else if !stdout.isEmpty then stdout else "(no output)"
 
-/-- Invoke a target-built helper without a shell and keep its structured failures typed. -/
-def runLakeHelper
+private def runLakeHelperRequest [ToJson α] [FromJson β]
     (helper : System.FilePath)
-    (operation : String)
-    (request : Json) : IO (Except BrokerFailure Json) := do
-  let out ← IO.Process.output {
-    cmd := helper.toString
-    args := #["lake-helper", operation]
-  } (some request.compress)
+    (operation : LakeHelperOperation)
+    (request : α) : IO (Except BrokerFailure β) := do
+  let out ←
+    try
+      IO.Process.output {
+        cmd := helper.toString
+        args := #["lake-helper", operation.key]
+      } (some (toJson request).compress)
+    catch error =>
+      return .error {
+        code := .internalError
+        message := s!"could not start target Lake helper '{operation.key}': {error}"
+      }
   if out.exitCode != 0 then
     return .error {
       code := .internalError
       message :=
-        s!"target Lake helper '{operation}' exited with code {out.exitCode}: " ++
+        s!"target Lake helper '{operation.key}' exited with code {out.exitCode}: " ++
           helperOutputSummary out.stdout out.stderr
     }
   let response ←
@@ -83,18 +102,44 @@ def runLakeHelper
         return .error {
           code := .internalError
           message :=
-            s!"target Lake helper '{operation}' returned invalid JSON: {err}: " ++
+            s!"target Lake helper '{operation.key}' returned invalid JSON: {err}: " ++
               helperOutputSummary out.stdout out.stderr
         }
   match response with
-  | .successResult result _ => pure <| .ok result
+  | .successResult result _ =>
+      match fromJson? result with
+      | .ok decoded => pure <| .ok decoded
+      | .error err =>
+          pure <| .error {
+            code := .internalError
+            message := s!"target Lake helper '{operation.key}' returned an invalid result: {err}"
+          }
   | .errorResult failure =>
       let error := failure.error
       let some code := BrokerFailureCode.ofName? error.code
         | return .error {
             code := .internalError
-            message := s!"target Lake helper '{operation}' returned unknown error code '{error.code}'"
+            message :=
+              s!"target Lake helper '{operation.key}' returned unknown error code '{error.code}'"
           }
       pure <| .error { code, message := error.message, data? := error.data? }
+
+/-- Ask the target-built helper for the Lean server environment. -/
+def runLakeHelperServerEnv
+    (helper : System.FilePath)
+    (request : LakeHelperEnvRequest) : IO (Except BrokerFailure LeanServerLakeEnv) :=
+  runLakeHelperRequest helper .serverEnv request
+
+/-- Ask the target-built helper for an exact zero-build save specification. -/
+def runLakeHelperPrepareSave
+    (helper : System.FilePath)
+    (request : LakeHelperSaveRequest) : IO (Except BrokerFailure LakeHelperSaveSpec) :=
+  runLakeHelperRequest helper .prepareSave request
+
+/-- Ask the target-built helper to publish one save trace. -/
+def runLakeHelperWriteSaveTrace
+    (helper : System.FilePath)
+    (request : LakeHelperWriteTraceRequest) : IO (Except BrokerFailure LakeHelperAck) :=
+  runLakeHelperRequest helper .writeSaveTrace request
 
 end Beam.Broker

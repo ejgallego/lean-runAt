@@ -213,7 +213,7 @@ private def statsRoot? (resp : Beam.Broker.Response) : Option String := do
 private def brokerRoot? (endpoint : Beam.Broker.Endpoint) : IO (Option String) := do
   try
     let result ← Beam.Broker.sendRequestWithCallbacksTimeoutResult endpoint {
-      op := .stats
+      Beam.Broker.Request.stats with
       workspaceId? := some testWorkspaceId
     } testBrokerRequestTimeoutMs (server := .standalone)
     match result with

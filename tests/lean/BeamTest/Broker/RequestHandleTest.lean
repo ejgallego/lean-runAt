@@ -56,13 +56,14 @@ def checkCancellationAndLifetime : IO Unit := do
   let workspaceId : Beam.Broker.WorkspaceId := "request-handle-workspace"
   let server ← Beam.Broker.ServerRuntime.create { root } workspaceId
   let req : Beam.Broker.Request := {
-    op := .runAt
+    payload := .runAt {
+      path := "Cancelled.lean"
+      version := 1
+      line := 0
+      character := 0
+      text := "exact trivial"
+    }
     workspaceId? := some workspaceId
-    path? := some "Cancelled.lean"
-    version? := some 1
-    line? := some 0
-    character? := some 0
-    text? := some "exact trivial"
     clientRequestId? := some "request-handle-cancel"
   }
   let runOnce : IO Unit := do
@@ -119,13 +120,39 @@ def checkCancellationAndLifetime : IO Unit := do
     runOnce
 
     let callbackInvoked ← IO.mkRef false
-    let invalidReq := { req with cancelRequestId? := some "unrelated-field" }
+    let invalidReq := {
+      Beam.Broker.Request.listWorkspaces with
+      workspaceId? := some workspaceId
+    }
     let invalidResp ← server.dispatchRequestWithHandle invalidReq (fun _ => do
       callbackInvoked.set true
       pure true)
     checkErrorCode "invalid request before admission" "invalidParams" invalidResp
     if ← callbackInvoked.get then
       throw <| IO.userError "invalid request invoked the before-dispatch callback"
+
+    callbackInvoked.set false
+    let mismatchedHandle : Beam.Broker.Handle := {
+      workspaceId := "another-workspace"
+      backend := .lean
+      epoch := 1
+      session := "session"
+      raw := Json.null
+    }
+    let mismatchedHandleReq : Beam.Broker.Request := {
+      payload := .runWith {
+        path := "Cancelled.lean"
+        text := "exact trivial"
+        handle := mismatchedHandle
+      }
+      workspaceId? := some workspaceId
+    }
+    let mismatchedHandleResp ← server.dispatchRequestWithHandle mismatchedHandleReq (fun _ => do
+      callbackInvoked.set true
+      pure true)
+    checkErrorCode "mismatched handle workspace before admission" "invalidParams" mismatchedHandleResp
+    if ← callbackInvoked.get then
+      throw <| IO.userError "mismatched handle workspace invoked the before-dispatch callback"
   finally
     try
       IO.FS.removeDirAll root

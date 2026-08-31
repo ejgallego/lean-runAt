@@ -249,7 +249,7 @@ def requestDaemonShutdown
     (requestTimeoutMs : Nat := daemonShutdownRequestTimeoutMs) :
     IO (Except BrokerClientFailure Response) := do
   sendRequestWithStreamTimeoutResult endpoint {
-      op := .shutdown
+      payload := .shutdown
       daemonCapability? := some capability
     }
     requestTimeoutMs (fun _ => pure ()) (.wrapper identity)

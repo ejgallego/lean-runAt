@@ -48,8 +48,7 @@ private def syncVersion
     (endpoint : Beam.Broker.Endpoint)
     (path : String) : IO Nat := do
   let resp ← runClient endpoint {
-    op := .syncFile
-    path? := some path
+    payload := .syncFile { path }
   }
   let result ← requireSyncFileResult s!"sync version for {path}" (← expectOk resp)
   pure result.version
@@ -66,7 +65,7 @@ private partial def waitForBrokerExit
     waitForBrokerExit broker (tries - 1)
 
 private def sendShutdownAndResetConnection (port : UInt16) : IO Unit := do
-  let payload := (toJson ({ op := .shutdown } : Beam.Broker.Request)).compress
+  let payload := (toJson Beam.Broker.Request.shutdown).compress
   let script := String.intercalate ";" [
     "import socket,struct,sys",
     "s=socket.create_connection(('127.0.0.1',int(sys.argv[1])))",
@@ -88,7 +87,7 @@ private def checkShutdownResponseBeforeExit (root : System.FilePath) : IO Unit :
   let broker ← spawnLeanBroker endpoint root
   try
     waitForBrokerReadyForRoot endpoint root
-    discard <| expectOk (← runClient endpoint { op := .shutdown })
+    discard <| expectOk (← runClient endpoint Beam.Broker.Request.shutdown)
     waitForBrokerExit broker
   finally
     try
@@ -131,19 +130,20 @@ def main : IO Unit := do
     | .wrongRoot _ => pure ()
     | status =>
         throw <| IO.userError s!"daemon root mismatch was classified as {repr status}"
-    discard <| expectOk (← runClient endpoint { op := .ensure })
+    discard <| expectOk (← runClient endpoint Beam.Broker.Request.ensure)
 
     let todoVersion ← syncVersion endpoint BeamTest.Fixtures.TodoFixture.brokerPath
     let todoMessages ← requireSuccessStream "todo" <| ← runBrokerStream endpoint {
-      op := .todo
-      path? := some BeamTest.Fixtures.TodoFixture.brokerPath
-      version? := some todoVersion
-      line? := some BeamTest.Fixtures.TodoFixture.startLine
-      character? := some BeamTest.Fixtures.TodoFixture.startCharacter
-      endLine? := some BeamTest.Fixtures.TodoFixture.endLine
-      endCharacter? := some BeamTest.Fixtures.TodoFixture.endCharacter
-      kinds? := some #[.sorry]
-      suggest? := some .none
+      payload := .todo {
+        path := BeamTest.Fixtures.TodoFixture.brokerPath
+        version := todoVersion
+        line := BeamTest.Fixtures.TodoFixture.startLine
+        character := BeamTest.Fixtures.TodoFixture.startCharacter
+        endLine := BeamTest.Fixtures.TodoFixture.endLine
+        endCharacter := BeamTest.Fixtures.TodoFixture.endCharacter
+        kinds? := some #[.sorry]
+        suggest? := some .none
+      }
     }
     let todoResp ← requireFinalStreamResponse "todo" todoMessages
     let todoPayload ← expectOk todoResp
@@ -156,10 +156,11 @@ def main : IO Unit := do
     writeSaveWarningFile root "-- broker stream sync"
     let syncRequestId := some "broker-stream-sync"
     let syncMessages ← requireSuccessStream "sync_file" <| ← runBrokerStream endpoint {
-      op := .syncFile
+      payload := .syncFile {
+        path := "SaveSmoke/B.lean"
+        diagnosticScope? := some .all
+      }
       clientRequestId? := syncRequestId
-      path? := some "SaveSmoke/B.lean"
-      diagnosticScope? := some .all
     }
     expectStreamClientRequestId "sync_file" syncMessages syncRequestId
     let syncResp ← requireFinalStreamResponse "sync_file" syncMessages
@@ -183,10 +184,11 @@ def main : IO Unit := do
     expectDiagnosticsForPath "sync_file" "SaveSmoke/B.lean" syncDiagnostics
 
     let syncReplyMessages ← requireSuccessStream "sync_file include diagnostics" <| ← runBrokerStream endpoint {
-      op := .syncFile
-      path? := some "SaveSmoke/B.lean"
-      diagnosticScope? := some .all
-      diagnosticsInResult? := some true
+      payload := .syncFile {
+        path := "SaveSmoke/B.lean"
+        diagnosticScope? := some .all
+        diagnosticsInResult? := some true
+      }
     }
     let syncReplyResp ← requireFinalStreamResponse "sync_file include diagnostics" syncReplyMessages
     let syncReplyPayload ← expectOk syncReplyResp
@@ -201,9 +203,10 @@ def main : IO Unit := do
 
     writeSaveWarningFile root "-- broker stream save"
     let saveMessages ← requireSuccessStream "save_olean" <| ← runBrokerStream endpoint {
-      op := .saveOlean
-      path? := some "SaveSmoke/B.lean"
-      diagnosticScope? := some .all
+      payload := .saveOlean {
+        path := "SaveSmoke/B.lean"
+        diagnosticScope? := some .all
+      }
     }
     let saveResp ← requireFinalStreamResponse "save_olean" saveMessages
     let savePayload ← expectOk saveResp
@@ -216,10 +219,11 @@ def main : IO Unit := do
 
     writeSaveWarningFile root "-- broker stream close-save"
     let closeMessages ← requireSuccessStream "close-save" <| ← runBrokerStream endpoint {
-      op := .close
-      path? := some "SaveSmoke/B.lean"
-      saveArtifacts? := some true
-      diagnosticScope? := some .all
+      payload := .close {
+        path := "SaveSmoke/B.lean"
+        saveArtifacts? := some true
+        diagnosticScope? := some .all
+      }
     }
     let closeResp ← requireFinalStreamResponse "close-save" closeMessages
     let closePayload ← expectOk closeResp
@@ -237,15 +241,13 @@ def main : IO Unit := do
     let standalonePath := root / "StandaloneSaveSmoke.lean"
     IO.FS.writeFile standalonePath "import SaveSmoke.B\n\n#check bVal\n"
     let standaloneSyncMessages ← requireSuccessStream "standalone sync_file" <| ← runBrokerStream endpoint {
-      op := .syncFile
-      path? := some "StandaloneSaveSmoke.lean"
+      payload := .syncFile { path := "StandaloneSaveSmoke.lean" }
     }
     let standaloneSyncResp ← requireFinalStreamResponse "standalone sync_file" standaloneSyncMessages
     discard <| expectOk standaloneSyncResp
 
     let standaloneSaveMessages ← requireFailedStream "standalone save_olean" <| ← runBrokerStream endpoint {
-      op := .saveOlean
-      path? := some "StandaloneSaveSmoke.lean"
+      payload := .saveOlean { path := "StandaloneSaveSmoke.lean" }
     }
     let standaloneSaveResp ← requireFinalStreamResponse "standalone save_olean" standaloneSaveMessages
     expectErrorCode "standalone save_olean" Beam.Broker.saveTargetNotModuleCode standaloneSaveResp
@@ -254,25 +256,21 @@ def main : IO Unit := do
     IO.FS.writeFile (root / "SaveSmoke" / "B.lean") "def bVal : Nat := \"broken\"\n"
 
     let staleSyncMessages ← requireFailedStream "stale sync_file" <| ← runBrokerStream endpoint {
-      op := .syncFile
-      path? := some "SaveSmoke/A.lean"
+      payload := .syncFile { path := "SaveSmoke/A.lean" }
     }
     let staleSyncResp ← requireFinalStreamResponse "stale sync_file" staleSyncMessages
     expectErrorCode "stale sync_file" Beam.Broker.syncBarrierIncompleteCode staleSyncResp
     discard <| requireFileProgress "stale sync_file terminal response" staleSyncResp
 
     let staleSaveMessages ← requireFailedStream "stale save_olean" <| ← runBrokerStream endpoint {
-      op := .saveOlean
-      path? := some "SaveSmoke/A.lean"
+      payload := .saveOlean { path := "SaveSmoke/A.lean" }
     }
     let staleSaveResp ← requireFinalStreamResponse "stale save_olean" staleSaveMessages
     expectErrorCode "stale save_olean" Beam.Broker.syncBarrierIncompleteCode staleSaveResp
     discard <| requireFileProgress "stale save_olean terminal response" staleSaveResp
 
     let staleCloseMessages ← requireFailedStream "stale close-save" <| ← runBrokerStream endpoint {
-      op := .close
-      path? := some "SaveSmoke/A.lean"
-      saveArtifacts? := some true
+      payload := .close { path := "SaveSmoke/A.lean", saveArtifacts? := some true }
     }
     let staleCloseResp ← requireFinalStreamResponse "stale close-save" staleCloseMessages
     expectErrorCode "stale close-save" Beam.Broker.syncBarrierIncompleteCode staleCloseResp
@@ -281,23 +279,20 @@ def main : IO Unit := do
     IO.FS.writeFile (root / "SaveSmoke" / "B.lean") "def bVal : Nat := 1\n"
     buildLakeTarget root "SaveSmoke/A.lean"
     discard <| expectOk <| ← runClient endpoint {
-      op := .close
-      path? := some "SaveSmoke/A.lean"
+      payload := .close { path := "SaveSmoke/A.lean" }
     }
     let staleTraceSyncResp ← runClient endpoint {
-      op := .syncFile
-      path? := some "SaveSmoke/A.lean"
+      payload := .syncFile { path := "SaveSmoke/A.lean" }
     }
     discard <| expectOk staleTraceSyncResp
     writeSaveWarningFile root "-- broker stream stale trace"
 
     let staleTraceSaveMessages ← requireFailedStream "stale trace save_olean" <| ← runBrokerStream endpoint {
-      op := .saveOlean
-      path? := some "SaveSmoke/A.lean"
+      payload := .saveOlean { path := "SaveSmoke/A.lean" }
     }
     let staleTraceSaveResp ← requireFinalStreamResponse "stale trace save_olean" staleTraceSaveMessages
     expectErrorCode "stale trace save_olean" Beam.Broker.saveTraceStaleCode staleTraceSaveResp
-    discard <| expectOk (← runClient endpoint { op := .stats })
+    discard <| expectOk (← runClient endpoint Beam.Broker.Request.stats)
 
     sendShutdownAndResetConnection port
     waitForBrokerExit broker

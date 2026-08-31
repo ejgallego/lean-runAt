@@ -193,18 +193,19 @@ def maybeEmitLiteralBackslashNewlineHint
     (clientRequestId? : Option String)
     (req : Request)
     (resp : Response) : IO Unit := do
-  match req.op with
-  | .runAt | .runWith =>
-      match req.text?, decodeRunAtResult? resp with
-      | some text, some result =>
-          if !result.success && hasSubstring text "\\n" && !text.contains '\n' then
-            IO.eprintln <| annotateRequestMessage clientRequestId?
-              "beam: hint: the probe text contains the literal characters '\\n'; if you meant a real newline, use --stdin or --text-file."
-          else
-            pure ()
-      | _, _ =>
-          pure ()
-  | _ =>
+  let text? :=
+    match req.payload with
+    | .runAt request => some request.text
+    | .runWith request => some request.text
+    | _ => none
+  match text?, decodeRunAtResult? resp with
+  | some text, some result =>
+      if !result.success && hasSubstring text "\\n" && !text.contains '\n' then
+        IO.eprintln <| annotateRequestMessage clientRequestId?
+          "beam: hint: the probe text contains the literal characters '\\n'; if you meant a real newline, use --stdin or --text-file."
+      else
+        pure ()
+  | _, _ =>
       pure ()
 
 def decodeSyncFileResult? (resp : Response) : Option SyncFileResult :=
