@@ -17,9 +17,7 @@ open Beam.Broker
 private def inWorkspace (workspaceId : WorkspaceId) (req : Request) : Request :=
   match req.op.workspaceScope with
   | .none => req
-  | .optional | .required =>
-      if req.workspaceId?.isSome then req
-      else { req with workspaceId? := some workspaceId }
+  | .optional | .required => { req with workspaceId? := some workspaceId }
 
 /-- Address a wrapper request to the workspace selected from its session descriptor. -/
 def inSelectedDaemonWorkspace (client : ProjectDaemonClient) (req : Request) : Request :=

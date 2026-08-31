@@ -97,33 +97,30 @@ private def collectDaemonPayload
     (warnings : Array String) : IO (Json × Json × Array String) := do
   match ← observeProjectRegistry root explicitControlDir? with
   | .live entry =>
-      match Beam.Daemon.registryEndpoint? entry with
-      | none =>
-          pure (Json.null, Json.null, warnings.push "Beam daemon registry did not contain a valid endpoint")
-      | some endpoint =>
-          let some workspace ← Beam.Cli.sessionWorkspaceForRoot? entry root
-            | return (Json.null, Json.null,
-                warnings.push "the Beam session does not contain the selected project root")
-          let controlDir ← Beam.Daemon.controlDirFor root explicitControlDir?
-          let client : ProjectDaemonClient := {
-            endpoint
-            capability := entry.capability
-            workspaceId := workspace.workspaceId
-            controlDir
-          }
-          let statsResp ← sendRequest endpoint <| client.authorize {
-            op := .stats
-            workspaceId? := some client.workspaceId
-            root? := some root.toString
-          }
-          let (stats, warnings) := Beam.Feedback.responsePayloadOrWarning "stats" statsResp warnings
-          let openResp ← sendRequest endpoint <| client.authorize {
-            op := .openDocs
-            workspaceId? := some client.workspaceId
-            root? := some root.toString
-          }
-          let (openDocs, warnings) := Beam.Feedback.responsePayloadOrWarning "open-files" openResp warnings
-          pure (stats, openDocs, warnings)
+      let endpoint := Beam.Daemon.registryEndpoint entry
+      let some workspace ← Beam.Cli.sessionWorkspaceForRoot? entry root
+        | return (Json.null, Json.null,
+            warnings.push "the Beam session does not contain the selected project root")
+      let controlDir ← Beam.Daemon.controlDirFor root explicitControlDir?
+      let client : ProjectDaemonClient := {
+        endpoint
+        capability := entry.capability
+        workspaceId := workspace.workspaceId
+        controlDir
+      }
+      let statsResp ← sendRequest endpoint <| client.authorize {
+        op := .stats
+        workspaceId? := some client.workspaceId
+        root? := some root.toString
+      }
+      let (stats, warnings) := Beam.Feedback.responsePayloadOrWarning "stats" statsResp warnings
+      let openResp ← sendRequest endpoint <| client.authorize {
+        op := .openDocs
+        workspaceId? := some client.workspaceId
+        root? := some root.toString
+      }
+      let (openDocs, warnings) := Beam.Feedback.responsePayloadOrWarning "open-files" openResp warnings
+      pure (stats, openDocs, warnings)
   | .absent =>
       pure (Json.null, Json.null, warnings.push "no live Beam daemon was available for stats/open-files")
   | .draining _ =>

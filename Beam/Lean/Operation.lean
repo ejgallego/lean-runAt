@@ -90,8 +90,8 @@ instance : ToJson Operation where
   toJson op := toJson op.key
 
 private def operationDescription : Operation → String
-  | .runAt => "Speculatively test one Lean command or tactic block at a file position without retaining follow-up state. Supplied text remains speculative and is not persisted as source. To keep the result, first edit and save the Lean file with the client's normal file-edit tool; only then call lean_sync."
-  | .runAtHandle => "Speculatively test one Lean command or tactic block at a file position. A successful result may include next_handle for follow-up execution. Supplied text remains speculative and is not persisted as source. To keep the result, first edit and save the Lean file with the client's normal file-edit tool; only then call lean_sync."
+  | .runAt => "Speculatively test one Lean command or tactic block at a file position without retaining follow-up state. Supplied text remains speculative and is not persisted as source. To keep the result, first edit and save the Lean file with the client's normal file-edit tool; only then call the sync operation."
+  | .runAtHandle => "Speculatively test one Lean command or tactic block at a file position. A successful result may include next_handle for follow-up execution. Supplied text remains speculative and is not persisted as source. To keep the result, first edit and save the Lean file with the client's normal file-edit tool; only then call the sync operation."
   | .hover => "Inspect Lean hover information at a file position."
   | .signatureHelp => "Inspect Lean signature help at a file position."
   | .definition => "Find Lean definitions for the symbol at a file position."
@@ -100,9 +100,9 @@ private def operationDescription : Operation → String
   | .workspaceSymbols => "Search Lean workspace symbols by query string."
   | .goals => "Inspect Lean goals before or after a file position."
   | .todo => "Inspect agent-actionable Lean todo items in a file range."
-  | .codeActionResolve => "Resolve and return a Lean code action payload from lean_todo. If it contains an LSP WorkspaceEdit, the client must apply it."
-  | .runWith => "Speculatively continue from a stored handle without consuming the parent handle. The continuation remains speculative and is not persisted as source. To keep the result, first edit and save the Lean file so it contains the complete accepted source; only then call lean_sync."
-  | .runWithLinear => "Speculatively continue from a stored handle and consume that handle on success or failure. The continuation remains speculative and is not persisted as source. To keep the result, first edit and save the Lean file so it contains the complete accepted source; only then call lean_sync."
+  | .codeActionResolve => "Resolve and return a Lean code action payload from the todo result. If it contains an LSP WorkspaceEdit, the client must apply it."
+  | .runWith => "Speculatively continue from a stored handle without consuming the parent handle. The continuation remains speculative and is not persisted as source. To keep the result, first edit and save the Lean file so it contains the complete accepted source; only then call the sync operation."
+  | .runWithLinear => "Speculatively continue from a stored handle and consume that handle on success or failure. The continuation remains speculative and is not persisted as source. To keep the result, first edit and save the Lean file so it contains the complete accepted source; only then call the sync operation."
   | .release => "Release a stored Lean follow-up handle."
   | .update => "Read the current on-disk Lean source into the broker's LSP mirror and return its document version without waiting for diagnostics."
   | .sync => "Read the current on-disk Lean source into the broker's LSP mirror, wait for diagnostics and readiness, and return its document version. This never applies or recovers speculative text."
@@ -133,7 +133,7 @@ private def pathField : String × Json :=
   ("path", Beam.JsonSchema.string "Lean file path, relative to the server root unless absolute.")
 
 private def versionField : String × Json :=
-  ("version", Beam.JsonSchema.natural "Document version returned by a successful lean_update or lean_sync for this file.")
+  ("version", Beam.JsonSchema.natural "Document version returned by a successful update or sync operation for this file.")
 
 private def lineField : String × Json :=
   ("line", Beam.JsonSchema.natural "Zero-based LSP line.")
@@ -186,12 +186,12 @@ private def goalsModeField : String × Json :=
 
 private def syncDiagnosticScopeField : String × Json :=
   ("diagnostic_scope", Beam.JsonSchema.enumString
-    "Select user-facing diagnostic severities for live logging or final replay. Defaults to errors. MCP log metadata independently controls live delivery. This setting does not control Lake setup status or silent editor-only messages."
+    "Select user-facing diagnostic severities for live logging or final replay. Defaults to errors. This setting does not control Lake setup status or silent editor-only messages."
     #["errors", "all"])
 
 private def saveDiagnosticScopeField : String × Json :=
   ("diagnostic_scope", Beam.JsonSchema.enumString
-    "Select user-facing diagnostic severities for live logging. Defaults to errors. MCP log metadata independently controls live delivery. This setting does not control Lake setup status or silent editor-only messages."
+    "Select user-facing diagnostic severities for live logging. Defaults to errors. This setting does not control Lake setup status or silent editor-only messages."
     #["errors", "all"])
 
 private def diagnosticsInResultField : String × Json :=
@@ -200,7 +200,7 @@ private def diagnosticsInResultField : String × Json :=
 
 private def codeActionField : String × Json :=
   ("code_action", Beam.JsonSchema.object
-    "Raw Lean LSP CodeAction payload returned by lean_todo. The action must include its data field so Lean can resolve it against this document version.")
+    "Raw Lean LSP CodeAction payload returned by the todo operation. The action must include its data field so Lean can resolve it against this document version.")
 
 private def positionFields : List (String × Json) :=
   [pathField, versionField, lineField, characterField]
@@ -391,7 +391,7 @@ instance : FromJson TodoInput where
     let suggest? ← optionalField? (α := Beam.LSP.Todo.TodoSuggestMode) j "suggest"
     pure { path, version, startLine, startCharacter, endLine, endCharacter, kinds?, suggest? }
 
-/-- Input for resolving a Lean code action returned by `lean_todo`. -/
+/-- Input for resolving a Lean code action returned by the todo operation. -/
 structure CodeActionResolveInput where
   path : String
   version : Nat

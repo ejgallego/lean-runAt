@@ -40,7 +40,7 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
   Automated wrapper callers use typed commands and final stdout JSON; clients that need structured
   live events use MCP. The wrapper-to-daemon stream remains an internal, library-tested transport.
   Session descriptor schema 4 no longer records or hashes a client executable or a caller-selected
-  port; Beam selects the private daemon endpoint.
+  port; Beam selects the internal loopback endpoint.
 - Wrapper lifecycle commands now use the explicit `serve`, `status`, and `stop` vocabulary;
   `stop` and `recover` require `--root`, alternate selectors use `--session-dir`, and wrapper
   descriptors contain exactly one frozen workspace. Successful lifecycle commands use typed

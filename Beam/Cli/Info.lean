@@ -170,10 +170,7 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
   | .live entry =>
       IO.println "daemon status: live"
       IO.println s!"daemon pid: {entry.pid}"
-      if let some endpoint := Beam.Daemon.registryEndpoint? entry then
-        IO.println s!"daemon endpoint: {Beam.Daemon.endpointSummary endpoint}"
-      else
-        IO.println "daemon endpoint: invalid"
+      IO.println s!"daemon endpoint: {Beam.Daemon.endpointSummary (Beam.Daemon.registryEndpoint entry)}"
       IO.println s!"daemon config hash: {entry.configHash}"
   | .draining entry =>
       IO.println "daemon status: draining"

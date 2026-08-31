@@ -279,6 +279,13 @@ private def checkProjectDaemonWorkspaceRouting : IO Unit := do
   }
   require "selected descriptor workspace should scope cancellation"
     (selectedCancel.workspaceId? == some "selected-workspace")
+  let overwrittenCancel := Beam.Cli.inSelectedDaemonWorkspace selectedClient {
+    op := .cancel
+    workspaceId? := some "caller-selected-workspace"
+    cancelRequestId? := some "request"
+  }
+  require "selected descriptor workspace should replace caller-supplied routing"
+    (overwrittenCancel.workspaceId? == some "selected-workspace")
 
 private def checkClientResponsePresentation : IO Unit := do
   let semantic := Beam.Broker.Response.success Json.null
@@ -615,7 +622,7 @@ private def checkDaemonFailureContext : IO Unit := do
       capability := "test-capability"
       pid := 999999999
       ownerPid := 999999999
-      port? := some 42424
+      port := 42424
       workspace := {
         workspaceId := Beam.Cli.projectDaemonWorkspaceId
         root := root.toString
@@ -747,7 +754,7 @@ private def checkTypedDaemonFailureClassification : IO Unit := do
 
 private def writeTestRegistryEntry
     (root : System.FilePath)
-    (port? : Option Nat := none) : IO Unit := do
+    (port : UInt16 := 42424) : IO Unit := do
   let registryPath ← Beam.Daemon.registryPath root
   if let some parent := registryPath.parent then
     IO.FS.createDirAll parent
@@ -758,7 +765,7 @@ private def writeTestRegistryEntry
     capability := "test-capability"
     pid := 999999999
     ownerPid := 999999999
-    port?
+    port
     workspace := {
       workspaceId := Beam.Cli.projectDaemonWorkspaceId
       root := root.toString
@@ -827,6 +834,25 @@ private def checkTypedRegistryReads : IO Unit := do
 
     let validText ← IO.FS.readFile registryPath
     let validJson ← IO.ofExcept <| Json.parse validText
+    let missingPortJson :=
+      match validJson with
+      | .obj fields => Json.obj (fields.erase "port")
+      | json => json
+    IO.FS.writeFile registryPath missingPortJson.compress
+    match ← Beam.Daemon.readRegistry root with
+    | .malformed detail =>
+        require "missing current endpoint should fail the typed boundary"
+          (detail.contains "invalid registry schema")
+    | state => throw <| IO.userError s!"endpoint-less registry was classified as {state.status}"
+
+    IO.FS.writeFile registryPath <|
+      (validJson.setObjVal! "port" (toJson 65536)).compress
+    match ← Beam.Daemon.readRegistry root with
+    | .malformed detail =>
+        require "out-of-range current endpoint should fail the typed boundary"
+          (detail.contains "invalid registry schema")
+    | state => throw <| IO.userError s!"out-of-range endpoint was classified as {state.status}"
+
     IO.FS.writeFile registryPath <|
       (validJson.setObjVal! "workspace" (Json.mkObj [])).compress
     match ← Beam.Daemon.readRegistry root with
@@ -852,10 +878,10 @@ private def checkBrokerConnectionClosedIncident : IO Unit := do
   try
     IO.FS.createDirAll root
     withClosingBrokerEndpoint fun endpoint => do
-      let port? :=
+      let port :=
         match endpoint with
-        | .tcp port => some port.toNat
-      writeTestRegistryEntry root port?
+        | .tcp port => port
+      writeTestRegistryEntry root port
       let controlDir ← Beam.Daemon.controlDir root
       let msg ← expectIoErrorMessage "broker connection close should surface daemon failure" <|
         Beam.Cli.callBrokerQuiet root (projectDaemonClientForTest endpoint controlDir) { op := .stats }

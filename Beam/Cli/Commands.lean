@@ -220,7 +220,8 @@ private def serveBackend
     (opts : CliOptions)
     (backend : Backend) : IO Unit := do
   let root ← projectRoot opts backend
-  withProjectDaemonOwner home root backend opts fun owner =>
+  withProjectDaemonOwner home root backend
+      (explicitControlDir? := opts.explicitControlDir?) fun owner =>
     runThenHoldUntilInterrupted owner do
       callBrokerQuiet root owner.client {
         op := .ensure, backend := backend, root? := some root.toString

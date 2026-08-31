@@ -7,7 +7,6 @@ Author: Emilio J. Gallego Arias
 import Lean
 import Beam.Broker.Client
 import Beam.Broker.Transport
-import Beam.Cli.Args
 import Beam.Cli.Lock
 import Beam.Cli.Project
 import Beam.Daemon.Debug
@@ -207,7 +206,6 @@ def requestDaemonShutdown
 
 inductive RegistryUnsafeReason where
   | invalidIdentity
-  | invalidEndpoint
   | endpointUnavailable
   | endpointUnrecognized (detail : String)
   | wrongEndpointRoot (daemonRoot : String)
@@ -247,8 +245,7 @@ private def observeProjectRegistryAt
         | return .selectorMismatch entry
       if entry.lifecycle == .draining then
         return .draining entry
-      let some endpoint := registryEndpoint? entry
-        | return .unusable entry .invalidEndpoint
+      let endpoint := registryEndpoint entry
       match ← daemonGenerationStatus endpoint workspace.workspaceId root
           entry.identity entry.capability with
       | .exact => pure <| .live entry
@@ -281,34 +278,6 @@ private def selectPort : IO UInt16 := do
 
 private def selectEndpoint : IO Transport.Endpoint := do
   pure <| .tcp (← selectPort)
-
-private partial def selectUnoccupiedEndpoint
-    (desired : DesiredConfig)
-    (tries : Nat := 10) : IO Transport.Endpoint := do
-  let endpoint ← selectEndpoint
-  let retryOrReject (message : String) : IO Transport.Endpoint := do
-    if tries > 0 then
-      selectUnoccupiedEndpoint desired (tries - 1)
-    else
-      throw <| IO.userError message
-  match ← daemonRootResult endpoint projectDaemonWorkspaceId with
-  | .ok daemonRoot =>
-      retryOrReject <| endpointOccupancyError endpoint
-        (System.FilePath.mk daemonRoot) desired.root
-  | .error failure =>
-      let occupied ←
-        match failure with
-        | .transport _ _ => endpointAcceptsConnection endpoint
-        | .invalidResponse _ | .streamCallback _ | .responseTimeout _ => pure true
-      if !occupied then
-        pure endpoint
-      else
-        let message :=
-          match failure with
-          | .transport _ _ => endpointInUseError endpoint
-          | .invalidResponse _ | .streamCallback _ | .responseTimeout _ =>
-              endpointProtocolError endpoint failure.detail
-        retryOrReject message
 
 private def daemonFailureIncidentRetainCount : Nat :=
   50
@@ -584,9 +553,9 @@ private def registryEntryFor
     (capability : String)
     (pid : Nat)
     (endpoint : Transport.Endpoint) : IO SessionDescriptor := do
-  let port? :=
+  let port :=
     match endpoint with
-    | .tcp port => some port.toNat
+    | .tcp port => port
   let ownerPid ← IO.Process.getPID
   pure {
     schemaVersion := registrySchemaVersion
@@ -595,7 +564,7 @@ private def registryEntryFor
     capability
     pid
     ownerPid := ownerPid.toNat
-    port?
+    port
     workspace := {
       workspaceId := projectDaemonWorkspaceId
       root := desired.root.toString
@@ -614,7 +583,7 @@ private partial def startDaemonEntry
     (desired : DesiredConfig)
     (controlDir : System.FilePath)
     (tries : Nat := 10) : IO (Transport.Endpoint × SessionDescriptor × IO.Process.Child daemonStdio) := do
-  let endpoint ← selectUnoccupiedEndpoint desired
+  let endpoint ← selectEndpoint
   let logPath ← daemonStartupLogPathFor desired.root (some controlDir)
   let daemonId ← newDaemonGenerationId desired.configHash
   let identity : DaemonIdentity := { daemonId, configHash := desired.configHash }
@@ -691,9 +660,8 @@ def ProjectDaemonClient.authorize
 private def projectDaemonClient
     (entry : SessionDescriptor)
     (workspace : WorkspaceBinding)
-    (controlDir : System.FilePath) : IO ProjectDaemonClient := do
-  pure {
-    endpoint := ← Beam.Daemon.endpointFromEntry entry
+    (controlDir : System.FilePath) : ProjectDaemonClient := {
+    endpoint := registryEndpoint entry
     capability := entry.capability
     workspaceId := workspace.workspaceId
     controlDir
@@ -722,7 +690,6 @@ structure SelectedProjectDaemon where
 
 def RegistryUnsafeReason.message : RegistryUnsafeReason → String
   | .invalidIdentity => "registry identity or capability is empty"
-  | .invalidEndpoint => "registry endpoint is invalid"
   | .endpointUnavailable => "the recorded daemon endpoint is unavailable"
   | .endpointUnrecognized detail => s!"the recorded endpoint is not a recognized Beam generation: {detail}"
   | .wrongEndpointRoot daemonRoot => s!"the recorded endpoint serves another root: {daemonRoot}"
@@ -856,15 +823,10 @@ def shutdownRegisteredProjectDaemon
   | .alreadyStopping => pure .alreadyStopping
   | .committed entry =>
       let delivery ←
-        match registryEndpoint? entry with
-        | none =>
-            pure <| ProjectDaemonStopDelivery.failed <|
-              .invalidResponse "draining Beam session descriptor has no valid endpoint"
-        | some endpoint =>
-            match ← requestDaemonShutdown endpoint entry.capability with
-            | .ok (.successResult ..) => pure .acknowledged
-            | .ok (.errorResult failure) => pure <| .rejected failure
-            | .error failure => pure <| .failed failure
+        match ← requestDaemonShutdown (registryEndpoint entry) entry.capability with
+        | .ok (.successResult ..) => pure .acknowledged
+        | .ok (.errorResult failure) => pure <| .rejected failure
+        | .error failure => pure <| .failed failure
       pure <| .stopping delivery
 
 structure RecoveryResult where
@@ -884,8 +846,7 @@ private def registeredGenerationResponds
     (root : System.FilePath)
     (workspace : WorkspaceBinding)
     (entry : SessionDescriptor) : IO Bool := do
-  let some endpoint := registryEndpoint? entry
-    | pure false
+  let endpoint := registryEndpoint entry
   match ← daemonGenerationStatus endpoint workspace.workspaceId root entry.identity entry.capability with
   | .exact => pure true
   | .unavailable | .unrecognized _ | .wrongRoot _ | .wrongGeneration _ => pure false
@@ -1166,9 +1127,9 @@ private def finishOwnedProjectDaemon
 def withProjectDaemonOwner
     (home root : System.FilePath)
     (backend : Backend)
-    (opts : CliOptions)
+    (explicitControlDir? : Option System.FilePath := none)
     (act : ProjectDaemonOwner → IO α) : IO α := do
-  let controlDir ← controlDirFor root opts.explicitControlDir?
+  let controlDir ← controlDirFor root explicitControlDir?
   -- Establish or validate the control boundary before bundle resolution can create project-local
   -- `.beam` state for a previously unseen toolchain.
   preparePrivateControlDir controlDir
@@ -1197,7 +1158,7 @@ private def lookupProjectDaemon
   match ← observeProjectControl root control with
   | .live entry =>
       let workspace ← selectWorkspaceBackend root entry backend?
-      pure { client := ← projectDaemonClient entry workspace control.dir, workspace }
+      pure { client := projectDaemonClient entry workspace control.dir, workspace }
   | .absent =>
       throw <| IO.userError (missingOwnerMessage root control.dir backend?)
   | .draining entry => throw <| IO.userError (drainingOwnerMessage root entry)

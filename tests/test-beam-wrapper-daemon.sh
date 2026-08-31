@@ -92,16 +92,54 @@ expect_slow_request_cancelled() {
 
 stop_hold_process() {
   local require_clean_exit="${1:-false}"
+  local registry_path="${2:-}"
+  local stderr_path="${3:-}"
   if [ -z "$hold_pid" ]; then
     return
   fi
   kill -INT "$hold_pid" > /dev/null 2>&1 || true
-  if ! wait_for_exit "$hold_pid" "serve owner" 200 0.05; then
+  if [ "$require_clean_exit" = "true" ] && [ -n "$registry_path" ]; then
+    local acknowledged="false"
+    local lifecycle=""
+    for _ in $(seq 1 100); do
+      if ! kill -0 "$hold_pid" > /dev/null 2>&1 || [ ! -e "$registry_path" ]; then
+        acknowledged="true"
+        break
+      fi
+      if lifecycle="$(read_json_field "$registry_path" lifecycle 2>/dev/null)" && \
+          [ "$lifecycle" = "draining" ]; then
+        acknowledged="true"
+        break
+      fi
+      sleep 0.05
+    done
+    if [ "$acknowledged" != "true" ]; then
+      echo "expected serve owner to acknowledge SIGINT by entering session teardown" >&2
+      if [ -n "$stderr_path" ] && [ -f "$stderr_path" ]; then
+        cat "$stderr_path" >&2
+      fi
+      if [ -f "$registry_path" ]; then
+        cat "$registry_path" >&2
+      fi
+      kill "$hold_pid" > /dev/null 2>&1 || true
+      wait "$hold_pid" 2>/dev/null || true
+      hold_pid=""
+      return 1
+    fi
+  fi
+  # Owner cleanup allows ten seconds for graceful drain and two seconds for forced reaping.
+  if ! wait_for_exit "$hold_pid" "serve owner" 300 0.05; then
     kill "$hold_pid" > /dev/null 2>&1 || true
     wait "$hold_pid" 2>/dev/null || true
     hold_pid=""
     if [ "$require_clean_exit" = "true" ]; then
-      echo "expected serve owner to exit promptly after SIGINT" >&2
+      echo "expected serve owner to complete its bounded cleanup after SIGINT" >&2
+      if [ -n "$stderr_path" ] && [ -f "$stderr_path" ]; then
+        cat "$stderr_path" >&2
+      fi
+      if [ -n "$registry_path" ] && [ -f "$registry_path" ]; then
+        cat "$registry_path" >&2
+      fi
       return 1
     fi
     return
@@ -1200,7 +1238,7 @@ if [ ! -f "$explicit_control/beam-daemon-startup.log" ]; then
   echo "expected explicit control-directory startup diagnostics beside the descriptor" >&2
   exit 1
 fi
-stop_hold_process true
+stop_hold_process true "$explicit_registry" "$tmp2/explicit-control-owner.err"
 if [ -e "$explicit_registry" ]; then
   echo "expected normal explicit-control teardown to remove its descriptor" >&2
   exit 1

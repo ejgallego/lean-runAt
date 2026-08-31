@@ -34,6 +34,17 @@ instance : FromJson RegistryLifecycle where
     | .str "draining" => .ok .draining
     | json => .error s!"expected registry lifecycle 'live' or 'draining', got {json.compress}"
 
+private instance : ToJson UInt16 where
+  toJson port := toJson port.toNat
+
+private instance : FromJson UInt16 where
+  fromJson? json := do
+    let port ← fromJson? (α := Nat) json
+    if port < UInt16.size then
+      pure port.toUInt16
+    else
+      throw s!"expected TCP port below {UInt16.size}, got {port}"
+
 /-- One statically configured workspace owned by a CLI session. -/
 structure WorkspaceBinding where
   workspaceId : WorkspaceId
@@ -58,7 +69,7 @@ structure SessionDescriptor where
   capability : String
   pid : Nat
   ownerPid : Nat
-  port? : Option Nat := none
+  port : UInt16
   workspace : WorkspaceBinding
   /-- Hash of the complete frozen session configuration. -/
   configHash : String
@@ -85,19 +96,8 @@ structure DesiredConfig where
   configHash : String
   deriving Repr
 
-def natToPort? (n : Nat) : Option UInt16 :=
-  if n < UInt16.size then some n.toUInt16 else none
-
-def registryEndpoint? (entry : SessionDescriptor) : Option Transport.Endpoint := do
-  (natToPort? =<< entry.port?).map Transport.Endpoint.tcp
-
-def endpointFromEntry (entry : SessionDescriptor) : IO Transport.Endpoint := do
-  match registryEndpoint? entry with
-  | some endpoint => pure endpoint
-  | none =>
-      let message :=
-        s!"invalid Beam daemon transport data for session {entry.daemonId} ({entry.workspace.root})"
-      throw (IO.userError message)
+def registryEndpoint (entry : SessionDescriptor) : Transport.Endpoint :=
+  .tcp entry.port
 
 def endpointSummary (endpoint : Transport.Endpoint) : String :=
   Transport.endpointDescription endpoint
@@ -138,18 +138,10 @@ private def daemonProbe
   | .ok resp => pure <| daemonProbeOfResponse resp
   | .error failure => pure <| .error failure
 
-def daemonRootResult
-    (endpoint : Transport.Endpoint)
-    (workspaceId : WorkspaceId) : IO (Except BrokerClientFailure String) := do
-  pure <| (← daemonProbe endpoint workspaceId).map (·.root)
-
 def endpointOccupancyError
     (endpoint : Transport.Endpoint)
     (daemonRoot requestedRoot : System.FilePath) : String :=
   s!"selected endpoint {endpointSummary endpoint} already serves Beam root {daemonRoot}, not {requestedRoot}"
-
-def endpointInUseError (endpoint : Transport.Endpoint) : String :=
-  s!"selected endpoint {endpointSummary endpoint} is already in use"
 
 def endpointGenerationMismatchError
     (endpoint : Transport.Endpoint)

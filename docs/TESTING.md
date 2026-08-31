@@ -113,13 +113,12 @@ Current Beam coverage includes:
 - wrapper coverage through [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh), which reports
   focused probe, runtime, sync/save, handle, and diagnostic slices independently
 - focused daemon lifecycle coverage in [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh),
-  including the no-implicit-start contract, duplicate-owner rejection, Beam and non-Beam endpoint
-  collision safety without cross-project disclosure, authenticated generation probes, mode-`0700`
-  session-directory and mode-`0600` descriptor publication, rejection of symlinked or non-private
+  including the no-implicit-start contract, duplicate-owner rejection, authenticated generation
+  probes, mode-`0700` session-directory and mode-`0600` descriptor publication, rejection of symlinked or non-private
   existing session paths without mutating their targets, stable missing-path canonicalization,
   wrong-root status classification and recovery rejection with
   byte-for-byte descriptor preservation, unauthorized-shutdown rejection without listener teardown, oversized-frame
-  and first-message limits, a bounded identity probe against a silent non-Beam listener, cross-root
+  and first-message limits, cross-root
   unsafe-registry preservation that does not affect the daemon
   serving the other root, configuration-drift preservation of the owner and active request,
   explicit stop, committed-state reporting after shutdown delivery failure, cancellation of requests

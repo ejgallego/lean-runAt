@@ -68,9 +68,7 @@ private def tailLines (text : String) (count : Nat := 20) : String :=
   String.intercalate "\n" <| lines.drop (lines.length - keep)
 
 def registryEndpointSummary (entry : SessionDescriptor) : String :=
-  match registryEndpoint? entry with
-  | some endpoint => endpointSummary endpoint
-  | none => "invalid"
+  endpointSummary (registryEndpoint entry)
 
 def startupLogTail?
     (root : System.FilePath)
