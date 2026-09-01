@@ -308,6 +308,35 @@ fi
 rm -f -- "$tmp1/.beam"
 rmdir "$symlink_control_target"
 
+# A private session directory may already contain diagnostics from an earlier run. Refuse a
+# symlinked startup-log leaf without truncating its target or publishing a session descriptor.
+mkdir -p "$tmp1/.beam"
+chmod 700 "$tmp1/.beam"
+startup_log_target="$tmp2/startup-log-target"
+printf '%s\n' "startup-log-sentinel" > "$startup_log_target"
+ln -s "$startup_log_target" "$tmp1/.beam/beam-daemon-startup.log"
+if "$beam_script" --root "$tmp1" serve \
+    > "$tmp1/symlink-startup-log.out" 2> "$tmp1/symlink-startup-log.err"; then
+  echo "expected a symlinked daemon startup log to be rejected" >&2
+  exit 1
+fi
+if ! grep -Fq "startup log" "$tmp1/symlink-startup-log.err" || \
+    ! grep -Fq "symbolic links are not accepted" "$tmp1/symlink-startup-log.err"; then
+  echo "expected symlinked startup-log rejection to explain the no-follow boundary" >&2
+  cat "$tmp1/symlink-startup-log.err" >&2
+  exit 1
+fi
+if [ "$(cat "$startup_log_target")" != "startup-log-sentinel" ]; then
+  echo "symlinked startup-log rejection changed the target file" >&2
+  exit 1
+fi
+if [ -e "$tmp1/.beam/beam-daemon.json" ]; then
+  echo "symlinked startup-log rejection published a session descriptor" >&2
+  exit 1
+fi
+remove_tmp_tree_within "$tmp1/.beam" "$tmp1"
+rm -f -- "$startup_log_target"
+
 start_owner() {
   local root="$1"
   local label="$2"
@@ -410,6 +439,11 @@ if [ "$registry_mode" != "600" ]; then
   echo "expected the capability-bearing registry to use mode 600, got $registry_mode" >&2
   exit 1
 fi
+startup_log_mode="$(file_mode "$tmp1/.beam/beam-daemon-startup.log")"
+if [ "$startup_log_mode" != "600" ]; then
+  echo "expected the daemon startup log to use mode 600, got $startup_log_mode" >&2
+  exit 1
+fi
 
 cross_root_descriptor="$tmp2/cross-root-recovery.before"
 cp -- "$registry" "$cross_root_descriptor"
@@ -435,7 +469,7 @@ if "$beam_script" --root "$tmp2" --session-dir "$tmp1/.beam" \
   echo "expected recovery through a non-member root to fail closed" >&2
   exit 1
 fi
-if ! grep -Fq "is not a workspace in session $daemon1_id" \
+if ! grep -Fq "is not the workspace in session $daemon1_id" \
     "$tmp2/cross-root-recovery.err" || \
     ! grep -Fq "$tmp1" "$tmp2/cross-root-recovery.err"; then
   echo "expected cross-root recovery rejection to name the session and its recorded root" >&2

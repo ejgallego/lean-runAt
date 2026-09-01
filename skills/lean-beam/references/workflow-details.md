@@ -138,12 +138,14 @@ What is not a valid checkpoint target:
   as one step, especially after saving an upstream dependency
 - treat `lean-beam sync` as the explicit supported boundary between real file edits and Beam daemon
   session state
-- `lean-beam sync` returns ordered machine-readable JSON on stdout with the current diagnostic
-  counts and readiness result
-  and streams human diagnostics on stderr
+- after a completed broker operation, `lean-beam sync` returns ordered machine-readable JSON on
+  stdout with the current diagnostic counts and readiness result and streams human diagnostics on
+  stderr; automated callers must check the process exit status before parsing stdout
 - if imported targets are stale or the Lean worker cannot finish that diagnostics barrier,
   `lean-beam sync` fails; do not treat a failed sync as safe to follow with `lean-beam save`
-- `lean-beam sync` keeps machine-readable JSON on stdout; interactive progress text goes to stderr
+- for completed broker operations, `lean-beam sync` keeps machine-readable JSON on stdout;
+  interactive progress text goes to stderr, while selector, setup, or transport failures may exit
+  nonzero with no JSON
 - every `lean-beam run-at` request is an isolated read-only probe against one on-disk document
   version
 - `lean-beam run-at-handle` is the same style of isolated probe, but asks Lean to retain follow-up

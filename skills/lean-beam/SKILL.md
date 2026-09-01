@@ -326,8 +326,9 @@ Use `lean-beam`, not raw JSON and not raw LSP.
   heartbeat files or lease expiry
 - Beam selects the internal loopback endpoint; callers select sessions by root and optional
   session directory rather than by transport details
-- interrupting or killing the holder closes the owner pipe and shuts down the daemon; explicit
-  `lean-beam --root ROOT stop` releases the holder cleanly
+- interrupting the holder or using `lean-beam --root ROOT stop` performs bounded owner cleanup;
+  killing the holder closes the owner pipe and requests cooperative daemon shutdown, while the
+  session fence remains for explicit recovery
 
 `lean-beam` is more than a one-shot probe:
 

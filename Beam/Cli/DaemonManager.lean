@@ -139,23 +139,27 @@ private def hexDigit (n : Nat) : Char :=
 private def byteHex (byte : UInt8) : List Char :=
   [hexDigit (byte.toNat / 16), hexDigit (byte.toNat % 16)]
 
-private def newRegistryTempPath (control : ProjectControl) : IO System.FilePath := do
+private def newPrivateTempPath
+    (dir : System.FilePath)
+    (stem : String) : IO System.FilePath := do
   let nonce := String.ofList <| (← IO.getRandomBytes 16).toList.flatMap byteHex
-  pure <| control.dir / s!"beam-daemon-{nonce}.tmp"
+  pure <| dir / s!"{stem}-{nonce}.tmp"
 
-private def writeRegistry (control : ProjectControl) (entry : SessionDescriptor) : IO Unit := do
-  let tmp ← newRegistryTempPath control
+/-- Write one private file through a random exclusive inode, then publish it atomically. -/
+private def writePrivateFileAtomically
+    (dir target : System.FilePath)
+    (stem contents : String) : IO Unit := do
+  let tmp ← newPrivateTempPath dir stem
   try
     IO.FS.withFile tmp .writeNew fun handle => do
-      -- The private control directory protects the inode from its creation. The exclusive random
-      -- path also refuses pre-existing files and symlinks; mode 0600 remains defense in depth and
-      -- protects the descriptor after publication if directory permissions later change.
+      -- The private parent protects the inode from its creation. Mode 0600 remains defense in
+      -- depth if parent permissions drift after publication.
       IO.setAccessRights tmp {
         user := { read := true, write := true }
       }
-      handle.putStr ((toJson entry).pretty ++ "\n")
+      handle.putStr contents
       handle.flush
-    IO.FS.rename tmp control.registry
+    IO.FS.rename tmp target
   catch err =>
     try
       if ← tmp.pathExists then
@@ -163,6 +167,10 @@ private def writeRegistry (control : ProjectControl) (entry : SessionDescriptor)
     catch _ =>
       pure ()
     throw err
+
+private def writeRegistry (control : ProjectControl) (entry : SessionDescriptor) : IO Unit := do
+  writePrivateFileAtomically control.dir control.registry "beam-daemon"
+    ((toJson entry).pretty ++ "\n")
 
 private def writeExistingRegistry (control : ProjectControl) (entry : SessionDescriptor) : IO Unit := do
   -- Teardown must not create a path while the project tree is being removed. Rewrite through an
@@ -369,9 +377,7 @@ private def writeDaemonFailureIncident?
       startupLogTail := logTail?.map (fun (_, tail) => tail)
     }
     let path ← daemonFailureIncidentPath root kind observedAt explicitControlDir?
-    let tmp := path.withExtension "tmp"
-    IO.FS.writeFile tmp ((toJson incident).pretty ++ "\n")
-    IO.FS.rename tmp path
+    writePrivateFileAtomically dir path "incident" ((toJson incident).pretty ++ "\n")
     try
       pruneDaemonFailureIncidents root explicitControlDir?
     catch _ =>
@@ -469,9 +475,22 @@ private def startDaemon
     args := args ++ ["--lean-plugin", plugin.toString]
   if let some rocqCmd := desired.rocqCmd? then
     args := args ++ ["--rocq-cmd", rocqCmd]
-  if let some parent := logPath.parent then
-    IO.FS.createDirAll parent
-  IO.FS.writeFile logPath ""
+  let some logDir := logPath.parent
+    | throw <| IO.userError s!"Beam daemon startup log has no parent directory: {logPath}"
+  try
+    let metadata ← logPath.symlinkMetadata
+    match metadata.type with
+    | .file => pure ()
+    | .symlink =>
+        throw <| IO.userError <|
+          s!"unsafe Beam daemon startup log {logPath}: symbolic links are not accepted"
+    | .dir | .other =>
+        throw <| IO.userError <|
+          s!"unsafe Beam daemon startup log {logPath}: expected a regular file"
+  catch
+  | .noFileOrDirectory .. => pure ()
+  | err => throw err
+  writePrivateFileAtomically logDir logPath "beam-daemon-startup" ""
   let cmd := String.intercalate " " ((desired.daemonBin.toString :: args).map shellQuote)
   let shell := s!"exec {cmd} >{shellQuote logPath.toString} 2>&1"
   let child ← IO.Process.spawn {

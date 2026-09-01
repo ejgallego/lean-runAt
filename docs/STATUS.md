@@ -136,8 +136,10 @@ must check the process exit status before parsing stdout. Completed broker opera
 semantic failures, print final JSON; selector, setup, or transport failures can exit nonzero with a
 human-readable stderr diagnostic and no JSON. Clients that require structured live progress,
 diagnostics, and failures should use MCP. Beam does not install a raw generic broker client. A
-wrapper daemon exists only while its foreground `lean-beam serve` owner is alive.
-Attaching requests do not acquire daemon ownership. Broker responses require an explicit top-level
+foreground `lean-beam serve` process owns each wrapper daemon. Normal owner exit tears it down;
+abrupt owner loss closes the ownership pipe, requests cooperative shutdown, and leaves the session
+fenced for explicit recovery without imposing an independent hard shutdown deadline. Attaching
+requests do not acquire daemon ownership. Broker responses require an explicit top-level
 `ok` boolean, giving projection layers an unambiguous
 success/error discriminator. A successful response always includes `result`; response and stream
 envelopes reject undeclared fields, and typed save/close-save results reject incomplete or extended

@@ -50,18 +50,24 @@ beam_fast_stop_owner() {
   fi
   echo "beam-fast cleanup: owner $pid ignored SIGTERM; sending SIGKILL" >&2
   kill -KILL "$pid" 2>/dev/null || true
-  beam_fast_wait_for_owner "$pid" 20 || true
+  if ! beam_fast_wait_for_owner "$pid" 20; then
+    echo "beam-fast cleanup: owner $pid remained visible after SIGKILL" >&2
+    return 1
+  fi
 }
 
 beam_fast_wrapper_cleanup() {
   local control_dir="${wrapper_todo_control_dir:-}"
   local owner_pid="${wrapper_todo_owner_pid:-}"
+  local cleanup_failed="false"
   if [ -n "$control_dir" ]; then
     scripts/lean-beam --root tests/save_olean_project \
       --session-dir "$control_dir" stop > /dev/null 2>&1 || true
   fi
   if [ -n "$owner_pid" ]; then
-    beam_fast_stop_owner "$owner_pid"
+    if ! beam_fast_stop_owner "$owner_pid"; then
+      cleanup_failed="true"
+    fi
   fi
   if [ -n "$control_dir" ]; then
     rm -rf -- "$control_dir"
@@ -86,10 +92,19 @@ beam_fast_wrapper_cleanup() {
   wrapper_todo_err=""
   wrapper_todo_owner_out=""
   wrapper_todo_owner_err=""
+  if [ "$cleanup_failed" = "true" ]; then
+    return 1
+  fi
 }
 beam_fast_cleanup() {
-  beam_fast_wrapper_cleanup
+  local cleanup_failed="false"
+  if ! beam_fast_wrapper_cleanup; then
+    cleanup_failed="true"
+  fi
   rm -rf -- "$beam_fast_state_root"
+  if [ "$cleanup_failed" = "true" ]; then
+    return 1
+  fi
 }
 trap beam_fast_cleanup EXIT
 export BEAM_BUNDLE_DIR="$beam_fast_state_root/bundles"
