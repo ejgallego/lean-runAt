@@ -195,10 +195,12 @@ client protocol.
   marks admitted requests for cancellation, and closes backend sessions and the daemon after those
   requests drain; a backend success that completed before cancellation remains successful. This
   happens without heartbeat timeouts or filesystem leases and works across PID namespaces because
-  authority does not depend on observing persisted PIDs. Endpoint, root, and generation-identity
-  validation are authoritative. Each wrapper request carries a random per-generation capability
-  from a mode-`0600` descriptor inside a mode-`0700` session directory. A paused owner retains the
-  session; a killed owner closes the pipe; explicit
+  authority does not depend on observing persisted PIDs. Ordinary calls select the descriptor and
+  use their capability-bound operation as the definitive endpoint observation; lifecycle and
+  diagnostic commands additionally use bounded root and generation-identity probes. Each wrapper
+  request carries a random per-generation capability from a mode-`0600` descriptor inside a
+  mode-`0700` session directory. A paused owner retains the session; a killed owner closes the pipe;
+  explicit
   `lean-beam --root ROOT stop` changes the descriptor to `draining`, and that fence remains until normal
   owner cleanup has reaped the daemon leader after graceful or process-group teardown. If the daemon
   instead exits abnormally during that drain, Beam restores the exact conservative fence so status

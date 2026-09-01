@@ -2931,15 +2931,9 @@ private def withDaemonResources
 private def emitWrapperReady
     (transport : DaemonTransport)
     (identity : DaemonIdentity) : IO Unit := do
-  let port :=
-    match transport.endpoint with
-    | .tcp port => port.toNat
-  let ready : Beam.Daemon.StartupReady := {
-    port
-    identity
-  }
+  let ready := Beam.Daemon.StartupReady.ofEndpoint transport.endpoint identity
   let stdout ← IO.getStdout
-  stdout.putStrLn (toJson ready).compress
+  stdout.putStrLn ready.encodeLine
   stdout.flush
 
 def main (args : List String) : IO Unit := do

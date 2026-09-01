@@ -430,14 +430,15 @@ stops the listener. There is no heartbeat, lease, or time-based retirement fence
 
 Ordinary wrapper commands never start a daemon or recompute its desired toolchain/bundle
 configuration. Without taking the session mutation lock or creating control files, they select the
-canonical root's frozen workspace binding and require an endpoint that answers for that workspace,
-root, and exact generation. Atomic descriptor publication plus endpoint authentication makes a
-concurrent lifecycle change fail closed. Identity probes have a bounded response deadline. A silent
-or malformed endpoint fails closed. Ordinary lookup is observation-only: absent, legacy, malformed,
-unsupported, draining, unreachable, or otherwise ambiguous descriptor states are never rewritten
-by an attaching command. Persisted PIDs are display-only diagnostics, never probed, signalled, or
-used as automatic stale-reclamation proof. Only the foreground owner may force termination, through
-its retained child handle and process group.
+canonical root's frozen workspace binding, then send their one capability-bound operation. That
+operation is the definitive endpoint observation; ordinary calls do not add a separate identity
+probe. Descriptor selection remains observation-only: absent, legacy, malformed, unsupported, or
+draining states are never rewritten by an attaching command, and connection or protocol failures
+likewise cannot change lifecycle state. Lifecycle and diagnostic commands use bounded authenticated
+identity probes when they need to classify endpoint health or exact generation. Persisted PIDs are
+display-only diagnostics, never probed, signalled, or used as automatic stale-reclamation proof.
+Only the foreground owner may force termination, through its retained child handle and process
+group.
 
 Owner startup delegates endpoint allocation to the OS. The daemon binds loopback port `0`, obtains
 the assigned port, and emits one bounded, typed, versioned readiness message on its private stdout pipe only
@@ -504,8 +505,8 @@ Keep these invariants covered:
   in ambiguous or unsafe state; they attach to frozen owner configuration rather than recomputing it
 - normal holder teardown retains a generation-specific draining fence until owned cleanup completes
   and cannot remove a replacement; abnormal exit leaves the fence for explicit recovery
-- recovery of a current descriptor requires both its exact generation and one of its recorded
-  workspace roots; a wrong-root caller cannot quarantine another session
+- recovery of a current descriptor requires both its exact generation and its recorded workspace
+  root; a wrong-root caller cannot quarantine another session
 - control preparation changes permissions only on a leaf Beam just created; an existing control
   path must be a non-symlinked mode-`0700` directory and rejection leaves it untouched
 - owner EOF, explicit shutdown, and project-root disappearance all close admission before backend

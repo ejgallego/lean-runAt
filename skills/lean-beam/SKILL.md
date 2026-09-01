@@ -320,7 +320,7 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 - `lean-beam prune` previews old installed runtimes; restart active agents and MCP clients before
   any `--apply`, and add `--bundles` when stale installed bundle caches should also be removed
 - wrapper commands talk to the per-project Beam daemon over localhost TCP; they are not direct in-process Lean calls
-- `lean-beam serve` prints a backend-readiness JSON response on stdout and keeps the wrapper
+- `lean-beam serve` prints a running-session JSON response after backend readiness and keeps the wrapper
   process alive as the session owner; an inherited pipe ties daemon lifetime to that process without
   heartbeat files or lease expiry
 - the OS assigns the internal loopback endpoint and the daemon reports it through a private typed

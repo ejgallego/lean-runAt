@@ -111,9 +111,9 @@ lean_exe "beam-sync-result-test" where
   srcDir := "tests/lean"
   root := `BeamTest.Broker.SyncResultTest
 
-lean_exe "beam-daemon-startup-handshake-test" where
+lean_exe "beam-daemon-backend-startup-test" where
   srcDir := "tests/lean"
-  root := `BeamTest.Broker.StartupHandshakeTestMain
+  root := `BeamTest.Broker.BackendStartupTestMain
 
 lean_exe "beam-broker-protocol-test" where
   srcDir := "tests/lean"

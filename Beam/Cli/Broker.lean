@@ -90,7 +90,7 @@ private def awaitBrokerResponseWithInterrupts
     (callbacks : StreamCallbacks := {}) :
     IO (Except BrokerClientFailure Response) := do
   withInterruptWatcher fun interruptWatcher => do
-    let emit := fun msg => IO.eprintln <| annotateRunatMessage visibleClientRequestId? msg
+    let emit := fun msg => IO.eprintln <| annotateRequestMessage visibleClientRequestId? msg
     if let some spec := progressSpec? then
       emit spec.startMsg
     let startedNanos ← IO.monoNanosNow
@@ -361,9 +361,9 @@ def callBrokerWithProgress
   let callbacks : StreamCallbacks := {
     onFileProgress := fun progress => do
       if showProgress then
-        IO.eprintln <| annotateRunatMessage visibleClientRequestId? (spec.progressMsg progress)
+        IO.eprintln <| annotateRequestMessage visibleClientRequestId? (spec.progressMsg progress)
     onDiagnostic := fun diagnostic =>
-      IO.eprintln <| annotateRunatMessage visibleClientRequestId? (formatStreamDiagnostic diagnostic)
+      IO.eprintln <| annotateRequestMessage visibleClientRequestId? (formatStreamDiagnostic diagnostic)
   }
   let progressSpec? := if showProgress then some spec else none
   let resp ← withBrokerErrorContext root client do
@@ -371,17 +371,17 @@ def callBrokerWithProgress
       callbacks
   match responseErrorSummary? spec.action spec.failureBoundary resp with
   | some note =>
-      IO.eprintln <| annotateRunatMessage visibleClientRequestId? note
+      IO.eprintln <| annotateRequestMessage visibleClientRequestId? note
   | none =>
       pure ()
   match responseRecoveryHint? resp with
   | some note =>
-      IO.eprintln <| annotateRunatMessage visibleClientRequestId? note
+      IO.eprintln <| annotateRequestMessage visibleClientRequestId? note
   | none =>
       pure ()
   match spec.responseNote? resp with
   | some note =>
-      IO.eprintln <| annotateRunatMessage visibleClientRequestId? note
+      IO.eprintln <| annotateRequestMessage visibleClientRequestId? note
   | none =>
       pure ()
   maybeEmitLiteralBackslashNewlineHint visibleClientRequestId? req resp

@@ -9,6 +9,7 @@ import Beam.Broker.Protocol
 import Beam.Broker.Readiness
 import Beam.Broker.RequestArgs
 import Beam.Broker.Server
+import Beam.Daemon.Startup
 import Beam.JsonPretty
 import BeamTest.Broker.JsonAssert
 import Lean
@@ -19,6 +20,44 @@ open Beam.Broker
 open BeamTest.Broker.JsonAssert
 
 namespace BeamTest.Broker.ProtocolTest
+
+private def checkDaemonReadinessProtocol : IO Unit := do
+  let identity : DaemonIdentity := {
+    daemonId := "ready-generation"
+    configHash := "ready-config"
+  }
+  let endpoint : Transport.Endpoint := .tcp 43123
+  let ready := Beam.Daemon.StartupReady.ofEndpoint endpoint identity
+  match Beam.Daemon.StartupReady.decodeLine identity ready.encodeLine with
+  | .ok decoded =>
+      unless decoded == endpoint do
+        throw <| IO.userError s!"daemon readiness endpoint mismatch: {reprStr decoded}"
+  | .error err =>
+      throw <| IO.userError s!"valid daemon readiness failed to decode: {err}"
+
+  let wrongIdentity : DaemonIdentity := {
+    daemonId := "other-generation"
+    configHash := identity.configHash
+  }
+  match Beam.Daemon.StartupReady.decodeLine wrongIdentity ready.encodeLine with
+  | .ok _ => throw <| IO.userError "daemon readiness accepted the wrong generation identity"
+  | .error err =>
+      unless err.contains "identity does not match" do
+        throw <| IO.userError s!"unexpected daemon readiness identity error: {err}"
+
+  let unsupported := { ready with schemaVersion := Beam.Daemon.startupReadySchemaVersion + 1 }
+  match Beam.Daemon.StartupReady.decodeLine identity unsupported.encodeLine with
+  | .ok _ => throw <| IO.userError "daemon readiness accepted an unsupported schema"
+  | .error err =>
+      unless err.contains "unsupported Beam daemon readiness schema" do
+        throw <| IO.userError s!"unexpected daemon readiness schema error: {err}"
+
+  let invalidPort := { ready with port := 0 }
+  match Beam.Daemon.StartupReady.decodeLine identity invalidPort.encodeLine with
+  | .ok _ => throw <| IO.userError "daemon readiness accepted port zero"
+  | .error err =>
+      unless err.contains "outside 1-65535" do
+        throw <| IO.userError s!"unexpected daemon readiness port error: {err}"
 
 private def decodeResponse (label : String) (json : Json) : IO Response := do
   match fromJson? json with
@@ -1136,6 +1175,7 @@ private def checkWrapperDaemonAuthorization : IO Unit := do
       IO.FS.removeDirAll base
 
 def main : IO Unit := do
+  checkDaemonReadinessProtocol
   checkResponseJsonShape
   checkStreamMessageDecode
   checkResponseJsonDecode

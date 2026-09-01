@@ -104,8 +104,8 @@ Additional Beam lanes:
 
 Current Beam coverage includes:
 
-- fast Beam daemon smoke, broker stream ordering, save-stream, startup-handshake with failed provisional
-  backend cleanup, tracked-diagnostic dedup,
+- fast Beam daemon smoke, broker stream ordering, save-stream, wrapper-readiness codec checks,
+  backend-startup failure with provisional backend cleanup, tracked-diagnostic dedup,
   exact broker request-handle lifetime, identity-matched daemon-generation probes, terminal shutdown
   response delivery, shutdown after the requesting TCP client resets its connection, protocol tests,
   and validated-toolchain/release-line CI policy consistency through

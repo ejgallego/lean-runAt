@@ -83,10 +83,12 @@ private def updateVersionForRocqGoals
     backend := .rocq
     path? := some path
   }
-  failOnError resp
-  let some result := decodeUpdateFileResult? resp
-    | throw <| IO.userError "update_file returned an invalid response while obtaining document version"
-  pure result.version
+  match decodeUpdateFileResult resp with
+  | .ok result => pure result.version
+  | .error (.broker failure) => throw <| IO.userError failure.error.message
+  | .error (.invalidPayload detail) =>
+      throw <| IO.userError <|
+        s!"update_file returned an invalid result while obtaining document version: {detail}"
 
 private def runLeanRunAt
     (opts : CliOptions)

@@ -95,11 +95,22 @@ wait_for_registry() {
   return 1
 }
 
-assert_no_daemon_failure_incidents() {
-  local label="$1"
-  if find "$control_root" -path '*/daemon-failures/*.json' -print -quit | grep -q .; then
-    echo "expected $label to produce no daemon failure incident" >&2
+assert_dead_endpoint_incident() {
+  local expected_generation="$1"
+  local incident_path
+  local incident_count
+  incident_path="$(find "$control_root" -path '*/daemon-failures/*.json' -print -quit)"
+  incident_count="$(find "$control_root" -path '*/daemon-failures/*.json' -print | wc -l | tr -d '[:space:]')"
+  if [ "$incident_count" != "1" ] || [ -z "$incident_path" ]; then
+    echo "expected exactly one incident from the definitive dead-endpoint request, got $incident_count" >&2
     find "$control_root" -path '*/daemon-failures/*.json' -print -exec sed -n '1,160p' {} \; >&2
+    exit 1
+  fi
+  if [ "$(json_file_text_field "$incident_path" kind)" != "brokerTransportFailure" ] || \
+      [ "$(json_file_text_field "$incident_path" registry.daemonId)" != "$expected_generation" ] || \
+      [ "$(json_file_text_field "$incident_path" registry.capability)" != "<redacted>" ]; then
+    echo "expected the dead-endpoint incident to retain typed, redacted generation context" >&2
+    sed -n '1,160p' "$incident_path" >&2
     exit 1
   fi
 }
@@ -301,8 +312,8 @@ if sandbox_beam stats >"$after_kill_out" 2>"$after_kill_err"; then
   sed -n '1,160p' "$after_kill_out" >&2
   exit 1
 fi
-if ! grep -Fq "recorded daemon endpoint is unavailable" "$after_kill_err"; then
-  echo "expected cross-domain owner loss to fail closed on the unavailable endpoint" >&2
+if ! grep -Fq "Beam daemon connect failed" "$after_kill_err"; then
+  echo "expected the ordinary call itself to report the unavailable endpoint" >&2
   sed -n '1,160p' "$after_kill_err" >&2
   exit 1
 fi
@@ -356,4 +367,4 @@ fi
 owner_pid=""
 
 assert_no_lease_artifacts
-assert_no_daemon_failure_incidents "the explicit sandbox ownership regressions"
+assert_dead_endpoint_incident "$daemon_id_2"

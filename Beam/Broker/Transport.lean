@@ -52,10 +52,14 @@ private inductive ReceiveWaitResult (α : Type) where
   | timedOut
   | interrupted
 
+private inductive ReceiveStop where
+  | timedOut
+  | interrupted
+
 private partial def waitTcpReceivePromise
     (client : TCP.Socket)
     (promise : IO.Promise (Except IO.Error α))
-    (stop : IO (Option (ReceiveWaitResult α)))
+    (stop : IO (Option ReceiveStop))
     (failureMessage : String)
     (pollMs : Nat := 10) : IO (ReceiveWaitResult α) := do
   let resultTask := promise.result?
@@ -70,7 +74,9 @@ private partial def waitTcpReceivePromise
       -- The caller abandons and closes this connection after the bounded wait returns. Cancel the
       -- exact pending UV receive first so no read remains attached to the socket.
       TCP.Socket.cancelRecv client
-      pure stopped
+      pure <| match stopped with
+        | .timedOut => .timedOut
+        | .interrupted => .interrupted
     else
       IO.sleep pollMs.toUInt32
       loop

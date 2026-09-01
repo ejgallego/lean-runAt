@@ -170,10 +170,10 @@ private def checkSilentEndpointProbeTimeout : IO Unit := do
       match ← Beam.Daemon.daemonGenerationStatus endpoint
           Beam.Cli.projectDaemonWorkspaceId (System.FilePath.mk "/tmp") identity
           "test-capability" with
-      | .unrecognized (.responseTimeout timeoutMs) =>
+      | .probeFailed (.responseTimeout timeoutMs) =>
           require "silent endpoint should preserve its typed response timeout"
             (timeoutMs == 2000)
-      | .unrecognized failure =>
+      | .probeFailed failure =>
           throw <| IO.userError s!"silent endpoint reported {repr failure}"
       | status =>
           throw <| IO.userError s!"silent endpoint was classified as {repr status}"
@@ -588,10 +588,13 @@ private def checkDaemonFailureContext : IO Unit := do
       workspace := {
         workspaceId := Beam.Cli.projectDaemonWorkspaceId
         root := root.toString
+        leanCmd? := some "lean --server"
+        plugin? := some "/tmp/beam-plugin"
         toolchain? := some "leanprover/lean4:test"
-        bundleId? := some "bundle-test"
+        bundleId := "bundle-test"
       }
       configHash := "config-test"
+      daemonBin := "/tmp/beam-daemon-test"
       startedAt := "2026-07-02T00:00:00Z"
     }
     IO.FS.writeFile registryPath ((toJson entry).pretty ++ "\n")
@@ -732,10 +735,13 @@ private def writeTestRegistryEntry
     workspace := {
       workspaceId := Beam.Cli.projectDaemonWorkspaceId
       root := root.toString
+      leanCmd? := some "lean --server"
+      plugin? := some "/tmp/beam-plugin"
       toolchain? := some "leanprover/lean4:test"
-      bundleId? := some "bundle-test"
+      bundleId := "bundle-test"
     }
     configHash := "config-test"
+    daemonBin := "/tmp/beam-daemon-test"
     startedAt := "2026-07-05T00:00:00Z"
   }
   IO.FS.writeFile registryPath ((toJson entry).pretty ++ "\n")
@@ -796,10 +802,56 @@ private def checkTypedRegistryReads : IO Unit := do
 
     let validText ← IO.FS.readFile registryPath
     let validJson ← IO.ofExcept <| Json.parse validText
+    let eraseObjectField (json : Json) (field : String) : Json :=
+      match json with
+      | .obj fields => .obj (fields.erase field)
+      | other => other
+    let expectMalformedRegistry (label needle : String) (json : Json) : IO Unit := do
+      IO.FS.writeFile registryPath json.compress
+      match ← Beam.Daemon.readRegistry root with
+      | .invalid (.malformed detail) =>
+          require label (detail.contains needle)
+      | state => throw <| IO.userError s!"{label}: descriptor was classified as {state.status}"
+
+    expectMalformedRegistry "missing daemon binary should fail the typed boundary"
+      "invalid registry schema" (eraseObjectField validJson "daemonBin")
+
+    let workspaceJson ← IO.ofExcept <| validJson.getObjVal? "workspace"
+    expectMalformedRegistry "missing bundle id should fail the typed boundary"
+      "invalid registry schema" <|
+        validJson.setObjVal! "workspace" (eraseObjectField workspaceJson "bundleId")
+    expectMalformedRegistry "partial Lean backend should fail descriptor validation"
+      "must configure the Lean command and plugin together" <|
+        validJson.setObjVal! "workspace" (eraseObjectField workspaceJson "plugin")
+    expectMalformedRegistry "backend-free workspace should fail descriptor validation"
+      "must configure at least one backend" <|
+        validJson.setObjVal! "workspace" <|
+          eraseObjectField (eraseObjectField workspaceJson "leanCmd") "plugin"
+    expectMalformedRegistry "Lean toolchain without Lean backend should fail descriptor validation"
+      "cannot name a Lean toolchain without a Lean backend" <|
+        validJson.setObjVal! "workspace" <|
+          (eraseObjectField (eraseObjectField workspaceJson "leanCmd") "plugin").setObjVal!
+            "rocqCmd" (toJson "coq-lsp")
+    expectMalformedRegistry "empty bundle id should fail descriptor validation"
+      "bundle id must not be empty" <|
+        validJson.setObjVal! "workspace" <| workspaceJson.setObjVal! "bundleId" (toJson "")
+    expectMalformedRegistry "empty daemon binary should fail descriptor validation"
+      "daemon binary must not be empty" <| validJson.setObjVal! "daemonBin" (toJson "")
+    expectMalformedRegistry "empty Lean command should fail descriptor validation"
+      "Lean command must not be empty" <|
+        validJson.setObjVal! "workspace" <| workspaceJson.setObjVal! "leanCmd" (toJson "")
+    expectMalformedRegistry "empty Lean plugin should fail descriptor validation"
+      "Lean plugin must not be empty" <|
+        validJson.setObjVal! "workspace" <| workspaceJson.setObjVal! "plugin" (toJson "")
+    expectMalformedRegistry "empty Rocq command should fail descriptor validation"
+      "Rocq command must not be empty" <|
+        validJson.setObjVal! "workspace" <| workspaceJson.setObjVal! "rocqCmd" (toJson "")
+    expectMalformedRegistry "empty Lean toolchain should fail descriptor validation"
+      "Lean toolchain must not be empty" <|
+        validJson.setObjVal! "workspace" <| workspaceJson.setObjVal! "toolchain" (toJson "")
+
     let missingPortJson :=
-      match validJson with
-      | .obj fields => Json.obj (fields.erase "port")
-      | json => json
+      eraseObjectField validJson "port"
     IO.FS.writeFile registryPath missingPortJson.compress
     match ← Beam.Daemon.readRegistry root with
     | .invalid (.malformed detail) =>
@@ -814,6 +866,9 @@ private def checkTypedRegistryReads : IO Unit := do
         require "out-of-range current endpoint should fail the typed boundary"
           (detail.contains "invalid registry schema")
     | state => throw <| IO.userError s!"out-of-range endpoint was classified as {state.status}"
+
+    expectMalformedRegistry "port zero should fail descriptor validation"
+      "port must be in range 1-65535" <| validJson.setObjVal! "port" (toJson 0)
 
     IO.FS.writeFile registryPath <|
       (validJson.setObjVal! "workspace" (Json.mkObj [])).compress

@@ -91,7 +91,7 @@ def envClientRequestId? : IO (Option String) := do
 def withEnvClientRequestId (req : Request) : IO Request := do
   pure { req with clientRequestId? := req.clientRequestId? <|> (← envClientRequestId?) }
 
-def annotateRunatMessage (clientRequestId? : Option String) (msg : String) : String :=
+def annotateRequestMessage (clientRequestId? : Option String) (msg : String) : String :=
   match clientRequestId? with
   | some clientRequestId =>
       if msg.startsWith "beam:" then
@@ -112,21 +112,28 @@ def maybeEmitTextDebug
   else
     let bytes := text.toUTF8
     let containsLiteralBackslashN := hasSubstring text "\\n"
-    IO.eprintln <| annotateRunatMessage clientRequestId?
+    IO.eprintln <| annotateRequestMessage clientRequestId?
       s!"beam: debug text for {action}: source={source} utf8Bytes={bytes.size} containsNewline={boolText (text.contains '\n')} containsLiteralBackslashN={boolText containsLiteralBackslashN}"
-    IO.eprintln <| annotateRunatMessage clientRequestId?
+    IO.eprintln <| annotateRequestMessage clientRequestId?
       s!"beam: debug text escaped={(Json.str text).compress}"
-    IO.eprintln <| annotateRunatMessage clientRequestId?
+    IO.eprintln <| annotateRequestMessage clientRequestId?
       s!"beam: debug text utf8Hex={utf8Hex bytes}"
 
-/-- Decode the payload of a successful broker response without weakening the response sum. -/
-def decodeResponseResult? [FromJson α] (resp : Response) : Option α :=
+/-- Why a broker response could not be decoded as the expected typed result. -/
+inductive ResponseResultError where
+  | broker (failure : ResponseFailure)
+  | invalidPayload (detail : String)
+
+/-- Decode a broker response while preserving broker failure and malformed-payload distinctions. -/
+def decodeResponseResult [FromJson α] (resp : Response) : Except ResponseResultError α :=
   match resp with
-  | .successResult result _ => fromJson? result |>.toOption
-  | .errorResult _ => none
+  | .successResult result _ =>
+      (fromJson? result).mapError ResponseResultError.invalidPayload
+  | .errorResult failure =>
+      .error <| .broker failure
 
 def decodeRunAtResult? (resp : Response) : Option Beam.LSP.RunAt.Result :=
-  decodeResponseResult? resp
+  (decodeResponseResult resp).toOption
 
 def responseErrorSummary? (action failureBoundary : String) (resp : Response) : Option String :=
   resp.error?.map fun err =>
@@ -191,7 +198,7 @@ def maybeEmitLiteralBackslashNewlineHint
       match req.text?, decodeRunAtResult? resp with
       | some text, some result =>
           if !result.success && hasSubstring text "\\n" && !text.contains '\n' then
-            IO.eprintln <| annotateRunatMessage clientRequestId?
+            IO.eprintln <| annotateRequestMessage clientRequestId?
               "beam: hint: the probe text contains the literal characters '\\n'; if you meant a real newline, use --stdin or --text-file."
           else
             pure ()
@@ -201,10 +208,10 @@ def maybeEmitLiteralBackslashNewlineHint
       pure ()
 
 def decodeSyncFileResult? (resp : Response) : Option SyncFileResult :=
-  decodeResponseResult? resp
+  (decodeResponseResult resp).toOption
 
-def decodeUpdateFileResult? (resp : Response) : Option UpdateFileResult :=
-  decodeResponseResult? resp
+def decodeUpdateFileResult (resp : Response) : Except ResponseResultError UpdateFileResult :=
+  decodeResponseResult resp
 
 def responseFileProgress? (resp : Response) : Option SyncFileProgress :=
   resp.fileProgress?

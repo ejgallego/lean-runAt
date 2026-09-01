@@ -43,6 +43,7 @@ fi
   position_empty_version="$(beam_wrapper_update_version PositionEmptyLine "$beam_script" update PositionEmptyLine.lean)"
   position_utf16_version="$(beam_wrapper_update_version PositionUtf16 "$beam_script" update PositionUtf16.lean)"
   goal_version="$(beam_wrapper_update_version GoalSmoke "$beam_script" update GoalSmoke.lean)"
+  todo_version="$(beam_wrapper_update_version TodoSmoke "$beam_script" update TodoSmoke.lean)"
 
   cmd_err="$(beam_wrapper_mktemp_file progress)"
   cmd_out="$(BEAM_PROGRESS=1 "$beam_script" run-at CommandA.lean "$command_version" 0 2 "#check answerA" 2>"$cmd_err")"
@@ -395,6 +396,14 @@ fi
     printf '%s\n' "$goals_after_out" >&2
     exit 1
   fi
+
+  todo_out="$("$beam_script" todo TodoSmoke.lean "$todo_version" 13 0 14 0 --kind sorry --suggest none)"
+  assert_json_field_equals "wrapper todo" "$todo_out" ok true
+  assert_json_array_len_equals "wrapper todo" "$todo_out" result.items 1
+  assert_json_field_equals "wrapper todo" "$todo_out" result.items.0.kind sorry
+  assert_json_field_equals "wrapper todo" "$todo_out" result.items.0.runAtPosition.line 13
+  assert_json_field_equals "wrapper todo" "$todo_out" result.items.0.runAtPosition.character 2
+  assert_json_field_absent "wrapper todo" "$todo_out" result.items.0.runAtText
 
   stats_out="$("$beam_script" stats)"
   hover_count="$(BEAM_JSON_PAYLOAD="$stats_out" read_json_text_field result.byBackend.lean.ops.hover.count)"

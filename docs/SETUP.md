@@ -226,13 +226,13 @@ lean-beam run-at "Foo.lean" "$version" 10 2 "exact trivial"
 `lean-beam serve` is the only wrapper command that starts a project session. Its
 inherited ownership pipe defines the session lifetime: interrupt the holder, or run
 `lean-beam --root ROOT stop`, to close the daemon and its backend processes. All other wrapper
-commands attach to an existing owner and fail with a recovery command when none
-is live. Attaching commands use the owner's frozen configuration and do not rebuild a competing
-desired configuration. A second owner does resolve its proposed configuration and reports any
-mismatch while preserving the old owner. During stopping the descriptor reports `draining` and a
-replacement owner is refused until owned cleanup completes after graceful or process-group
-teardown and daemon-leader reaping. MCP clients do not need a separate holder; the stdio MCP
-process owns its runtime session.
+commands attach to an existing owner and report the exact `serve` command when no session exists.
+Abnormal fenced state instead reports the explicit recovery command. Attaching commands use the
+owner's frozen configuration and do not rebuild a competing desired configuration. A second owner
+does resolve its proposed configuration and reports any mismatch while preserving the old owner.
+During stopping the descriptor reports `draining` and a replacement owner is refused until owned
+cleanup completes after graceful or process-group teardown and daemon-leader reaping. MCP clients
+do not need a separate holder; the stdio MCP process owns its runtime session.
 
 `lean-beam status` reports the public session state as `absent`, `running`, `stopping`, or
 `recoveryRequired`, together with the resolved workspace and session directory. Human-facing

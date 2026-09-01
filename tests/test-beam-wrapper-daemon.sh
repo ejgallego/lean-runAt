@@ -643,6 +643,24 @@ if ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; 
   echo "cross-root registry rejection must not stop the daemon or owner serving the other root" >&2
   exit 1
 fi
+stale_recovery_before="$(cat "$stale_registry")"
+if "$beam_script" --root "$tmp2" recover --generation "$daemon1_id" \
+    > "$tmp2/authenticated-mismatch-recovery.out" \
+    2> "$tmp2/authenticated-mismatch-recovery.err"; then
+  echo "expected recovery to refuse an authenticated endpoint serving another root" >&2
+  exit 1
+fi
+if ! grep -Fq "authenticated endpoint that serves another root" \
+    "$tmp2/authenticated-mismatch-recovery.err"; then
+  echo "expected authenticated endpoint mismatch recovery to explain the preserved authority" >&2
+  cat "$tmp2/authenticated-mismatch-recovery.err" >&2
+  exit 1
+fi
+if [ "$(cat "$stale_registry")" != "$stale_recovery_before" ] || \
+    ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; then
+  echo "authenticated endpoint mismatch recovery must preserve the descriptor and live session" >&2
+  exit 1
+fi
 rm -f -- "$stale_registry"
 
 LEGACY_REGISTRY="$stale_registry" LEGACY_ROOT="$tmp2" python3 - <<'PY'
@@ -779,8 +797,11 @@ entry = {
     "workspace": {
         "workspaceId": "beam-cli-project",
         "root": os.environ["DELIVERY_ROOT"],
+        "rocqCmd": "coq-lsp",
+        "bundleId": "delivery-fixture",
     },
     "configHash": "delivery-failure-config",
+    "daemonBin": "/fixture/beam-daemon",
     "startedAt": "2026-08-30T00:00:00Z",
 }
 with open(os.environ["DELIVERY_REGISTRY"], "w", encoding="utf-8") as stream:
@@ -1143,8 +1164,8 @@ assert_json_field_equals \
   "owner-loss session status" "$owner_loss_status" result.state recoveryRequired
 assert_json_field_equals \
   "owner-loss session status generation" "$owner_loss_status" result.generation "$owner_loss_generation"
-if ! grep -Fq "recover --generation '$owner_loss_generation'" "$owner_loss_err"; then
-  echo "expected owner-loss diagnostics to name exact-generation recovery" >&2
+if ! grep -Fq "Beam daemon connect failed" "$owner_loss_err"; then
+  echo "expected the ordinary call itself to report the unavailable endpoint" >&2
   cat "$owner_loss_err" >&2
   exit 1
 fi

@@ -107,7 +107,7 @@ def daemonRegistryContext?
           s!"    root: {workspace.root}"
         ] ++
           (optionLine "  toolchain" workspace.toolchain?).toList ++
-          (optionLine "  bundleId" workspace.bundleId?).toList
+          [s!"    bundleId: {workspace.bundleId}"]
         let lines := ([
           s!"Beam daemon registry ({path}):",
           s!"  schemaVersion: {entry.schemaVersion}",
