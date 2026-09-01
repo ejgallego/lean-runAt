@@ -108,54 +108,26 @@ private def holdAcceptedConnection
   finally
     Beam.Broker.Transport.closeConnection conn
 
-private partial def withClosingBrokerEndpoint
-    (act : Beam.Broker.Transport.Endpoint → IO α)
-    (tries : Nat := 20) : IO α := do
-  let stamp ← IO.monoNanosNow
-  let portNat := 30000 + ((stamp + tries) % 20000)
-  let endpoint := Beam.Broker.Transport.Endpoint.tcp portNat.toUInt16
-  let listenerResult ←
-    try
-      pure <| Except.ok (← Beam.Broker.Transport.bindAndListen endpoint 1)
-    catch err =>
-      pure <| Except.error err
-  match listenerResult with
-  | .error err =>
-      if tries == 0 then
-        throw err
-      else
-        withClosingBrokerEndpoint act (tries - 1)
-  | .ok listener =>
-    let acceptTask ← IO.asTask (prio := Task.Priority.dedicated) <| closeAcceptedConnection listener
-    let result ←
-      try
-        pure <| Except.ok (← act endpoint)
-      catch err =>
-        pure <| Except.error err
-    discard <| IO.wait acceptTask
-    match result with
-    | .ok value => pure value
-    | .error err => throw err
-
-private partial def withBrokerListener
+private def withBrokerListener
     (act : Beam.Broker.Transport.Listener → Beam.Broker.Transport.Endpoint → IO α)
-    (tries : Nat := 20) : IO α := do
-  let stamp ← IO.monoNanosNow
-  let portNat := 30000 + ((stamp + tries) % 20000)
-  let endpoint := Beam.Broker.Transport.Endpoint.tcp portNat.toUInt16
-  let listenerResult ←
+    (backlog : UInt32 := 2) : IO α := do
+  let listener ← Beam.Broker.Transport.bindAndListen (.tcp 0) backlog
+  try
+    let endpoint ← Beam.Broker.Transport.listenerEndpoint listener
+    act listener endpoint
+  finally
+    Beam.Broker.Transport.closeListener listener
+
+private def withClosingBrokerEndpoint
+    (act : Beam.Broker.Transport.Endpoint → IO α) : IO α := do
+  withBrokerListener (backlog := 1) fun listener endpoint => do
+    let acceptTask ← IO.asTask (prio := Task.Priority.dedicated) <| closeAcceptedConnection listener
     try
-      pure <| Except.ok (← Beam.Broker.Transport.bindAndListen endpoint 2)
-    catch err =>
-      pure <| Except.error err
-  match listenerResult with
-  | .error err =>
-    if tries == 0 then
-      throw err
-    else
-      withBrokerListener act (tries - 1)
-  | .ok listener =>
-      act listener endpoint
+      act endpoint
+    finally
+      -- Cancel a still-pending accept before joining it when `act` fails before connecting.
+      Beam.Broker.Transport.closeListener listener
+      discard <| IO.wait acceptTask
 
 private def checkSilentEndpointProbeTimeout : IO Unit := do
   withBrokerListener fun listener endpoint => do

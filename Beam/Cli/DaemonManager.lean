@@ -921,12 +921,10 @@ def shutdownRegisteredProjectDaemon
         | .error failure => pure <| .failed failure
       pure <| .stopping delivery
 
-structure RecoveryResult where
-  recovered : Bool
-  generation? : Option String := none
-  quarantinedPath? : Option String := none
-  reason? : Option String := none
-  deriving ToJson
+inductive RecoveryResult where
+  | absent
+  | recoveredGeneration (generation : String) (quarantinedPath : System.FilePath)
+  | recoveredOpaque (quarantinedPath : System.FilePath)
 
 private def quarantineRegistry (control : ProjectControl) : IO System.FilePath := do
   let nonce ← IO.monoNanosNow
@@ -951,11 +949,11 @@ def recoverProjectDaemon
     (explicitControlDir? : Option System.FilePath := none) : IO RecoveryResult := do
   let selected ← projectControl root explicitControlDir?
   if ← sessionDescriptorAbsent selected then
-    return { recovered := false, reason? := some "absent" }
+    return .absent
   withProjectControl root (explicitControlDir? := explicitControlDir?) fun control => do
     match ← readRegistryAt control.registry with
     | .absent =>
-        pure { recovered := false, reason? := some "absent" }
+        pure .absent
     | .current entry =>
         let some generation := generation?
           | throw <| IO.userError
@@ -981,21 +979,13 @@ def recoverProjectDaemon
               s!"generation for {daemonRoot}; recovery preserved the descriptor"
         | .probeFailed _ =>
             let quarantine ← quarantineRegistry control
-            pure {
-              recovered := true
-              generation? := some entry.daemonId
-              quarantinedPath? := some quarantine.toString
-            }
+            pure <| .recoveredGeneration entry.daemonId quarantine
     | .invalid _ =>
         unless forceOpaque do
           throw <| IO.userError
             "opaque legacy, unsupported, or malformed session state requires recover --force"
         let quarantine ← quarantineRegistry control
-        pure {
-          recovered := true
-          quarantinedPath? := some quarantine.toString
-          reason? := some "opaque"
-        }
+        pure <| .recoveredOpaque quarantine
 
 private abbrev detachedDaemonStdio : IO.Process.StdioConfig where
   stdin := .null

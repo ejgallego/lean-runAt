@@ -183,13 +183,26 @@ private def recoverProjectSession (opts : CliOptions) (args : List String) : IO 
         throw <| IO.userError
           "usage: lean-beam --root PATH [--session-dir DIR] recover --generation ID | --force"
   let result ← recoverProjectDaemon root generation? forceOpaque opts.explicitControlDir?
-  printResponse <| Response.success <| toJson ({
-    state := .absent
-    changed := result.recovered
-    generation? := result.generation?
-    quarantinedPath? := result.quarantinedPath?
-    reason? := result.reason?
-  } : SessionRecoveryResult)
+  let result : SessionRecoveryResult :=
+    match result with
+    | .absent => {
+        state := .absent
+        changed := false
+        reason? := some "absent"
+      }
+    | .recoveredGeneration generation quarantinedPath => {
+        state := .absent
+        changed := true
+        generation? := some generation
+        quarantinedPath? := some quarantinedPath.toString
+      }
+    | .recoveredOpaque quarantinedPath => {
+        state := .absent
+        changed := true
+        quarantinedPath? := some quarantinedPath.toString
+        reason? := some "opaque"
+      }
+  printResponse <| Response.success <| toJson result
 
 private def parseBackendName (name : String) : IO Backend := do
   match fromJson? (Json.str name) with

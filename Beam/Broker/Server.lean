@@ -1438,8 +1438,13 @@ private def maxDaemonClients : Nat :=
 private def DaemonTransport.create (endpoint : Transport.Endpoint) : IO DaemonTransport := do
   let stop ← IO.mkRef false
   let listener ← Transport.bindAndListen endpoint 16
-  let endpoint ← Transport.listenerEndpoint listener
-  pure { endpoint, listener, stop, clientPermits := ← ClientPermits.create maxDaemonClients }
+  try
+    let endpoint ← Transport.listenerEndpoint listener
+    let clientPermits ← ClientPermits.create maxDaemonClients
+    pure { endpoint, listener, stop, clientPermits }
+  catch err =>
+    Transport.closeListener listener
+    throw err
 
 private def requestStop (transport : DaemonTransport) : IO Unit := do
   transport.stop.set true
