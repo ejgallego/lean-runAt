@@ -147,7 +147,9 @@ The broker has no default workspace. Every workspace-bound broker request names 
 carries a continuation handle that names one, and daemon startup receives its initial workspace id
 explicitly through `--workspace-id`. The public CLI still manages one daemon per project, but that
 policy stays in `Beam.Cli`: its request adapter supplies a CLI-owned private identifier. That value
-is an implementation detail, not part of the broker protocol. Broker stats and open-document
+is an implementation detail, not part of the broker protocol. Ordinary requests do not repeat the
+workspace root; the root belongs to workspace initialization, and the selected workspace is the
+single source of routing truth. Broker stats and open-document
 requests without an id remain process-wide; stats report `uptimeMs` and the `workspaces` map. Every
 broker request except `cancel` and `shutdown` is tracked even when it has no client request id;
 anonymous requests use an internal admission token so disconnect cancellation cannot affect a later
@@ -323,7 +325,7 @@ internally it coordinates several responsibilities around the LSP process:
 - the CLI owns process identity: project-root detection, bundle selection, registry files,
   endpoint/root/generation validation, explicit session ownership, startup/shutdown, and
   control-directory locks
-- the broker owns request identity: daemon root validation, backend session lifetime, request
+- the broker owns request identity: workspace selection, backend session lifetime, request
   dispatch, cancellation, active-request bookkeeping, transport errors, and the LSP document mirror
 - the LSP server and plugin own Lean/Rocq semantic facts: elaboration, diagnostics, progress,
   goals, runAt execution, direct imports, save readiness, and save artifact generation

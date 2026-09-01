@@ -60,12 +60,11 @@ def main : IO Unit := do
   let broker ← spawnLeanBroker endpoint root
   try
     waitForBrokerReadyForRoot endpoint root
-    discard <| expectOk (← runClient endpoint { op := .ensure, root? := some root.toString })
+    discard <| expectOk (← runClient endpoint { op := .ensure })
 
     writeSaveWarningFile root "-- default warning-only save"
     let (defaultResp, defaultProgress, defaultDiagnostics) ← runClientWithStream endpoint {
       op := .saveOlean
-      root? := some root.toString
       path? := some "SaveSmoke/B.lean"
     }
     let defaultPayload ← expectOk defaultResp
@@ -90,7 +89,6 @@ def main : IO Unit := do
     writeSaveWarningFile root "-- full warning-only save"
     let (fullResp, fullProgress, streamedDiagnostics) ← runClientWithStream endpoint {
       op := .saveOlean
-      root? := some root.toString
       path? := some "SaveSmoke/B.lean"
       diagnosticScope? := some .all
     }
@@ -118,7 +116,6 @@ def main : IO Unit := do
 
     let (repeatResp, repeatProgress, repeatDiagnostics) ← runClientWithStream endpoint {
       op := .saveOlean
-      root? := some root.toString
       path? := some "SaveSmoke/B.lean"
       diagnosticScope? := some .all
     }
@@ -147,7 +144,6 @@ def main : IO Unit := do
     ] ++ "\n"
     let (errorResp, _errorProgress, errorDiagnostics) ← runClientWithStream endpoint {
       op := .saveOlean
-      root? := some root.toString
       path? := some "SaveSmoke/B.lean"
       diagnosticScope? := some .all
     }
@@ -180,7 +176,6 @@ def main : IO Unit := do
     writeSaveWarningFile root "-- full close-save"
     let (closeResp, closeProgress, closeDiagnostics) ← runClientWithStream endpoint {
       op := .close
-      root? := some root.toString
       path? := some "SaveSmoke/B.lean"
       saveArtifacts? := some true
       diagnosticScope? := some .all
@@ -215,7 +210,6 @@ def main : IO Unit := do
     let openDocsPayload ← expectOk <| ← runClient endpoint {
       op := .openDocs
       workspaceId? := some testWorkspaceId
-      root? := some root.toString
     }
     expectNoTrackedLeanDoc openDocsPayload "SaveSmoke/B.lean"
 

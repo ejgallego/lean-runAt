@@ -479,8 +479,6 @@ private def checkProjectRootAmbiguity : IO Unit := do
       IO.FS.removeDirAll root
 
 private def checkLeanOperationRequests : IO Unit := do
-  let root := System.FilePath.mk "/repo"
-  let rootText := root.toString
   let path := "Demo.lean"
 
   let runAtInput : Beam.Lean.RunAtInput := {
@@ -491,13 +489,13 @@ private def checkLeanOperationRequests : IO Unit := do
     text := "exact h"
   }
   requireRequestJson "runAt request should share the Lean operation adapter"
-    (Beam.Cli.leanRunAtRequest root path 12 4 2 "exact h")
-    (runAtInput.toBrokerRequest rootText)
+    (Beam.Cli.leanRunAtRequest path 12 4 2 "exact h")
+    runAtInput.toBrokerRequest
   requireRequestJson "runAt handle request should share the Lean operation adapter"
-    (Beam.Cli.leanRunAtRequest root path 12 4 2 "exact h" (storeHandle := true))
-    (runAtInput.toBrokerRequest rootText (storeHandle := true))
+    (Beam.Cli.leanRunAtRequest path 12 4 2 "exact h" (storeHandle := true))
+    (runAtInput.toBrokerRequest (storeHandle := true))
   expectIoErrorContains "runAt missing text should fail at the CLI boundary"
-    "usage: beam" (Beam.Cli.parseTextArg "lean-run-at Demo.lean 12 4 2" [])
+    "usage: lean-beam" (Beam.Cli.parseTextArg "run-at Demo.lean 12 4 2" [])
 
   let positionInput : Beam.Lean.PositionInput := {
     path
@@ -506,14 +504,14 @@ private def checkLeanOperationRequests : IO Unit := do
     character := 3
   }
   requireRequestJson "hover request should share the Lean operation adapter"
-    (Beam.Cli.leanHoverRequest root path 13 7 3)
-    (positionInput.toHoverBrokerRequest rootText)
+    (Beam.Cli.leanHoverRequest path 13 7 3)
+    positionInput.toHoverBrokerRequest
   requireRequestJson "signature-help request should share the Lean operation adapter"
-    (Beam.Cli.leanSignatureHelpRequest root path 13 7 3)
-    (positionInput.toSignatureHelpBrokerRequest rootText)
+    (Beam.Cli.leanSignatureHelpRequest path 13 7 3)
+    positionInput.toSignatureHelpBrokerRequest
   requireRequestJson "definition request should share the Lean operation adapter"
-    (Beam.Cli.leanDefinitionRequest root path 13 7 3)
-    (positionInput.toDefinitionBrokerRequest rootText)
+    (Beam.Cli.leanDefinitionRequest path 13 7 3)
+    positionInput.toDefinitionBrokerRequest
   let referencesInput : Beam.Lean.ReferencesInput := {
     path
     version := 13
@@ -522,24 +520,24 @@ private def checkLeanOperationRequests : IO Unit := do
     includeDeclaration? := some false
   }
   requireRequestJson "references request should share the Lean operation adapter"
-    (Beam.Cli.leanReferencesRequest root path 13 7 3 false)
-    (referencesInput.toBrokerRequest rootText)
+    (Beam.Cli.leanReferencesRequest path 13 7 3 false)
+    referencesInput.toBrokerRequest
   let documentSymbolsInput : Beam.Lean.DocumentSymbolsInput := {
     path
     version := 13
   }
   requireRequestJson "document-symbols request should share the Lean operation adapter"
-    (Beam.Cli.leanDocumentSymbolsRequest root path 13)
-    (documentSymbolsInput.toBrokerRequest rootText)
+    (Beam.Cli.leanDocumentSymbolsRequest path 13)
+    documentSymbolsInput.toBrokerRequest
   let workspaceSymbolsInput : Beam.Lean.WorkspaceSymbolsInput := {
     query := "Demo"
   }
   requireRequestJson "workspace-symbols request should share the Lean operation adapter"
-    (Beam.Cli.leanWorkspaceSymbolsRequest root "Demo")
-    (workspaceSymbolsInput.toBrokerRequest rootText)
+    (Beam.Cli.leanWorkspaceSymbolsRequest "Demo")
+    workspaceSymbolsInput.toBrokerRequest
   requireRequestJson "goals request should share the Lean operation adapter"
-    (Beam.Cli.leanGoalsRequest root path 13 7 3 .before)
-    (positionInput.toGoalsBrokerRequest rootText .before)
+    (Beam.Cli.leanGoalsRequest path 13 7 3 .before)
+    (positionInput.toGoalsBrokerRequest .before)
 
   let runWithInput : Beam.Lean.RunWithInput := {
     path
@@ -547,42 +545,42 @@ private def checkLeanOperationRequests : IO Unit := do
     text := "simp"
   }
   requireRequestJson "runWith request should share the Lean operation adapter"
-    (Beam.Cli.leanRunWithRequest root path sampleBrokerHandle "simp")
-    (runWithInput.toBrokerRequest rootText)
+    (Beam.Cli.leanRunWithRequest path sampleBrokerHandle "simp")
+    runWithInput.toBrokerRequest
   requireRequestJson "runWith linear request should share the Lean operation adapter"
-    (Beam.Cli.leanRunWithRequest root path sampleBrokerHandle "simp" (linear := true))
-    (runWithInput.toBrokerRequest rootText (linear := true))
+    (Beam.Cli.leanRunWithRequest path sampleBrokerHandle "simp" (linear := true))
+    (runWithInput.toBrokerRequest (linear := true))
   expectIoErrorContains "runWith missing text should fail at the CLI boundary"
-    "usage: beam" (Beam.Cli.parseTextArg "lean-run-with Demo.lean HANDLE" [])
+    "usage: lean-beam" (Beam.Cli.parseTextArg "run-with Demo.lean HANDLE" [])
 
   requireRequestJson "release request should share the Lean operation adapter"
-    (Beam.Cli.leanReleaseRequest root path sampleBrokerHandle)
-    (({ path, handle := sampleBrokerHandle } : Beam.Lean.ReleaseInput).toBrokerRequest rootText)
+    (Beam.Cli.leanReleaseRequest path sampleBrokerHandle)
+    (({ path, handle := sampleBrokerHandle } : Beam.Lean.ReleaseInput).toBrokerRequest)
 
   let pathInput : Beam.Lean.PathInput := { path }
   requireRequestJson "update request should share the Lean operation adapter"
-    (Beam.Cli.leanUpdateRequest root path)
-    (pathInput.toUpdateBrokerRequest rootText)
+    (Beam.Cli.leanUpdateRequest path)
+    pathInput.toUpdateBrokerRequest
   requireRequestJson "close request should share the Lean operation adapter"
-    (Beam.Cli.leanCloseRequest root path)
-    (pathInput.toCloseBrokerRequest rootText)
+    (Beam.Cli.leanCloseRequest path)
+    pathInput.toCloseBrokerRequest
 
   let syncInput : Beam.Lean.SyncInput := { path, diagnosticScope? := some .all }
   let saveInput : Beam.Lean.SaveInput := { path, diagnosticScope? := some .all }
   requireRequestJson "sync request should share the Lean operation adapter"
-    (Beam.Cli.leanSyncRequest root path .all)
-    (syncInput.toSyncBrokerRequest rootText)
+    (Beam.Cli.leanSyncRequest path .all)
+    syncInput.toSyncBrokerRequest
   requireRequestJson "refresh request should share the Lean operation adapter"
-    (Beam.Cli.leanRefreshRequest root path .all)
-    (syncInput.toRefreshBrokerRequest rootText)
+    (Beam.Cli.leanRefreshRequest path .all)
+    syncInput.toRefreshBrokerRequest
   requireRequestJson "save request should share the Lean operation adapter"
-    (Beam.Cli.leanSaveRequest root path .all)
-    (saveInput.toSaveBrokerRequest rootText)
+    (Beam.Cli.leanSaveRequest path .all)
+    saveInput.toSaveBrokerRequest
   requireRequestJson "close-save request should share the Lean operation adapter"
-    (Beam.Cli.leanCloseSaveRequest root path .all)
-    (saveInput.toCloseSaveBrokerRequest rootText)
+    (Beam.Cli.leanCloseSaveRequest path .all)
+    saveInput.toCloseSaveBrokerRequest
 
-  let closeSave := Beam.Cli.leanCloseSaveRequest root path .all
+  let closeSave := Beam.Cli.leanCloseSaveRequest path .all
   require "close-save should use close broker op" (closeSave.op == .close)
   require "close-save should request artifact save" (closeSave.saveArtifacts? == some true)
   require "close-save should preserve diagnostic scope" (closeSave.diagnosticScope? == some .all)
@@ -803,36 +801,36 @@ private def checkTypedRegistryReads : IO Unit := do
 
     IO.FS.writeFile registryPath "{\"daemonId\":\"legacy\"}\n"
     match ← Beam.Daemon.readRegistry root with
-    | .legacy => pure ()
-    | state => throw <| IO.userError s!"legacy registry was classified as {state.status}"
+    | .invalid .missingSchema => pure ()
+    | state => throw <| IO.userError s!"schema-less descriptor was classified as {state.status}"
 
     IO.FS.writeFile registryPath "{\"schemaVersion\":999}\n"
     match ← Beam.Daemon.readRegistry root with
-    | .unsupported 999 => pure ()
+    | .invalid (.unsupportedSchema 999) => pure ()
     | state => throw <| IO.userError s!"unsupported registry was classified as {state.status}"
 
     IO.FS.writeFile registryPath "{\"schemaVersion\":2}\n"
     match ← Beam.Daemon.readRegistry root with
-    | .unsupported 2 => pure ()
+    | .invalid (.unsupportedSchema 2) => pure ()
     | state => throw <| IO.userError s!"superseded multi-workspace registry was classified as {state.status}"
 
     IO.FS.writeFile registryPath "{\"schemaVersion\":\"one\"}\n"
     match ← Beam.Daemon.readRegistry root with
-    | .malformed detail =>
+    | .invalid (.malformed detail) =>
         require "mistyped registry schemaVersion should be malformed"
           (detail.contains "invalid registry schemaVersion")
     | state => throw <| IO.userError s!"mistyped registry version was classified as {state.status}"
 
     IO.FS.writeFile registryPath "{"
     match ← Beam.Daemon.readRegistry root with
-    | .malformed detail =>
+    | .invalid (.malformed detail) =>
         require "malformed registry should preserve parse context" (detail.contains "invalid registry JSON")
     | state => throw <| IO.userError s!"malformed registry was classified as {state.status}"
 
     IO.FS.writeFile registryPath
       ("{\"schemaVersion\":" ++ toString Beam.Daemon.registrySchemaVersion ++ "}\n")
     match ← Beam.Daemon.readRegistry root with
-    | .malformed detail =>
+    | .invalid (.malformed detail) =>
         require "incomplete current registry should preserve schema context"
           (detail.contains "invalid registry schema")
     | state => throw <| IO.userError s!"incomplete registry was classified as {state.status}"
@@ -852,7 +850,7 @@ private def checkTypedRegistryReads : IO Unit := do
       | json => json
     IO.FS.writeFile registryPath missingPortJson.compress
     match ← Beam.Daemon.readRegistry root with
-    | .malformed detail =>
+    | .invalid (.malformed detail) =>
         require "missing current endpoint should fail the typed boundary"
           (detail.contains "invalid registry schema")
     | state => throw <| IO.userError s!"endpoint-less registry was classified as {state.status}"
@@ -860,7 +858,7 @@ private def checkTypedRegistryReads : IO Unit := do
     IO.FS.writeFile registryPath <|
       (validJson.setObjVal! "port" (toJson 65536)).compress
     match ← Beam.Daemon.readRegistry root with
-    | .malformed detail =>
+    | .invalid (.malformed detail) =>
         require "out-of-range current endpoint should fail the typed boundary"
           (detail.contains "invalid registry schema")
     | state => throw <| IO.userError s!"out-of-range endpoint was classified as {state.status}"
@@ -868,7 +866,7 @@ private def checkTypedRegistryReads : IO Unit := do
     IO.FS.writeFile registryPath <|
       (validJson.setObjVal! "workspace" (Json.mkObj [])).compress
     match ← Beam.Daemon.readRegistry root with
-    | .malformed detail =>
+    | .invalid (.malformed detail) =>
         require "incomplete workspace descriptors should fail the typed boundary"
           (detail.contains "invalid registry schema")
     | state => throw <| IO.userError s!"empty workspace descriptor was classified as {state.status}"

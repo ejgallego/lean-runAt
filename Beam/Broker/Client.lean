@@ -53,13 +53,6 @@ instance : Repr BrokerClientFailure where
     | .streamCallback error => s!"BrokerClientFailure.streamCallback {error}"
     | .responseTimeout timeoutMs => s!"BrokerClientFailure.responseTimeout {timeoutMs}"
 
-private def BrokerClientFailure.toIOError : BrokerClientFailure → IO.Error
-  | failure@(.transport ..) => IO.userError failure.detail
-  | .streamCallback error => error
-  | .invalidResponse detail => IO.userError detail
-  | .responseTimeout timeoutMs =>
-      IO.userError s!"Beam daemon response timed out after {timeoutMs} ms"
-
 private def decodeStreamMessage (msg : String) : Except String StreamMessage := do
   match Json.parse msg with
   | .error err => throw s!"invalid Beam daemon response json: {err}"
@@ -160,15 +153,5 @@ partial def sendRequestWithCallbacksResult
         callbacks.onFileProgress progress
     | .diagnostic _ diagnostic =>
         callbacks.onDiagnostic diagnostic
-
-partial def sendRequestWithCallbacks
-    (endpoint : Endpoint)
-    (req : Request)
-    (callbacks : StreamCallbacks := {}) : IO Response := do
-  match ← sendRequestWithCallbacksResult endpoint req callbacks with
-  | .ok response => pure response
-  | .error failure => throw failure.toIOError
-def sendRequest (endpoint : Endpoint) (req : Request) : IO Response :=
-  sendRequestWithCallbacks endpoint req
 
 end Beam.Broker

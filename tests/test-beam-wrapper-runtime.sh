@@ -62,7 +62,7 @@ with open(out_path, "wb") as out, open(err_path, "wb") as err:
             beam_script,
             "--root",
             project_root,
-            "lean-run-at",
+            "run-at",
             "tests/scenario/docs/SlowPoll.lean",
             version,
             "25",
@@ -74,7 +74,7 @@ with open(out_path, "wb") as out, open(err_path, "wb") as err:
         env=env,
     )
     if wait_mode == "stderr":
-        wait_for_stderr("running lean-run-at")
+        wait_for_stderr("running run-at")
     elif wait_mode == "sleep":
         time.sleep(1.0)
     else:
@@ -154,8 +154,8 @@ beam_wrapper_start_owner "$signal_root"
 signal_owner_pid="$beam_wrapper_last_owner_pid"
 (
   cd "$signal_root"
-  slow_version="$(beam_wrapper_update_version "signal SlowPoll" "$beam_script" --root "$signal_root" lean-update tests/scenario/docs/SlowPoll.lean)"
-  command_version="$(beam_wrapper_update_version "signal CommandA" "$beam_script" --root "$signal_root" lean-update tests/scenario/docs/CommandA.lean)"
+  slow_version="$(beam_wrapper_update_version "signal SlowPoll" "$beam_script" --root "$signal_root" update tests/scenario/docs/SlowPoll.lean)"
+  command_version="$(beam_wrapper_update_version "signal CommandA" "$beam_script" --root "$signal_root" update tests/scenario/docs/CommandA.lean)"
 
   interrupt_out="$(beam_wrapper_mktemp_file interrupt-out)"
   interrupt_err="$(beam_wrapper_mktemp_file interrupt-err)"
@@ -166,7 +166,7 @@ signal_owner_pid="$beam_wrapper_last_owner_pid"
     exit 1
   fi
   if [ "$interrupt_status" = "0" ]; then
-    echo "expected wrapper lean-run-at SIGINT path to exit non-zero after broker cancellation" >&2
+    echo "expected wrapper run-at SIGINT path to exit non-zero after broker cancellation" >&2
     cat "$interrupt_out" >&2
     cat "$interrupt_err" >&2
     exit 1
@@ -182,14 +182,14 @@ signal_owner_pid="$beam_wrapper_last_owner_pid"
     exit 1
   fi
   if [ "$interrupt_anon_status" = "0" ]; then
-    echo "expected anonymous wrapper lean-run-at SIGINT path to exit non-zero after broker cancellation" >&2
+    echo "expected anonymous wrapper run-at SIGINT path to exit non-zero after broker cancellation" >&2
     cat "$interrupt_anon_out" >&2
     cat "$interrupt_anon_err" >&2
     exit 1
   fi
   expect_sigint_cancelled "anonymous wrapper SIGINT path" "$interrupt_anon_out" "$interrupt_anon_err" ""
 
-  post_interrupt_hover="$("$beam_script" --root "$signal_root" lean-hover tests/scenario/docs/CommandA.lean "$command_version" 0 4)"
+  post_interrupt_hover="$("$beam_script" --root "$signal_root" hover tests/scenario/docs/CommandA.lean "$command_version" 0 4)"
   if [ "$(BEAM_JSON_PAYLOAD="$post_interrupt_hover" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper SIGINT cancellation to preserve the isolated Beam daemon session" >&2
     printf '%s\n' "$post_interrupt_hover" >&2
@@ -247,7 +247,7 @@ for attempt in range(1, max_attempts + 1):
                 beam_script,
                 "--root",
                 project_root,
-                "lean-run-at",
+                "run-at",
                 "tests/scenario/docs/SlowPoll.lean",
                 slow_version,
                 "25",
@@ -272,7 +272,7 @@ for attempt in range(1, max_attempts + 1):
                 beam_script,
                 "--root",
                 project_root,
-                "lean-hover",
+                "hover",
                 "tests/scenario/docs/CommandA.lean",
                 command_version,
                 "0",
@@ -334,7 +334,7 @@ PY
     exit 1
   fi
   if [ "$interrupt_quiet_status" = "0" ]; then
-    echo "expected non-progress wrapper lean-run-at SIGINT path to exit non-zero after broker cancellation" >&2
+    echo "expected non-progress wrapper run-at SIGINT path to exit non-zero after broker cancellation" >&2
     cat "$interrupt_quiet_out" >&2
     cat "$interrupt_quiet_err" >&2
     exit 1
@@ -351,7 +351,7 @@ PY
     exit 1
   fi
   if [ "$interrupt_quiet_anon_status" = "0" ]; then
-    echo "expected anonymous non-progress wrapper lean-run-at SIGINT path to exit non-zero after broker cancellation" >&2
+    echo "expected anonymous non-progress wrapper run-at SIGINT path to exit non-zero after broker cancellation" >&2
     cat "$interrupt_quiet_anon_out" >&2
     cat "$interrupt_quiet_anon_err" >&2
     exit 1
@@ -368,21 +368,21 @@ beam_wrapper_start_owner "$signal_root"
 signal_owner_pid="$beam_wrapper_last_owner_pid"
 (
   cd "$signal_root"
-  slow_version="$(beam_wrapper_update_version "duplicate SlowPoll" "$beam_script" --root "$signal_root" lean-update tests/scenario/docs/SlowPoll.lean)"
-  command_version="$(beam_wrapper_update_version "duplicate CommandA" "$beam_script" --root "$signal_root" lean-update tests/scenario/docs/CommandA.lean)"
+  slow_version="$(beam_wrapper_update_version "duplicate SlowPoll" "$beam_script" --root "$signal_root" update tests/scenario/docs/SlowPoll.lean)"
+  command_version="$(beam_wrapper_update_version "duplicate CommandA" "$beam_script" --root "$signal_root" update tests/scenario/docs/CommandA.lean)"
 
   duplicate_slow_out="$(beam_wrapper_mktemp_file duplicate-slow-out)"
   duplicate_slow_err="$(beam_wrapper_mktemp_file duplicate-slow-err)"
   duplicate_out="$(beam_wrapper_mktemp_file duplicate-out)"
   duplicate_err="$(beam_wrapper_mktemp_file duplicate-err)"
   BEAM_PROGRESS=1 BEAM_REQUEST_ID=wrapper-duplicate-active \
-    "$beam_script" --root "$signal_root" lean-run-at tests/scenario/docs/SlowPoll.lean "$slow_version" 25 2 "poll_sleep_cmd" \
+    "$beam_script" --root "$signal_root" run-at tests/scenario/docs/SlowPoll.lean "$slow_version" 25 2 "poll_sleep_cmd" \
     >"$duplicate_slow_out" 2>"$duplicate_slow_err" &
   duplicate_slow_pid=$!
   sleep 1
 
   if BEAM_REQUEST_ID=wrapper-duplicate-active \
-      "$beam_script" --root "$signal_root" lean-hover tests/scenario/docs/CommandA.lean "$command_version" 0 4 \
+      "$beam_script" --root "$signal_root" hover tests/scenario/docs/CommandA.lean "$command_version" 0 4 \
       >"$duplicate_out" 2>"$duplicate_err"; then
     echo "expected duplicate active BEAM_REQUEST_ID wrapper request to fail" >&2
     cat "$duplicate_out" >&2

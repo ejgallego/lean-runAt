@@ -30,7 +30,7 @@ private structure Options where
   redact? : Option Bool := none
 
 private def usage : String :=
-  "usage: beam [--root PATH] feedback-report --stdin|--input <path> [--bundle none|dir|zip] [--output-dir <path>] [--no-redact]"
+  "usage: lean-beam [--root PATH] feedback-report --stdin|--input <path> [--bundle none|dir|zip] [--output-dir <path>] [--no-redact]"
 
 private def inputShapeHelp : String :=
   s!"input must be a JSON object with required string fields: {Beam.Feedback.requiredInputFieldsText}"
@@ -113,18 +113,20 @@ private def collectDaemonPayload
       let client := ProjectDaemonClient.ofSessionDescriptor entry controlDir
       let (stats, warnings) ← collectDaemonRequest "stats" client {
         op := .stats
-        root? := some root.toString
       } warnings
       let (openDocs, warnings) ← collectDaemonRequest "open-files" client {
         op := .openDocs
-        root? := some root.toString
       } warnings
       pure (stats, openDocs, warnings)
   | .absent =>
       pure (Json.null, Json.null, warnings.push "no live Beam daemon was available for stats/open-files")
   | .draining _ =>
       pure (Json.null, Json.null, warnings.push "the Beam daemon is draining")
-  | .blocked blocker =>
+  | .selectorMismatch entry =>
+      let controlDir ← Beam.Daemon.controlDirFor root explicitControlDir?
+      pure (Json.null, Json.null, warnings.push <|
+        sessionSelectorMismatchMessage root controlDir entry)
+  | .recoveryRequired blocker =>
       let controlDir ← Beam.Daemon.controlDirFor root explicitControlDir?
       pure (Json.null, Json.null, warnings.push <| blocker.message root controlDir)
 

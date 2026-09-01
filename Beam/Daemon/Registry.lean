@@ -12,29 +12,34 @@ open Lean
 
 namespace Beam.Daemon
 
-/-- Typed result of reading the versioned on-disk daemon registry. -/
+/-- Why a present session descriptor cannot be decoded as the current schema. -/
+inductive RegistryProblem where
+  | missingSchema
+  | unsupportedSchema (schemaVersion : Nat)
+  | malformed (detail : String)
+
+def RegistryProblem.detail : RegistryProblem → String
+  | .missingSchema => "session descriptor has no schemaVersion"
+  | .unsupportedSchema version => s!"unsupported session descriptor schemaVersion {version}"
+  | .malformed detail => detail
+
+/-- Typed result of reading the versioned on-disk session descriptor. -/
 inductive RegistryRead where
   | absent
-  | legacy
-  | unsupported (schemaVersion : Nat)
-  | malformed (detail : String)
+  | invalid (problem : RegistryProblem)
   | current (entry : SessionDescriptor)
 
 def RegistryRead.entry? : RegistryRead → Option SessionDescriptor
   | .current entry => some entry
-  | .absent | .legacy | .unsupported _ | .malformed _ => none
+  | .absent | .invalid _ => none
 
 def RegistryRead.status : RegistryRead → String
   | .absent => "absent"
-  | .legacy => "legacy"
-  | .unsupported _ => "unsupported"
-  | .malformed _ => "malformed"
+  | .invalid _ => "invalid"
   | .current _ => "current"
 
 def RegistryRead.detail? : RegistryRead → Option String
-  | .legacy => some "legacy registry has no schemaVersion"
-  | .unsupported version => some s!"unsupported registry schemaVersion {version}"
-  | .malformed detail => some detail
+  | .invalid problem => some problem.detail
   | .absent | .current _ => none
 
 private def validateWorkspaceBinding (workspace : WorkspaceBinding) : Except String Unit := do
@@ -62,24 +67,24 @@ def readRegistryAt (path : System.FilePath) : IO RegistryRead := do
     let json ←
       match Json.parse text with
       | .ok json => pure json
-      | .error err => return .malformed s!"invalid registry JSON: {err}"
+      | .error err => return .invalid <| .malformed s!"invalid registry JSON: {err}"
     match json.getObjVal? "schemaVersion" with
-    | .error _ => pure .legacy
+    | .error _ => pure <| .invalid .missingSchema
     | .ok schemaJson =>
         let schemaVersion ←
           match fromJson? (α := Nat) schemaJson with
           | .ok schemaVersion => pure schemaVersion
-          | .error err => return .malformed s!"invalid registry schemaVersion: {err}"
+          | .error err => return .invalid <| .malformed s!"invalid registry schemaVersion: {err}"
         unless schemaVersion == registrySchemaVersion do
-          return .unsupported schemaVersion
+          return .invalid <| .unsupportedSchema schemaVersion
         match fromJson? json with
         | .ok entry =>
             match validateSessionDescriptor entry with
             | .ok () => pure <| .current entry
-            | .error err => pure <| .malformed s!"invalid registry schema: {err}"
-        | .error err => pure <| .malformed s!"invalid registry schema: {err}"
+            | .error err => pure <| .invalid <| .malformed s!"invalid registry schema: {err}"
+        | .error err => pure <| .invalid <| .malformed s!"invalid registry schema: {err}"
   catch err =>
-    pure <| .malformed s!"could not read registry: {err}"
+    pure <| .invalid <| .malformed s!"could not read registry: {err}"
 
 def readRegistry (root : System.FilePath) : IO RegistryRead := do
   readRegistryAt (← registryPath root)

@@ -75,7 +75,7 @@ private def sessionDescriptorAbsent (control : ProjectControl) : IO Bool := do
   | .privateDir =>
       match ← readRegistryAt control.registry with
       | .absent => pure true
-      | .legacy | .unsupported _ | .malformed _ | .current _ => pure false
+      | .invalid _ | .current _ => pure false
   | .symlink | .nonPrivate _ | .notDirectory => pure false
 
 /--
@@ -195,7 +195,7 @@ private def removeRegistryGeneration (control : ProjectControl) (entry : Session
   | .current current =>
       if sameRegistryGeneration current entry then
         removeRegistry control
-  | .absent | .legacy | .unsupported _ | .malformed _ => pure ()
+  | .absent | .invalid _ => pure ()
 
 private def daemonShutdownResponseTimeoutMs : Nat :=
   30000
@@ -213,7 +213,6 @@ def requestDaemonShutdown
     responseTimeoutMs (fun _ => pure ())
 
 inductive RegistryUnsafeReason where
-  | invalidIdentity
   | endpointUnavailable
   | endpointUnrecognized (detail : String)
   | wrongEndpointRoot (daemonRoot : String)
@@ -221,43 +220,37 @@ inductive RegistryUnsafeReason where
   deriving BEq, Repr
 
 inductive RegistryBlocker where
-  | legacy
-  | unsupported (schemaVersion : Nat)
-  | malformed (detail : String)
-  | selectorMismatch (entry : SessionDescriptor)
+  | invalid (problem : RegistryProblem)
   | unusable (entry : SessionDescriptor) (reason : RegistryUnsafeReason)
 
 inductive RegistryObservation where
   | absent
   | live (entry : SessionDescriptor)
   | draining (entry : SessionDescriptor)
-  | blocked (blocker : RegistryBlocker)
+  | selectorMismatch (entry : SessionDescriptor)
+  | recoveryRequired (blocker : RegistryBlocker)
 
 private def observeProjectRegistryAt
     (root registry : System.FilePath) : IO RegistryObservation := do
   match ← readRegistryAt registry with
   | .absent => pure .absent
-  | .legacy => pure <| .blocked .legacy
-  | .unsupported schemaVersion => pure <| .blocked (.unsupported schemaVersion)
-  | .malformed detail => pure <| .blocked (.malformed detail)
+  | .invalid problem => pure <| .recoveryRequired (.invalid problem)
   | .current entry =>
-      if entry.daemonId.isEmpty || entry.capability.isEmpty then
-        return .blocked (.unusable entry .invalidIdentity)
       unless ← entry.matchesRoot root do
-        return .blocked (.selectorMismatch entry)
+        return .selectorMismatch entry
       if entry.lifecycle == .draining then
         return .draining entry
       let endpoint := registryEndpoint entry
       match ← daemonGenerationStatus endpoint entry.workspace.workspaceId root
           entry.identity entry.capability with
       | .exact => pure <| .live entry
-      | .unavailable => pure <| .blocked (.unusable entry .endpointUnavailable)
+      | .unavailable => pure <| .recoveryRequired (.unusable entry .endpointUnavailable)
       | .unrecognized failure =>
-          pure <| .blocked (.unusable entry (.endpointUnrecognized failure.detail))
+          pure <| .recoveryRequired (.unusable entry (.endpointUnrecognized failure.detail))
       | .wrongRoot daemonRoot =>
-          pure <| .blocked (.unusable entry (.wrongEndpointRoot daemonRoot))
+          pure <| .recoveryRequired (.unusable entry (.wrongEndpointRoot daemonRoot))
       | .wrongGeneration daemonRoot =>
-          pure <| .blocked (.unusable entry (.wrongGeneration daemonRoot))
+          pure <| .recoveryRequired (.unusable entry (.wrongGeneration daemonRoot))
 
 private def observeProjectControl
     (root : System.FilePath)
@@ -712,7 +705,6 @@ private def validateWorkspaceBackend
         "interrupt its foreground owner and start a session configured for that backend"
 
 def RegistryUnsafeReason.message : RegistryUnsafeReason → String
-  | .invalidIdentity => "registry identity or capability is empty"
   | .endpointUnavailable => "the recorded daemon endpoint is unavailable"
   | .endpointUnrecognized detail => s!"the recorded endpoint is not a recognized Beam generation: {detail}"
   | .wrongEndpointRoot daemonRoot => s!"the recorded endpoint serves another root: {daemonRoot}"
@@ -766,32 +758,23 @@ private def generationRecoveryMessage
 private def registryReadRecoveryMessage
     (root : System.FilePath)
     (sessionDir : System.FilePath)
-    (registryRead : RegistryRead) : String :=
-  registryRecoveryMessage root
-    (registryRead.detail?.getD s!"unexpected registry state '{registryRead.status}'") ++
+    (problem : RegistryProblem) : String :=
+  registryRecoveryMessage root problem.detail ++
     "; opaque state can be quarantined explicitly with:\n" ++
     wrapperSessionCommand root sessionDir .recoverForce
 
 def RegistryBlocker.message
     (root sessionDir : System.FilePath) : RegistryBlocker → String
-  | .legacy => registryReadRecoveryMessage root sessionDir .legacy
-  | .unsupported schemaVersion =>
-      registryReadRecoveryMessage root sessionDir (.unsupported schemaVersion)
-  | .malformed detail => registryReadRecoveryMessage root sessionDir (.malformed detail)
-  | .selectorMismatch entry => sessionSelectorMismatchMessage root sessionDir entry
+  | .invalid problem => registryReadRecoveryMessage root sessionDir problem
   | .unusable entry reason => generationRecoveryMessage root sessionDir entry reason
 
 def RegistryBlocker.statusDetail : RegistryBlocker → String
-  | .legacy => "legacy session descriptor"
-  | .unsupported schemaVersion => s!"unsupported session descriptor schema {schemaVersion}"
-  | .malformed detail => detail
-  | .selectorMismatch entry =>
-      s!"selected workspace does not match recorded workspace {entry.workspace.root}"
+  | .invalid problem => problem.detail
   | .unusable _ reason => reason.message
 
 def RegistryBlocker.generation? : RegistryBlocker → Option String
-  | .selectorMismatch entry | .unusable entry _ => some entry.daemonId
-  | .legacy | .unsupported _ | .malformed _ => none
+  | .unusable entry _ => some entry.daemonId
+  | .invalid _ => none
 
 private inductive RegistryDrainTransition where
   | committed
@@ -810,7 +793,7 @@ private def markRegistryDraining
       else
         writeExistingRegistry control { current with lifecycle := .draining }
         pure .committed
-  | .absent | .legacy | .unsupported _ | .malformed _ => pure .changedUnderfoot
+  | .absent | .invalid _ => pure .changedUnderfoot
 
 private inductive ShutdownPlan where
   | none
@@ -850,7 +833,9 @@ def shutdownRegisteredProjectDaemon
               "Beam session descriptor changed while committing its draining fence; " ++
                 "the shutdown request was not sent"
     | .draining _ => pure ShutdownPlan.alreadyStopping
-    | .blocked blocker =>
+    | .selectorMismatch entry =>
+        throw <| IO.userError <| sessionSelectorMismatchMessage root control.dir entry
+    | .recoveryRequired blocker =>
         throw <| IO.userError <| blocker.message root control.dir
   match plan with
   | .none => pure .absent
@@ -921,7 +906,7 @@ def recoverProjectDaemon
           generation? := some entry.daemonId
           quarantinedPath? := some quarantine.toString
         }
-    | .legacy | .unsupported _ | .malformed _ =>
+    | .invalid _ =>
         unless forceOpaque do
           throw <| IO.userError
             "opaque legacy, unsupported, or malformed session state requires recover --force"
@@ -965,7 +950,7 @@ def ProjectDaemonOwner.registered (owner : ProjectDaemonOwner) : IO Bool := do
   match ← readRegistryAt (owner.client.controlDir / "beam-daemon.json") with
   | .current current =>
       pure (sameRegistryGeneration current owner.entry && current.lifecycle == .live)
-  | .absent | .legacy | .unsupported _ | .malformed _ => pure false
+  | .absent | .invalid _ => pure false
 
 private def missingOwnerCommand : Option Backend → WrapperSessionCommand
   | some .rocq => .serve .rocq
@@ -991,7 +976,9 @@ private def startOwnedProjectDaemon
         throw <| IO.userError
           (configMismatchMessage desired.root control.dir entry desired.configHash backend)
   | .draining entry => throw <| IO.userError (drainingOwnerMessage desired.root entry)
-  | .blocked blocker =>
+  | .selectorMismatch entry =>
+      throw <| IO.userError <| sessionSelectorMismatchMessage desired.root control.dir entry
+  | .recoveryRequired blocker =>
       throw <| IO.userError <| blocker.message desired.root control.dir
   let (entry, child) ← startDaemonEntry desired control.dir
   try
@@ -1101,7 +1088,7 @@ private def restoreOwnedRegistryRecoveryFence
             -- A current `live` descriptor whose endpoint no longer responds projects to the public
             -- `recoveryRequired` state. Restore that conservative fence after a failed drain.
             writeExistingRegistry control { current with lifecycle := .live }
-      | .absent | .legacy | .unsupported _ | .malformed _ => pure ()
+      | .absent | .invalid _ => pure ()
   catch _ =>
     pure ()
 
@@ -1123,7 +1110,7 @@ private def finishOwnedProjectDaemon
     match ← readRegistryAt (controlDir / "beam-daemon.json") with
     | .current current =>
         pure (sameRegistryGeneration current owned.entry && current.lifecycle == .draining)
-    | .absent | .legacy | .unsupported _ | .malformed _ => pure false
+    | .absent | .invalid _ => pure false
   if exitedBeforeOwnerCleanup && !registryWasDraining then
     -- An unexpected daemon exit is not evidence that its complete process tree disappeared. Keep
     -- the exact live generation fenced so observation projects it to recovery-required state.
@@ -1174,7 +1161,9 @@ private def lookupProjectDaemon
   | .absent =>
       throw <| IO.userError (missingOwnerMessage root control.dir backend?)
   | .draining entry => throw <| IO.userError (drainingOwnerMessage root entry)
-  | .blocked blocker =>
+  | .selectorMismatch entry =>
+      throw <| IO.userError <| sessionSelectorMismatchMessage root control.dir entry
+  | .recoveryRequired blocker =>
       throw <| IO.userError <| blocker.message root control.dir
 
 def withProjectDaemon

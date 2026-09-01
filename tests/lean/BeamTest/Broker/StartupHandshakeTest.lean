@@ -100,7 +100,7 @@ private def checkStartupFailure
   let broker ← spawnLeanBrokerWithPlugin endpoint root plugin fakeServer.toString
   try
     waitForBrokerReadyForRoot endpoint root
-    let resp ← runClient endpoint { op := .ensure, root? := some root.toString }
+    let resp ← runClient endpoint { op := .ensure }
     if resp.ok then
       throw <| IO.userError s!"expected startup handshake failure, got success {(toJson resp).compress}"
     let some err := resp.error?

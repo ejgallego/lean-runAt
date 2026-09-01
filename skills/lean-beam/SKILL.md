@@ -80,8 +80,7 @@ Supported command families:
   `lean-beam document-symbols`, `lean-beam workspace-symbols`, `lean-beam goals before`,
   `lean-beam goals after`
 - inspect actionable Lean items in a range: `lean-beam todo`
-- inspect file or daemon state: `lean-beam open-files`, `lean-beam doctor`, `lean-beam stats`,
-  `lean-beam reset-stats`
+- inspect file or daemon state: `lean-beam open-files`, `lean-beam doctor`, `lean-beam stats`
 - produce a local, pasteable bug report card from JSON input: `lean-beam feedback-report`
 - try one isolated speculative Lean snippet: `lean-beam run-at`
 - continue from one exact speculative state: `lean-beam run-at-handle`, `lean-beam run-with`,
@@ -97,8 +96,8 @@ What to treat as the normal agent workflow surface:
   `lean-beam workspace-symbols`, `lean-beam goals`, `lean-beam todo`, `lean-beam run-at`,
   `lean-beam sync`,
   `lean-beam refresh`
-- operational commands: `lean-beam open-files`, `lean-beam doctor`,
-  `lean-beam stats`, `lean-beam reset-stats`, `lean-beam feedback-report`, `lean-beam save`,
+- operational commands: `lean-beam open-files`, `lean-beam doctor`, `lean-beam stats`,
+  `lean-beam feedback-report`, `lean-beam save`,
   `lean-beam close-save`
 - pre-stable support APIs: `lean-beam run-at-handle`, `lean-beam run-with`, `lean-beam run-with-linear`,
   `lean-beam release`, `lean-beam-search`
@@ -316,8 +315,8 @@ Use `lean-beam`, not raw JSON and not raw LSP.
   starting a new `lean-beam serve` owner
 - after abnormal owner/broker exit, preserves the session fence until explicit
   `recover --generation ID`; recovery quarantines metadata and never signals its persisted PIDs
-- `lean-beam --root ROOT stop` requires an explicit root; `lean-beam status`, `lean-beam stats`, and
-  `lean-beam reset-stats` may infer a unique root
+- `lean-beam --root ROOT stop` requires an explicit root; `lean-beam status` and `lean-beam stats`
+  may infer a unique root
 - `lean-beam prune` previews old installed runtimes; restart active agents and MCP clients before
   any `--apply`, and add `--bundles` when stale installed bundle caches should also be removed
 - wrapper commands talk to the per-project Beam daemon over localhost TCP; they are not direct in-process Lean calls

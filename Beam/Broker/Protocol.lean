@@ -53,7 +53,6 @@ inductive Op where
   | listWorkspaces
   | dropWorkspace
   | stats
-  | resetStats
   | shutdown
   deriving Inhabited, BEq, Repr
 
@@ -61,7 +60,7 @@ def Op.all : Array Op := #[
   .ensure, .openDocs, .cancel, .updateFile, .syncFile, .refreshFile, .close, .runAt,
   .hover, .signatureHelp, .definition, .references, .documentSymbols, .workspaceSymbols,
   .codeActionResolve, .saveOlean, .goals, .todo, .runWith, .release, .initWorkspace,
-  .listWorkspaces, .dropWorkspace, .stats, .resetStats, .shutdown
+  .listWorkspaces, .dropWorkspace, .stats, .shutdown
 ]
 
 def Op.key : Op → String
@@ -89,7 +88,6 @@ def Op.key : Op → String
   | .listWorkspaces => "list_workspaces"
   | .dropWorkspace => "drop_workspace"
   | .stats => "stats"
-  | .resetStats => "reset_stats"
   | .shutdown => "shutdown"
 
 instance : ToJson Op where
@@ -121,7 +119,6 @@ instance : FromJson Op where
     | .str "list_workspaces" => .ok .listWorkspaces
     | .str "drop_workspace" => .ok .dropWorkspace
     | .str "stats" => .ok .stats
-    | .str "reset_stats" => .ok .resetStats
     | .str "shutdown" => .ok .shutdown
     | j => .error s!"expected Beam daemon op, got {j.compress}"
 
@@ -250,7 +247,7 @@ inductive WorkspaceScope where
 
 /-- Describe whether a broker operation is process-wide or resolves one workspace. -/
 def Op.workspaceScope : Op → WorkspaceScope
-  | .listWorkspaces | .resetStats | .shutdown => .none
+  | .listWorkspaces | .shutdown => .none
   | .openDocs | .stats => .optional
   | .cancel
   | .ensure | .updateFile | .syncFile | .refreshFile | .close | .runAt | .hover
@@ -264,7 +261,7 @@ def Op.tracksActiveRequest : Op → Bool
   | .ensure | .openDocs | .updateFile | .syncFile | .refreshFile | .close | .runAt | .hover
   | .signatureHelp | .definition | .references | .documentSymbols | .workspaceSymbols
   | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release | .initWorkspace
-  | .listWorkspaces | .dropWorkspace | .stats | .resetStats => true
+  | .listWorkspaces | .dropWorkspace | .stats => true
 
 private def Op.optionalRequestFields (op : Op) : Array String :=
   #["clientRequestId", "daemonCapability"] ++
@@ -272,47 +269,46 @@ private def Op.optionalRequestFields (op : Op) : Array String :=
   | .none => #[]
   | .optional | .required => #["workspaceId"]) ++
   match op with
-  | .ensure => #["root"]
-  | .openDocs | .stats => #["root"]
+  | .ensure | .openDocs | .stats => #[]
   | .cancel => #["cancelRequestId"]
-  | .updateFile => #["root", "path"]
+  | .updateFile => #["path"]
   | .syncFile | .refreshFile =>
-      #["root", "path", "diagnosticScope", "diagnosticsInResult"]
-  | .close => #["root", "path", "diagnosticScope", "saveArtifacts"]
+      #["path", "diagnosticScope", "diagnosticsInResult"]
+  | .close => #["path", "diagnosticScope", "saveArtifacts"]
   | .runAt =>
-      #["root", "path", "version", "line", "character", "text", "storeHandle"]
+      #["path", "version", "line", "character", "text", "storeHandle"]
   | .hover | .signatureHelp | .definition =>
-      #["root", "path", "version", "line", "character"]
+      #["path", "version", "line", "character"]
   | .references =>
-      #["root", "path", "version", "line", "character", "includeDeclaration"]
-  | .documentSymbols => #["root", "path", "version"]
-  | .workspaceSymbols => #["root", "query"]
-  | .codeActionResolve => #["root", "path", "version", "codeAction"]
-  | .saveOlean => #["root", "path", "diagnosticScope"]
+      #["path", "version", "line", "character", "includeDeclaration"]
+  | .documentSymbols => #["path", "version"]
+  | .workspaceSymbols => #["query"]
+  | .codeActionResolve => #["path", "version", "codeAction"]
+  | .saveOlean => #["path", "diagnosticScope"]
   | .goals =>
       #[
-        "root", "path", "version", "line", "character", "text", "mode", "compact",
+        "path", "version", "line", "character", "text", "mode", "compact",
         "ppFormat"
       ]
   | .todo =>
       #[
-        "root", "path", "version", "line", "character", "endLine", "endCharacter", "kinds",
+        "path", "version", "line", "character", "endLine", "endCharacter", "kinds",
         "suggest"
       ]
   | .runWith =>
-      #["root", "path", "text", "storeHandle", "linear", "handle"]
-  | .release => #["root", "path", "handle"]
+      #["path", "text", "storeHandle", "linear", "handle"]
+  | .release => #["path", "handle"]
   | .initWorkspace =>
       #["workspaceMode", "root", "leanCmd", "leanPlugin", "rocqCmd"]
   | .dropWorkspace => #[]
-  | .listWorkspaces | .resetStats | .shutdown => #[]
+  | .listWorkspaces | .shutdown => #[]
 
 private def Op.usesBackend : Op → Bool
   | .ensure | .updateFile | .syncFile | .refreshFile | .close | .runAt | .hover
   | .signatureHelp | .definition | .references | .documentSymbols | .workspaceSymbols
   | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release => true
   | .openDocs | .cancel | .initWorkspace | .listWorkspaces | .dropWorkspace | .stats
-  | .resetStats | .shutdown => false
+  | .shutdown => false
 
 private def optionalJsonField [ToJson α] (name : String) : Option α → List (String × Json)
   | some value => [(name, toJson value)]
@@ -377,8 +373,6 @@ def Request.validateFields (req : Request) : Except String Unit := do
     throw s!"broker op '{req.op.key}' accepts no unrelated fields: {String.intercalate ", " unexpected.toList}"
   if !req.op.usesBackend && req.backend != .lean then
     throw s!"broker op '{req.op.key}' does not select a backend"
-  if (req.op == .stats || req.op == .openDocs) && req.root?.isSome && req.workspaceId?.isNone then
-    throw s!"broker op '{req.op.key}' requires 'workspaceId' when 'root' is present"
 
 private def optionalField? [FromJson α] (j : Json) (field : String) : Except String (Option α) := do
   match j.getObjVal? field with

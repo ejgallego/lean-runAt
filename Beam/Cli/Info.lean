@@ -176,18 +176,14 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
       IO.println "daemon status: draining"
       IO.println s!"daemon generation: {entry.daemonId}"
   | .absent => IO.println "daemon status: absent"
-  | .blocked .legacy => IO.println "daemon status: legacy registry"
-  | .blocked (.unsupported schemaVersion) =>
-      IO.println "daemon status: unsupported registry"
-      IO.println s!"registry schema version: {schemaVersion}"
-  | .blocked (.malformed detail) =>
-      IO.println "daemon status: malformed registry"
-      IO.println s!"registry error: {detail}"
-  | .blocked (.selectorMismatch entry) =>
+  | .selectorMismatch entry =>
       IO.println "daemon status: session selector mismatch"
       IO.println <| sessionSelectorMismatchMessage root
         (← Beam.Daemon.controlDirFor root opts.explicitControlDir?) entry
-  | .blocked (.unusable _ reason) =>
+  | .recoveryRequired (.invalid problem) =>
+      IO.println "daemon status: recovery required"
+      IO.println s!"session descriptor error: {problem.detail}"
+  | .recoveryRequired (.unusable _ reason) =>
       IO.println "daemon status: unsafe"
       IO.println s!"daemon safety error: {reason.message}"
   printDaemonFailureIncidentDoctorInfo root opts.explicitControlDir?
@@ -216,7 +212,7 @@ def printInstallManifest (payloadHash : String) (sourceCommitArg : String)
     (createdWithToolchains : List String) : IO Unit := do
   if createdWithToolchains.isEmpty then
     throw <| IO.userError
-      "usage: beam install-manifest <payload-hash> <source-commit|-> <creation-toolchain...>"
+      "usage: beam-cli install-manifest <payload-hash> <source-commit|-> <creation-toolchain...>"
   printJsonLine (installManifestJson payloadHash (sourceCommitArg? sourceCommitArg)
     createdWithToolchains)
 

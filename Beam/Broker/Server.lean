@@ -438,15 +438,6 @@ private def statsPayload (workspaceId? : Option WorkspaceId := none) : M Json :=
         ("workspaces", Json.mkObj workspaceFields)
       ]
 
-private def resetMetrics (startMonoNanos : Nat) : M Unit := do
-  modify fun state =>
-    let workspaces := state.workspaces.map fun _ workspace => {
-      workspace with
-      leanMetrics := {}
-      rocqMetrics := {}
-    }
-    { state with workspaces, startMonoNanos := startMonoNanos }
-
 private def traceEnabled (envName : String) : IO Bool := do
   match ← IO.getEnv envName with
   | some value => pure (!value.isEmpty && value != "0")
@@ -1357,7 +1348,7 @@ def ServerRuntime.dropWorkspace
   server.runWorkspaceTransition fun state => dropWorkspaceTransition state workspaceId
 
 private def requestRecordsMetrics : Op → Bool
-  | .cancel | .stats | .resetStats | .shutdown | .openDocs | .listWorkspaces => false
+  | .cancel | .stats | .shutdown | .openDocs | .listWorkspaces => false
   | _ => true
 
 private def recordDispatchMetrics
@@ -1484,20 +1475,9 @@ private def validateRequestWorkspace
           s!"request workspace '{explicitWorkspaceId}' does not match handle workspace '{handle.workspaceId}'"
   let workspace? ← server.withState do
     pure <| (← get).workspaces.get? workspaceId
-  let some workspace := workspace?
-    | return .error (responseFailureFor .invalidParams s!"unknown Beam workspace '{workspaceId}'")
-  match req.root? with
-  | none => pure (.ok { toRequest := req, workspaceId })
-  | some rootText =>
-      let requestedRoot ←
-        try
-          resolveRoot (System.FilePath.mk rootText)
-        catch e =>
-          return .error (responseFailureFor .invalidParams e.toString)
-      if requestedRoot != workspace.config.root then
-        return .error <| responseFailureFor .invalidParams
-          s!"Beam workspace '{workspaceId}' serves {workspace.config.root}, not {requestedRoot}"
-      pure (.ok { toRequest := req, workspaceId })
+  unless workspace?.isSome do
+    return .error (responseFailureFor .invalidParams s!"unknown Beam workspace '{workspaceId}'")
+  pure (.ok { toRequest := req, workspaceId })
 
 private def mergeFileProgressIfCurrent
     (server : ServerRuntime)
@@ -2501,12 +2481,6 @@ private def handleRequestIO
       let payload ← server.withState do
         pure <| workspaceListPayload (← get)
       pure <| Response.success payload
-  | .resetStats =>
-      let now ← IO.monoNanosNow
-      let resp ← server.withState do
-        resetMetrics now
-        pure <| Response.success (Json.mkObj [("reset", toJson true)])
-      pure resp
   | .openDocs =>
       match req.workspaceId? with
       | none => pure <| Response.success (← server.withState openDocsPayload)
@@ -2586,7 +2560,7 @@ private def handleRequestIO
           | .todo => runHandler <| handleTodoOp server workspaceReq cancelRef? emitProgress?
           | .runWith => runHandler <| handleRunWithOp server workspaceReq cancelRef? emitProgress?
           | .release => runHandler <| handleReleaseOp server workspaceReq cancelRef? emitProgress?
-          | .openDocs | .stats | .resetStats | .shutdown
+          | .openDocs | .stats | .shutdown
           | .cancel | .initWorkspace | .listWorkspaces | .dropWorkspace =>
               unreachable!
 

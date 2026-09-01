@@ -648,7 +648,7 @@ private def checkRequestArgsBoundary : IO Unit := do
     codeActionResolveRocqUnsupported.codeActionResolveArgs
 
 private def checkWorkspaceRoutingFields : IO Unit := do
-  let processWideOps := #[Op.listWorkspaces, .resetStats, .shutdown]
+  let processWideOps := #[Op.listWorkspaces, .shutdown]
   let optionallyScopedOps := #[Op.openDocs, .stats]
 
   for op in Op.all do
@@ -721,8 +721,8 @@ private def checkWorkspaceRoutingFields : IO Unit := do
   match rootOnlyStats.validateFields with
   | .ok _ => throw <| IO.userError "stats accepted a root without a workspace id"
   | .error err =>
-      require "scoped stats requires an explicit workspace id"
-        (err.contains "workspaceId" && err.contains "root")
+      require "stats rejects caller-selected workspace roots"
+        (err.contains "unrelated" && err.contains "root")
 
   for (label, json, field) in #[
       ("unknown broker field", Json.mkObj [
@@ -1102,23 +1102,23 @@ private def checkWrapperDaemonAuthorization : IO Unit := do
     }
     require "wrapper daemon should admit the exact generation capability" stats.ok
 
-    let wrongRoot ← runtime.dispatchRequest {
+    let callerSelectedRoot ← runtime.dispatchRequest {
       op := .ensure
       workspaceId? := some "fixture"
       root? := some otherRoot.toString
       daemonCapability? := some capability
     }
-    require "authenticated wrapper request should reject another root"
-      (wrongRoot.error?.any fun err =>
-        err.code == "invalidParams" && err.message.contains "serves" &&
-          err.message.contains otherRoot.toString)
+    require "authenticated wrapper request should reject caller-selected roots"
+      (callerSelectedRoot.error?.any fun err =>
+        err.code == "invalidParams" && err.message.contains "unrelated" &&
+          err.message.contains "root")
 
-    let statsAfterWrongRoot ← runtime.dispatchRequest {
+    let statsAfterRejectedRoot ← runtime.dispatchRequest {
       op := .stats
       daemonCapability? := some capability
     }
-    require "wrong-root rejection should preserve the authenticated generation"
-      statsAfterWrongRoot.ok
+    require "rejected root selection should preserve the authenticated generation"
+      statsAfterRejectedRoot.ok
 
     for op in [Op.initWorkspace, .listWorkspaces, .dropWorkspace] do
       let response ← runtime.dispatchRequest {

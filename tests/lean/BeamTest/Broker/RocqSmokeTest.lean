@@ -58,12 +58,10 @@ private def expectSurfacedError (resp : Beam.Broker.Response) : IO Unit := do
 
 private def updateVersion
     (endpoint : Beam.Broker.Endpoint)
-    (root : System.FilePath)
     (path : String) : IO Nat := do
   let resp ← runClient endpoint {
     op := .updateFile
     backend := .rocq
-    root? := some root.toString
     path? := some path
   }
   let result ← requireUpdateFileResult s!"rocq update version for {path}" (← expectOk resp)
@@ -75,23 +73,20 @@ def main : IO Unit := do
   let broker ← spawnRocqBroker endpoint root ((← IO.getEnv "BEAM_ROCQ_CMD").getD "coq-lsp")
   try
     waitForBrokerReadyForRoot endpoint root
-    discard <| expectOk (← runClient endpoint { op := .ensure, backend := .rocq, root? := some root.toString })
-    discard <| expectOk (← runClient endpoint { op := .resetStats })
+    discard <| expectOk (← runClient endpoint { op := .ensure, backend := .rocq })
     let unsupportedSync ← runClient endpoint {
       op := .syncFile
       backend := .rocq
-      root? := some root.toString
       path? := some "Demo.v"
     }
     expectErrCode unsupportedSync "invalidParams"
-    let demoVersion ← updateVersion endpoint root "Demo.v"
-    let semiVersion ← updateVersion endpoint root "Semi.v"
-    let errorVersion ← updateVersion endpoint root "Error.v"
-    let doneVersion ← updateVersion endpoint root "Done.v"
+    let demoVersion ← updateVersion endpoint "Demo.v"
+    let semiVersion ← updateVersion endpoint "Semi.v"
+    let errorVersion ← updateVersion endpoint "Error.v"
+    let doneVersion ← updateVersion endpoint "Done.v"
     let goals ← expectOk <| ← runClient endpoint {
       op := .goals
       backend := .rocq
-      root? := some root.toString
       path? := some "Demo.v"
       version? := some demoVersion
       line? := some 2
@@ -104,7 +99,6 @@ def main : IO Unit := do
     let semiGoals ← expectOk <| ← runClient endpoint {
       op := .goals
       backend := .rocq
-      root? := some root.toString
       path? := some "Semi.v"
       version? := some semiVersion
       line? := some 2
@@ -118,7 +112,6 @@ def main : IO Unit := do
     let errorGoals ← expectOk <| ← runClient endpoint {
       op := .goals
       backend := .rocq
-      root? := some root.toString
       path? := some "Error.v"
       version? := some errorVersion
       line? := some 2
@@ -131,7 +124,6 @@ def main : IO Unit := do
     let errorPayload ← expectOk <| ← runClient endpoint {
       op := .goals
       backend := .rocq
-      root? := some root.toString
       path? := some "Error.v"
       version? := some errorVersion
       line? := some 4
@@ -144,7 +136,6 @@ def main : IO Unit := do
     let zeroGoalResp ← runClient endpoint {
       op := .goals
       backend := .rocq
-      root? := some root.toString
       path? := some "Done.v"
       version? := some doneVersion
       line? := some 3

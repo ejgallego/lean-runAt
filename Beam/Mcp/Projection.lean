@@ -125,14 +125,13 @@ def ToolName.annotations : ToolName → ToolEffectAnnotations
 
 def leanOperationToBrokerRequest
     (operation : Beam.Lean.Operation)
-    (root : String)
     (workspaceId : Beam.Workspace.WorkspaceId)
     (input : Json) : Except String Beam.Broker.Request := do
   let operationInput ←
     match input with
     | .obj fields => pure <| Json.obj (fields.erase "workspace")
     | other => throw s!"Lean operation input must be an object, got {other.compress}"
-  let req ← operation.toBrokerRequest root operationInput
+  let req ← operation.toBrokerRequest operationInput
   pure { req with workspaceId? := some workspaceId }
 
 def beamVersionDescription : String :=

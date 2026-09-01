@@ -57,13 +57,13 @@ Supported command families:
 - inspect goals after an existing sentence: `lean-beam rocq-goals-after`
 - inspect goals before a sentence or after speculative sentence text within that basis:
   `lean-beam rocq-goals-prev`
-- inspect tracked files and daemon state: `lean-beam open-files`, `lean-beam stats`, `lean-beam reset-stats`
+- inspect tracked files and daemon state: `lean-beam open-files`, `lean-beam stats`
 
 What to treat as the current agent workflow surface:
 
 - default command: `lean-beam rocq-goals-after`
 - intermediate-state command: `lean-beam rocq-goals-prev` with extra text when needed
-- operational introspection: `lean-beam open-files`, `lean-beam stats`, `lean-beam reset-stats`
+- operational introspection: `lean-beam open-files`, `lean-beam stats`
 
 Core workflow contract:
 
@@ -103,8 +103,8 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 - in Codex-style sandboxes, Beam daemon startup may still require elevated permissions even when all paths resolve correctly
 - in the same environments, localhost TCP bind/connect for the Beam daemon and client may also require elevated permissions
 - if startup fails with `operation not permitted`, treat that as a sandbox capability problem first, not as a missing install
-- `lean-beam --root ROOT stop` requires an explicit root; `lean-beam status`, `lean-beam stats`, and
-  `lean-beam reset-stats` may infer a unique root
+- `lean-beam --root ROOT stop` requires an explicit root; `lean-beam status` and `lean-beam stats`
+  may infer a unique root
 
 Default rules:
 
@@ -218,7 +218,6 @@ Use:
 ```bash
 lean-beam open-files
 lean-beam stats
-lean-beam reset-stats
 ```
 
 `lean-beam open-files` shows the files currently tracked by the Beam daemon for the current project. For

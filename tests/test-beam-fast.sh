@@ -259,6 +259,12 @@ if [ -n "$source_tree_dirty" ]; then
   assert_output_contains "lean-beam --version" "$lean_beam_version" "source dirty: $source_tree_dirty"
 fi
 
+lean_beam_help="$(scripts/lean-beam --help)"
+assert_output_contains "lean-beam --help" "$lean_beam_help" \
+  "lean-beam [--root PATH] run-at"
+assert_output_omits "lean-beam --help" "$lean_beam_help" "lean-run-at"
+assert_output_omits "lean-beam --help" "$lean_beam_help" "reset-stats"
+
 if scripts/lean-beam feedback --help > /dev/null 2>&1; then
   echo "expected obsolete lean-beam feedback command to be rejected" >&2
   exit 1

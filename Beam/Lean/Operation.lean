@@ -475,11 +475,9 @@ instance : FromJson SaveInput where
 
 def RunAtInput.toBrokerRequest
     (input : RunAtInput)
-    (root : String)
     (storeHandle : Bool := false) : Beam.Broker.Request := {
   op := .runAt
   backend := .lean
-  root? := some root
   path? := some input.path
   version? := some input.version
   line? := some input.line
@@ -488,41 +486,37 @@ def RunAtInput.toBrokerRequest
   storeHandle? := if storeHandle then some true else none
 }
 
-def PositionInput.toHoverBrokerRequest (input : PositionInput) (root : String) : Beam.Broker.Request := {
+def PositionInput.toHoverBrokerRequest (input : PositionInput) : Beam.Broker.Request := {
   op := .hover
   backend := .lean
-  root? := some root
   path? := some input.path
   version? := some input.version
   line? := some input.line
   character? := some input.character
 }
 
-def PositionInput.toSignatureHelpBrokerRequest (input : PositionInput) (root : String) :
+def PositionInput.toSignatureHelpBrokerRequest (input : PositionInput) :
     Beam.Broker.Request := {
   op := .signatureHelp
   backend := .lean
-  root? := some root
   path? := some input.path
   version? := some input.version
   line? := some input.line
   character? := some input.character
 }
 
-def PositionInput.toDefinitionBrokerRequest (input : PositionInput) (root : String) : Beam.Broker.Request := {
+def PositionInput.toDefinitionBrokerRequest (input : PositionInput) : Beam.Broker.Request := {
   op := .definition
   backend := .lean
-  root? := some root
   path? := some input.path
   version? := some input.version
   line? := some input.line
   character? := some input.character
 }
 
-def ReferencesInput.toBrokerRequest (input : ReferencesInput) (root : String) : Beam.Broker.Request := {
+def ReferencesInput.toBrokerRequest (input : ReferencesInput) : Beam.Broker.Request := {
   op := .references
   backend := .lean
-  root? := some root
   path? := some input.path
   version? := some input.version
   line? := some input.line
@@ -530,30 +524,26 @@ def ReferencesInput.toBrokerRequest (input : ReferencesInput) (root : String) : 
   includeDeclaration? := input.includeDeclaration?
 }
 
-def DocumentSymbolsInput.toBrokerRequest (input : DocumentSymbolsInput) (root : String) :
+def DocumentSymbolsInput.toBrokerRequest (input : DocumentSymbolsInput) :
     Beam.Broker.Request := {
   op := .documentSymbols
   backend := .lean
-  root? := some root
   path? := some input.path
   version? := some input.version
 }
 
-def WorkspaceSymbolsInput.toBrokerRequest (input : WorkspaceSymbolsInput) (root : String) :
+def WorkspaceSymbolsInput.toBrokerRequest (input : WorkspaceSymbolsInput) :
     Beam.Broker.Request := {
   op := .workspaceSymbols
   backend := .lean
-  root? := some root
   query? := some input.query
 }
 
 def PositionInput.toGoalsBrokerRequest
     (input : PositionInput)
-    (root : String)
     (mode : Beam.Broker.GoalMode) : Beam.Broker.Request := {
   op := .goals
   backend := .lean
-  root? := some root
   path? := some input.path
   version? := some input.version
   line? := some input.line
@@ -561,10 +551,9 @@ def PositionInput.toGoalsBrokerRequest
   mode? := some mode
 }
 
-def GoalsInput.toBrokerRequest (input : GoalsInput) (root : String) : Beam.Broker.Request := {
+def GoalsInput.toBrokerRequest (input : GoalsInput) : Beam.Broker.Request := {
   op := .goals
   backend := .lean
-  root? := some root
   path? := some input.path
   version? := some input.version
   line? := some input.line
@@ -572,10 +561,9 @@ def GoalsInput.toBrokerRequest (input : GoalsInput) (root : String) : Beam.Broke
   mode? := some input.mode.toBrokerMode
 }
 
-def TodoInput.toBrokerRequest (input : TodoInput) (root : String) : Beam.Broker.Request := {
+def TodoInput.toBrokerRequest (input : TodoInput) : Beam.Broker.Request := {
   op := .todo
   backend := .lean
-  root? := some root
   path? := some input.path
   version? := some input.version
   line? := some input.startLine
@@ -587,11 +575,9 @@ def TodoInput.toBrokerRequest (input : TodoInput) (root : String) : Beam.Broker.
 }
 
 def CodeActionResolveInput.toBrokerRequest
-    (input : CodeActionResolveInput)
-    (root : String) : Beam.Broker.Request := {
+    (input : CodeActionResolveInput) : Beam.Broker.Request := {
   op := .codeActionResolve
   backend := .lean
-  root? := some root
   path? := some input.path
   version? := some input.version
   codeAction? := some input.codeAction
@@ -599,11 +585,9 @@ def CodeActionResolveInput.toBrokerRequest
 
 def RunWithInput.toBrokerRequest
     (input : RunWithInput)
-    (root : String)
     (linear : Bool := false) : Beam.Broker.Request := {
   op := .runWith
   backend := .lean
-  root? := some root
   path? := some input.path
   text? := some input.text
   storeHandle? := some true
@@ -611,58 +595,51 @@ def RunWithInput.toBrokerRequest
   handle? := some input.handle
 }
 
-def ReleaseInput.toBrokerRequest (input : ReleaseInput) (root : String) : Beam.Broker.Request := {
+def ReleaseInput.toBrokerRequest (input : ReleaseInput) : Beam.Broker.Request := {
   op := .release
   backend := .lean
-  root? := some root
   path? := some input.path
   handle? := some input.handle
 }
 
-def PathInput.toCloseBrokerRequest (input : PathInput) (root : String) : Beam.Broker.Request := {
+def PathInput.toCloseBrokerRequest (input : PathInput) : Beam.Broker.Request := {
   op := .close
   backend := .lean
-  root? := some root
   path? := some input.path
 }
 
-def PathInput.toUpdateBrokerRequest (input : PathInput) (root : String) : Beam.Broker.Request := {
+def PathInput.toUpdateBrokerRequest (input : PathInput) : Beam.Broker.Request := {
   op := .updateFile
   backend := .lean
-  root? := some root
   path? := some input.path
 }
 
-def SyncInput.toSyncBrokerRequest (input : SyncInput) (root : String) : Beam.Broker.Request := {
+def SyncInput.toSyncBrokerRequest (input : SyncInput) : Beam.Broker.Request := {
   op := .syncFile
   backend := .lean
-  root? := some root
   path? := some input.path
   diagnosticScope? := input.diagnosticScope?
   diagnosticsInResult? := input.diagnosticsInResult?
 }
 
-def SyncInput.toRefreshBrokerRequest (input : SyncInput) (root : String) : Beam.Broker.Request := {
+def SyncInput.toRefreshBrokerRequest (input : SyncInput) : Beam.Broker.Request := {
   op := .refreshFile
   backend := .lean
-  root? := some root
   path? := some input.path
   diagnosticScope? := input.diagnosticScope?
   diagnosticsInResult? := input.diagnosticsInResult?
 }
 
-def SaveInput.toSaveBrokerRequest (input : SaveInput) (root : String) : Beam.Broker.Request := {
+def SaveInput.toSaveBrokerRequest (input : SaveInput) : Beam.Broker.Request := {
   op := .saveOlean
   backend := .lean
-  root? := some root
   path? := some input.path
   diagnosticScope? := input.diagnosticScope?
 }
 
-def SaveInput.toCloseSaveBrokerRequest (input : SaveInput) (root : String) : Beam.Broker.Request := {
+def SaveInput.toCloseSaveBrokerRequest (input : SaveInput) : Beam.Broker.Request := {
   op := .close
   backend := .lean
-  root? := some root
   path? := some input.path
   saveArtifacts? := some true
   diagnosticScope? := input.diagnosticScope?
@@ -670,49 +647,48 @@ def SaveInput.toCloseSaveBrokerRequest (input : SaveInput) (root : String) : Bea
 
 def Operation.toBrokerRequest
     (op : Operation)
-    (root : String)
     (input : Json) : Except String Beam.Broker.Request := do
   op.validateInputFields input
   match op with
   | .runAt =>
-      pure <| (← fromJson? (α := RunAtInput) input).toBrokerRequest root
+      pure <| (← fromJson? (α := RunAtInput) input).toBrokerRequest
   | .runAtHandle =>
-      pure <| (← fromJson? (α := RunAtInput) input).toBrokerRequest root (storeHandle := true)
+      pure <| (← fromJson? (α := RunAtInput) input).toBrokerRequest (storeHandle := true)
   | .hover =>
-      pure <| (← fromJson? (α := PositionInput) input).toHoverBrokerRequest root
+      pure <| (← fromJson? (α := PositionInput) input).toHoverBrokerRequest
   | .signatureHelp =>
-      pure <| (← fromJson? (α := PositionInput) input).toSignatureHelpBrokerRequest root
+      pure <| (← fromJson? (α := PositionInput) input).toSignatureHelpBrokerRequest
   | .definition =>
-      pure <| (← fromJson? (α := PositionInput) input).toDefinitionBrokerRequest root
+      pure <| (← fromJson? (α := PositionInput) input).toDefinitionBrokerRequest
   | .references =>
-      pure <| (← fromJson? (α := ReferencesInput) input).toBrokerRequest root
+      pure <| (← fromJson? (α := ReferencesInput) input).toBrokerRequest
   | .documentSymbols =>
-      pure <| (← fromJson? (α := DocumentSymbolsInput) input).toBrokerRequest root
+      pure <| (← fromJson? (α := DocumentSymbolsInput) input).toBrokerRequest
   | .workspaceSymbols =>
-      pure <| (← fromJson? (α := WorkspaceSymbolsInput) input).toBrokerRequest root
+      pure <| (← fromJson? (α := WorkspaceSymbolsInput) input).toBrokerRequest
   | .goals =>
-      pure <| (← fromJson? (α := GoalsInput) input).toBrokerRequest root
+      pure <| (← fromJson? (α := GoalsInput) input).toBrokerRequest
   | .todo =>
-      pure <| (← fromJson? (α := TodoInput) input).toBrokerRequest root
+      pure <| (← fromJson? (α := TodoInput) input).toBrokerRequest
   | .codeActionResolve =>
-      pure <| (← fromJson? (α := CodeActionResolveInput) input).toBrokerRequest root
+      pure <| (← fromJson? (α := CodeActionResolveInput) input).toBrokerRequest
   | .runWith =>
-      pure <| (← fromJson? (α := RunWithInput) input).toBrokerRequest root
+      pure <| (← fromJson? (α := RunWithInput) input).toBrokerRequest
   | .runWithLinear =>
-      pure <| (← fromJson? (α := RunWithInput) input).toBrokerRequest root (linear := true)
+      pure <| (← fromJson? (α := RunWithInput) input).toBrokerRequest (linear := true)
   | .release =>
-      pure <| (← fromJson? (α := ReleaseInput) input).toBrokerRequest root
+      pure <| (← fromJson? (α := ReleaseInput) input).toBrokerRequest
   | .update =>
-      pure <| (← fromJson? (α := PathInput) input).toUpdateBrokerRequest root
+      pure <| (← fromJson? (α := PathInput) input).toUpdateBrokerRequest
   | .sync =>
-      pure <| (← fromJson? (α := SyncInput) input).toSyncBrokerRequest root
+      pure <| (← fromJson? (α := SyncInput) input).toSyncBrokerRequest
   | .refresh =>
-      pure <| (← fromJson? (α := SyncInput) input).toRefreshBrokerRequest root
+      pure <| (← fromJson? (α := SyncInput) input).toRefreshBrokerRequest
   | .save =>
-      pure <| (← fromJson? (α := SaveInput) input).toSaveBrokerRequest root
+      pure <| (← fromJson? (α := SaveInput) input).toSaveBrokerRequest
   | .closeSave =>
-      pure <| (← fromJson? (α := SaveInput) input).toCloseSaveBrokerRequest root
+      pure <| (← fromJson? (α := SaveInput) input).toCloseSaveBrokerRequest
   | .close =>
-      pure <| (← fromJson? (α := PathInput) input).toCloseBrokerRequest root
+      pure <| (← fromJson? (α := PathInput) input).toCloseBrokerRequest
 
 end Beam.Lean

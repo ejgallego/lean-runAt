@@ -203,7 +203,7 @@ What is not a valid checkpoint target:
 - the final stdout JSON echoes it as `clientRequestId`
 - streamed stderr progress/diagnostic lines are annotated as `beam[<id>]: ...`
 - a second live request using the same id is rejected with `invalidParams`
-- `beam cancel <id>` cancels an in-flight broker request by that `clientRequestId`
+- `lean-beam cancel <id>` cancels an in-flight broker request by that `clientRequestId`
 - when `BEAM_REQUEST_ID` is set, `Ctrl-C` asks the broker to cancel that request before the local
   CLI exits
 
@@ -354,7 +354,6 @@ Use:
 ```bash
 lean-beam open-files
 lean-beam stats
-lean-beam reset-stats
 ```
 
 `lean-beam open-files` shows the files currently tracked by the Beam daemon for the current project,

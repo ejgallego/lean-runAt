@@ -202,7 +202,7 @@ a failed run.
 [tests/test-beam-save-olean.sh](../tests/test-beam-save-olean.sh) includes a save-race case
 that injects a slow Lean command into `SaveSmoke/B.lean`. The command writes
 `LEAN_BEAM_SAVE_RACE_SENTINEL` when elaboration reaches the intended race window, then sleeps long
-enough for the shell test to edit the source file while `lean-close-save` is still in flight.
+enough for the shell test to edit the source file while `close-save` is still in flight.
 
 If the sentinel is not written before `BEAM_SAVE_RACE_SENTINEL_TIMEOUT` (default 60 seconds), the
 test now dumps the active save PID, runner CPU/platform context, Beam/Lean process snapshot, current

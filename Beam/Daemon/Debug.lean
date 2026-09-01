@@ -98,13 +98,8 @@ def daemonRegistryContext?
     let path ← registryPathFor root explicitControlDir?
     match ← readRegistryAt path with
     | .absent => pure none
-    | .legacy =>
-        pure <| some s!"Beam daemon registry ({path}):\n  status: legacy\n  detail: legacy registry has no schemaVersion"
-    | .unsupported schemaVersion =>
-        let detail := (RegistryRead.unsupported schemaVersion).detail?.getD "unsupported registry"
-        pure <| some s!"Beam daemon registry ({path}):\n  status: unsupported\n  detail: {detail}"
-    | .malformed detail =>
-        pure <| some s!"Beam daemon registry ({path}):\n  status: malformed\n  detail: {detail}"
+    | .invalid problem =>
+        pure <| some s!"Beam daemon registry ({path}):\n  status: invalid\n  detail: {problem.detail}"
     | .current entry =>
         let workspace := entry.workspace
         let workspaceLines := [

@@ -123,8 +123,9 @@ private def sendBrokerCancellation
   }
   try
     let req ← withEnvClientRequestId cancelReq
-    let resp ← sendRequest client.endpoint (client.sealRequest req)
-    pure <| decodeCancelAcknowledged? resp
+    match ← sendRequestWithCallbacksResult client.endpoint (client.sealRequest req) with
+    | .ok resp => pure <| decodeCancelAcknowledged? resp
+    | .error _ => pure none
   catch _ =>
     pure none
 
@@ -253,7 +254,7 @@ private def syncLikeWaitSpec
     failureBoundary := "before a complete diagnostics barrier was available"
   }
 
-def syncWaitSpec (path : String) (action : String := "lean-sync") : BrokerWaitSpec :=
+def syncWaitSpec (path : String) (action : String := "sync") : BrokerWaitSpec :=
   syncLikeWaitSpec
     (action := action)
     (path := path)
@@ -262,7 +263,7 @@ def syncWaitSpec (path : String) (action : String := "lean-sync") : BrokerWaitSp
     (stillWaitingLabel := "syncing")
     (completeLabel := "sync")
 
-def refreshWaitSpec (path : String) (action : String := "lean-refresh") : BrokerWaitSpec :=
+def refreshWaitSpec (path : String) (action : String := "refresh") : BrokerWaitSpec :=
   syncLikeWaitSpec
     (action := action)
     (path := path)
@@ -301,31 +302,31 @@ private def leanPositionNavigationWaitSpec
     failureBoundary := s!"before {noun} data was available"
   }
 
-def leanHoverWaitSpec (path : String) (line character : Nat) (action : String := "lean-hover") :
+def leanHoverWaitSpec (path : String) (line character : Nat) (action : String := "hover") :
     BrokerWaitSpec :=
   leanPositionNavigationWaitSpec path line character action "hover" "hover"
 
 def leanDefinitionWaitSpec
     (path : String)
     (line character : Nat)
-    (action : String := "lean-definition") : BrokerWaitSpec :=
+    (action : String := "definition") : BrokerWaitSpec :=
   leanPositionNavigationWaitSpec path line character action "definition" "definition"
 
 def leanSignatureHelpWaitSpec
     (path : String)
     (line character : Nat)
-    (action : String := "lean-signature-help") : BrokerWaitSpec :=
+    (action : String := "signature-help") : BrokerWaitSpec :=
   leanPositionNavigationWaitSpec path line character action "signature-help" "signature help"
 
 def leanReferencesWaitSpec
     (path : String)
     (line character : Nat)
-    (action : String := "lean-references") : BrokerWaitSpec :=
+    (action : String := "references") : BrokerWaitSpec :=
   leanPositionNavigationWaitSpec path line character action "references" "reference"
 
 def leanDocumentSymbolsWaitSpec
     (path : String)
-    (action : String := "lean-document-symbols") : BrokerWaitSpec :=
+    (action : String := "document-symbols") : BrokerWaitSpec :=
   {
     action := action
     startMsg := s!"beam: querying {action} for {path} and waiting for a ready Lean snapshot"
@@ -339,7 +340,7 @@ def leanDocumentSymbolsWaitSpec
 
 def leanWorkspaceSymbolsWaitSpec
     (query : String)
-    (action : String := "lean-workspace-symbols") : BrokerWaitSpec :=
+    (action : String := "workspace-symbols") : BrokerWaitSpec :=
   {
     action := action
     startMsg := s!"beam: querying {action} for {query}"
@@ -359,7 +360,7 @@ def leanGoalsWaitSpec
   let action :=
     action?.getD <|
       match mode with
-      | .before | .after => "lean-goals"
+      | .before | .after => "goals"
   {
     action := action
     startMsg := s!"beam: running {action} on {pos} and waiting for a ready Lean snapshot"
@@ -374,7 +375,7 @@ def leanGoalsWaitSpec
 def leanTodoWaitSpec
     (path : String)
     (startLine startCharacter endLine endCharacter : Nat)
-    (action : String := "lean-todo") : BrokerWaitSpec :=
+    (action : String := "todo") : BrokerWaitSpec :=
   let pos := s!"{path}:{startLine}:{startCharacter}-{endLine}:{endCharacter}"
   {
     action := action
@@ -391,7 +392,7 @@ def leanRunWithWaitSpec
     (path : String)
     (linear : Bool := false)
     (action? : Option String := none) : BrokerWaitSpec :=
-  let action := action?.getD <| if linear then "lean-run-with-linear" else "lean-run-with"
+  let action := action?.getD <| if linear then "run-with-linear" else "run-with"
   {
     action := action
     startMsg := s!"beam: running {action} on {path} and waiting for a ready Lean snapshot"
@@ -408,7 +409,7 @@ def leanSaveWaitSpec
     (path : String)
     (closeAfter : Bool := false)
     (action? : Option String := none) : BrokerWaitSpec :=
-  let action := action?.getD <| if closeAfter then "lean-close-save" else "lean-save"
+  let action := action?.getD <| if closeAfter then "close-save" else "save"
   let verb := if closeAfter then "closing and saving" else "saving"
   {
     action := action

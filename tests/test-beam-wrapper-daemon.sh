@@ -50,12 +50,12 @@ start_slow_request() {
   local request_id="$3"
   local version
   version="$(beam_wrapper_update_version "$label SlowPoll" \
-    "$beam_script" --root "$root" lean-update tests/scenario/docs/SlowPoll.lean)"
+    "$beam_script" --root "$root" update tests/scenario/docs/SlowPoll.lean)"
   BEAM_PROGRESS=1 BEAM_REQUEST_ID="$request_id" "$beam_script" --root "$root" \
-    lean-run-at tests/scenario/docs/SlowPoll.lean "$version" 25 2 poll_sleep_cmd \
+    run-at tests/scenario/docs/SlowPoll.lean "$version" 25 2 poll_sleep_cmd \
     >"$root/$label.out" 2>"$root/$label.err" &
   active_request_pid="$!"
-  if ! wait_for_file_text "$root/$label.err" "running lean-run-at" \
+  if ! wait_for_file_text "$root/$label.err" "running run-at" \
       "$label request progress" 150 0.1; then
     cat "$root/$label.out" >&2
     cat "$root/$label.err" >&2
@@ -667,17 +667,17 @@ legacy_owner_out="$tmp2/legacy-owner.out"
 legacy_owner_err="$tmp2/legacy-owner.err"
 if "$beam_script" --root "$tmp2" serve \
     > "$legacy_owner_out" 2> "$legacy_owner_err"; then
-  echo "expected owner startup to reject a schema-less legacy registry" >&2
+  echo "expected owner startup to reject a schema-less session descriptor" >&2
   cat "$legacy_owner_out" >&2
   exit 1
 fi
-if ! grep -Fq "legacy registry has no schemaVersion" "$legacy_owner_err"; then
-  echo "expected legacy-registry rejection to explain the unsupported schema" >&2
+if ! grep -Fq "session descriptor has no schemaVersion" "$legacy_owner_err"; then
+  echo "expected schema-less descriptor rejection to explain the missing schema" >&2
   cat "$legacy_owner_err" >&2
   exit 1
 fi
 if [ "$(cat "$stale_registry")" != "$legacy_before" ]; then
-  echo "legacy-registry rejection must preserve the recovery evidence" >&2
+  echo "schema-less descriptor rejection must preserve the recovery evidence" >&2
   cat "$stale_registry" >&2
   exit 1
 fi
