@@ -144,29 +144,6 @@ private def daemonProbe
   | .ok resp => pure <| daemonProbeOfResponse resp
   | .error failure => pure <| .error failure
 
-def endpointOccupancyError
-    (endpoint : Transport.Endpoint)
-    (daemonRoot requestedRoot : System.FilePath) : String :=
-  s!"selected endpoint {endpointSummary endpoint} already serves Beam root {daemonRoot}, not {requestedRoot}"
-
-def endpointGenerationMismatchError
-    (endpoint : Transport.Endpoint)
-    (daemonRoot : System.FilePath) : String :=
-  s!"selected endpoint {endpointSummary endpoint} already serves Beam root {daemonRoot} " ++
-    "with another daemon generation"
-
-def endpointProtocolError (endpoint : Transport.Endpoint) (detail : String) : String :=
-  s!"selected endpoint {endpointSummary endpoint} did not return a valid Beam daemon response: {detail}"
-
-def startupLogSuggestsEndpointInUse (logText : String) : Bool :=
-  logText.contains "address already in use" ||
-  logText.contains "Address already in use"
-
-def shouldRetryStartup
-    (tries : Nat)
-    (endpointOccupied startupAddressInUse : Bool) : Bool :=
-  tries > 0 && (endpointOccupied || startupAddressInUse)
-
 def endpointAcceptsConnection (endpoint : Transport.Endpoint) : IO Bool := do
   try
     let conn ← Transport.connect endpoint
@@ -198,7 +175,7 @@ def daemonGenerationStatus
             pure <| .unrecognized failure
           else
             pure .unavailable
-      | .invalidResponse _ | .streamCallback _ | .responseTimeout _ =>
+      | .invalidResponse _ | .streamCallback _ | .responseTimeout _ | .interrupted =>
           pure <| .unrecognized failure
   | .ok probe =>
       unless ← Beam.sameFilePath (System.FilePath.mk probe.root) root do

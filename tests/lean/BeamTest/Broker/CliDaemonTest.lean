@@ -202,35 +202,22 @@ private def checkSilentShutdownTimeout : IO Unit := do
       | .ok () => pure ()
       | .error err => throw err
 
-private def serveCancelablePlainRequest
+private def serveDisconnectCancelledPlainRequest
     (listener : Beam.Broker.Transport.Listener)
     (requestObserved : IO.Promise Unit) : IO Unit := do
   let requestConn ← Beam.Broker.Transport.accept listener
   try
     let requestText ← Beam.Broker.Transport.recvMsg requestConn
     let requestJson ← IO.ofExcept <| Json.parse requestText
-    let request : Beam.Broker.Request ← IO.ofExcept <| fromJson? requestJson
-    let some requestId := request.clientRequestId?
-      | throw <| IO.userError "plain wrapper request omitted its synthesized clientRequestId"
+    let _request : Beam.Broker.Request ← IO.ofExcept <| fromJson? requestJson
     requestObserved.resolve ()
-    let cancelConn ← Beam.Broker.Transport.accept listener
-    try
-      let cancelText ← Beam.Broker.Transport.recvMsg cancelConn
-      let cancelJson ← IO.ofExcept <| Json.parse cancelText
-      let cancelRequest : Beam.Broker.Request ← IO.ofExcept <| fromJson? cancelJson
-      unless cancelRequest.op == .cancel && cancelRequest.cancelRequestId? == some requestId do
-        throw <| IO.userError "plain wrapper cancellation did not target the admitted request"
-      let cancelResponse := Beam.Broker.Response.success <|
-        Json.mkObj [("cancelled", toJson true)]
-      Beam.Broker.Transport.sendMsg cancelConn
-        (toJson (Beam.Broker.StreamMessage.response
-          cancelRequest.clientRequestId? cancelResponse)).compress
-    finally
-      Beam.Broker.Transport.closeConnection cancelConn
-    let response := Beam.Broker.errorResponseFor
-      .requestCancelled "cancelled by session close"
-    Beam.Broker.Transport.sendMsg requestConn
-      (toJson (Beam.Broker.StreamMessage.response (some requestId) response)).compress
+    let disconnected ←
+      try
+        discard <| Beam.Broker.Transport.recvMsg requestConn
+        pure false
+      catch _ => pure true
+    unless disconnected do
+      throw <| IO.userError "interrupted wrapper request left its connection open"
   finally
     Beam.Broker.Transport.closeConnection requestConn
 
@@ -238,19 +225,18 @@ private def checkPlainBrokerTaskCancellation : IO Unit := do
   withBrokerListener fun listener endpoint => do
     let requestObserved ← IO.Promise.new
     let serverTask ← IO.asTask (prio := Task.Priority.dedicated) <|
-      serveCancelablePlainRequest listener requestObserved
+      serveDisconnectCancelledPlainRequest listener requestObserved
     let requestTask ← IO.asTask (prio := Task.Priority.dedicated) <|
       Beam.Cli.requestBroker (System.FilePath.mk "/tmp")
         (projectDaemonClientForTest endpoint (System.FilePath.mk "/tmp")) { op := .stats }
     let some _ ← IO.wait requestObserved.result?
       | throw <| IO.userError "plain wrapper request observation promise dropped"
     IO.cancel requestTask
-    let response ←
-      match ← IO.wait requestTask with
-      | .ok response => pure response
-      | .error err => throw err
-    require "a cancelled plain wrapper request should receive broker requestCancelled"
-      (response.error?.any fun err => err.code == "requestCancelled")
+    match ← IO.wait requestTask with
+    | .ok response =>
+        throw <| IO.userError s!"interrupted plain wrapper request returned {toJson response}"
+    | .error err =>
+        requireSubstring "interrupted plain wrapper request" "Beam request interrupted" err.toString
     match ← IO.wait serverTask with
     | .ok () => pure ()
     | .error err => throw err
@@ -403,26 +389,6 @@ private def checkSyncWaitSpecs : IO Unit := do
   requireSubstring "sync not-ready message"
     "saveReady=false (documentErrors, blockingErrorCount=1)"
     ((Beam.Cli.syncWaitSpec "Demo.lean").completeMsg notReadyResp)
-
-private def checkCancelAcknowledgementDecoding : IO Unit := do
-  let acknowledged := Beam.Broker.Response.success <|
-    Json.mkObj [("cancelled", toJson true)]
-  require "cancel acknowledgement should decode true"
-    (Beam.Cli.decodeCancelAcknowledged? acknowledged == some true)
-
-  let notAcknowledged := Beam.Broker.Response.success <|
-    Json.mkObj [("cancelled", toJson false)]
-  require "cancel acknowledgement should decode false"
-    (Beam.Cli.decodeCancelAcknowledged? notAcknowledged == some false)
-
-  let missing := Beam.Broker.Response.success <|
-    Json.mkObj [("other", toJson true)]
-  require "missing cancel acknowledgement should decode none"
-    (Beam.Cli.decodeCancelAcknowledged? missing).isNone
-
-  let failed := Beam.Broker.errorResponseFor .invalidParams "bad cancel"
-  require "failed cancel response should decode none"
-    (Beam.Cli.decodeCancelAcknowledged? failed).isNone
 
 private def checkCliRootParsing : IO Unit := do
   let missingRoot := System.FilePath.mk s!"/tmp/beam-cli-missing-root-{← IO.monoNanosNow}"
@@ -604,20 +570,6 @@ private def checkDiagnosticScopeArgs : IO Unit := do
       catch err =>
         pure <| err.toString.contains "+all-diagnostics"
     require s!"{label} diagnostic scope should reject obsolete +full" obsoleteRejected
-
-private def checkStartupRetryPolicy : IO Unit := do
-  require "occupied endpoint should retry"
-    (Beam.Daemon.shouldRetryStartup 1 true false)
-  require "startup bind collision should retry"
-    (Beam.Daemon.shouldRetryStartup 1 false true)
-  require "endpoint should not retry after attempts are exhausted"
-    (!Beam.Daemon.shouldRetryStartup 0 true true)
-  require "endpoint should not retry when it is not occupied after failure"
-    (!Beam.Daemon.shouldRetryStartup 1 false false)
-  require "Linux bind failure wording should be recognized"
-    (Beam.Daemon.startupLogSuggestsEndpointInUse "resource busy (error code: 4294967198, address already in use)")
-  require "macOS bind failure wording should be recognized"
-    (Beam.Daemon.startupLogSuggestsEndpointInUse "Address already in use")
 
 private def checkDaemonFailureContext : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-daemon-failure-context-{← IO.monoNanosNow}"
@@ -1429,12 +1381,10 @@ def main : IO Unit := do
   checkClientResponsePresentation
   checkCliRecoveryHints
   checkSyncWaitSpecs
-  checkCancelAcknowledgementDecoding
   checkCliRootParsing
   checkProjectRootAmbiguity
   checkLeanOperationRequests
   checkDiagnosticScopeArgs
-  checkStartupRetryPolicy
   checkDaemonFailureContext
   checkDaemonFailureUnreadableStartupLog
   checkTypedDaemonFailureClassification

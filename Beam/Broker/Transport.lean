@@ -50,11 +50,12 @@ private def waitTcpPromise (promise : IO.Promise (Except IO.Error α)) (failureM
 private inductive ReceiveWaitResult (α : Type) where
   | completed (value : α)
   | timedOut
+  | interrupted
 
-private partial def waitTcpReceivePromiseUntil
+private partial def waitTcpReceivePromise
     (client : TCP.Socket)
     (promise : IO.Promise (Except IO.Error α))
-    (deadlineNanos : Nat)
+    (stop : IO (Option (ReceiveWaitResult α)))
     (failureMessage : String)
     (pollMs : Nat := 10) : IO (ReceiveWaitResult α) := do
   let resultTask := promise.result?
@@ -65,11 +66,11 @@ private partial def waitTcpReceivePromiseUntil
       match result with
       | .ok value => pure <| .completed value
       | .error err => throw err
-    else if (← IO.monoNanosNow) >= deadlineNanos then
-      -- The caller abandons and closes this connection after timeout. Cancel the exact pending UV
-      -- receive first so no read remains attached to the socket.
+    else if let some stopped ← stop then
+      -- The caller abandons and closes this connection after the bounded wait returns. Cancel the
+      -- exact pending UV receive first so no read remains attached to the socket.
       TCP.Socket.cancelRecv client
-      pure .timedOut
+      pure stopped
     else
       IO.sleep pollMs.toUInt32
       loop
@@ -91,6 +92,12 @@ def bindAndListen (endpoint : Endpoint) (backlog : UInt32 := 16) : IO Listener :
       TCP.Socket.bind server (localhost port)
       TCP.Socket.listen server backlog
       pure <| .tcp server
+
+/-- Return the concrete endpoint selected for a bound listener, including an OS-assigned port. -/
+def listenerEndpoint (listener : Listener) : IO Endpoint := do
+  match listener with
+  | .tcp server =>
+      pure <| .tcp (← TCP.Socket.getSockName server).port
 
 def accept (listener : Listener) : IO Connection := do
   match listener with
@@ -132,15 +139,31 @@ private def receiveTcpUntil
     (size : UInt64)
     (deadlineNanos : Nat) : IO (ReceiveWaitResult (Option ByteArray)) := do
   let promise ← TCP.Socket.recv? client size
-  waitTcpReceivePromiseUntil client promise deadlineNanos
-    "Beam daemon connection closed during TCP receive"
+  waitTcpReceivePromise client promise (do
+    if (← IO.monoNanosNow) >= deadlineNanos then
+      pure <| some .timedOut
+    else
+      pure none) "Beam daemon connection closed during TCP receive"
+
+private def receiveTcpInterruptibly
+    (client : TCP.Socket)
+    (size : UInt64)
+    (interrupted : IO Bool) : IO (ReceiveWaitResult (Option ByteArray)) := do
+  let promise ← TCP.Socket.recv? client size
+  waitTcpReceivePromise client promise (do
+    if ← interrupted then
+      pure <| some .interrupted
+    else
+      pure none) "Beam daemon connection closed during TCP receive"
 
 private def recvMsgTcpUsing
-    (receive : UInt64 → IO (ReceiveWaitResult (Option ByteArray))) : IO (Option String) := do
+    (receive : UInt64 → IO (ReceiveWaitResult (Option ByteArray))) :
+    IO (ReceiveWaitResult String) := do
   let mut header := ByteArray.empty
   repeat
     match ← receive 1 with
-    | .timedOut => return none
+    | .timedOut => return .timedOut
+    | .interrupted => return .interrupted
     | .completed none => throw <| IO.userError "Beam daemon connection closed"
     | .completed (some chunk) =>
         if chunk.isEmpty then
@@ -159,7 +182,8 @@ private def recvMsgTcpUsing
   let mut payload := ByteArray.empty
   while payload.size < len do
     match ← receive (len - payload.size).toUInt64 with
-    | .timedOut => return none
+    | .timedOut => return .timedOut
+    | .interrupted => return .interrupted
     | .completed none => throw <| IO.userError "Beam daemon connection closed"
     | .completed (some chunk) =>
         if chunk.isEmpty then
@@ -167,15 +191,31 @@ private def recvMsgTcpUsing
         payload := payload ++ chunk
   let some msg := String.fromUTF8? payload
     | throw <| IO.userError "invalid Beam daemon UTF-8"
-  pure (some msg)
+  pure <| .completed msg
 
 private def recvMsgTcp (client : TCP.Socket) : IO String := do
-  let some msg ← recvMsgTcpUsing (receiveTcp client)
-    | throw <| IO.userError "unbounded Beam daemon receive timed out"
-  pure msg
+  match ← recvMsgTcpUsing (receiveTcp client) with
+  | .completed msg => pure msg
+  | .timedOut => throw <| IO.userError "unbounded Beam daemon receive timed out"
+  | .interrupted => throw <| IO.userError "unbounded Beam daemon receive was interrupted"
 
 private def recvMsgTcpUntil (client : TCP.Socket) (deadlineNanos : Nat) : IO (Option String) := do
-  recvMsgTcpUsing (receiveTcpUntil client · deadlineNanos)
+  match ← recvMsgTcpUsing (receiveTcpUntil client · deadlineNanos) with
+  | .completed msg => pure (some msg)
+  | .timedOut => pure none
+  | .interrupted => throw <| IO.userError "bounded Beam daemon receive was interrupted"
+
+inductive InterruptibleReceive where
+  | message (value : String)
+  | interrupted
+
+private def recvMsgTcpInterruptibly
+    (client : TCP.Socket)
+    (interrupted : IO Bool) : IO InterruptibleReceive := do
+  match ← recvMsgTcpUsing (receiveTcpInterruptibly client · interrupted) with
+  | .completed msg => pure <| .message msg
+  | .interrupted => pure .interrupted
+  | .timedOut => throw <| IO.userError "interruptible Beam daemon receive timed out"
 
 def sendMsg (conn : Connection) (msg : String) : IO Unit := do
   match conn with
@@ -189,5 +229,12 @@ def recvMsg (conn : Connection) : IO String := do
 def recvMsgUntil (conn : Connection) (deadlineNanos : Nat) : IO (Option String) := do
   match conn with
   | .tcp client => recvMsgTcpUntil client deadlineNanos
+
+/-- Receive one complete frame while preserving partial-frame state until completion or interrupt. -/
+def recvMsgInterruptibly
+    (conn : Connection)
+    (interrupted : IO Bool) : IO InterruptibleReceive := do
+  match conn with
+  | .tcp client => recvMsgTcpInterruptibly client interrupted
 
 end Beam.Broker.Transport

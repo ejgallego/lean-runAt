@@ -95,31 +95,23 @@ print(rc)
 PY
 }
 
-expect_sigint_cancelled() {
+expect_sigint_aborted() {
   local label="$1"
   local out_path="$2"
   local err_path="$3"
   local expected_client_request_id="$4"
-  local payload
-  payload="$(cat "$out_path")"
-  if [ "$(BEAM_JSON_PAYLOAD="$payload" read_json_text_field error.code)" != "requestCancelled" ]; then
-    echo "expected $label to report requestCancelled" >&2
-    printf '%s\n' "$payload" >&2
+  if [ -s "$out_path" ]; then
+    echo "expected $label not to fabricate a terminal broker response after disconnect" >&2
+    cat "$out_path" >&2
     cat "$err_path" >&2
     exit 1
   fi
   if [ -n "$expected_client_request_id" ]; then
-    if [ "$(BEAM_JSON_PAYLOAD="$payload" read_json_text_field clientRequestId)" != "$expected_client_request_id" ]; then
-      echo "expected $label to preserve explicit clientRequestId" >&2
-      printf '%s\n' "$payload" >&2
+    if ! grep -q "beam\[$expected_client_request_id\]" "$err_path"; then
+      echo "expected $label to preserve its explicit clientRequestId annotation" >&2
       cat "$err_path" >&2
       exit 1
     fi
-  elif [ -n "$(BEAM_JSON_PAYLOAD="$payload" read_json_text_field clientRequestId)" ]; then
-    echo "expected $label to hide generated clientRequestId" >&2
-    printf '%s\n' "$payload" >&2
-    cat "$err_path" >&2
-    exit 1
   elif grep -q 'beam\[' "$err_path"; then
     echo "expected $label stderr not to include a clientRequestId annotation" >&2
     cat "$err_path" >&2
@@ -131,8 +123,9 @@ expect_sigint_cancelled() {
     cat "$err_path" >&2
     exit 1
   fi
-  if ! grep -q 'requesting broker cancellation' "$err_path"; then
-    echo "expected $label to log broker cancellation on stderr" >&2
+  if ! grep -q 'interrupting broker request' "$err_path" ||
+      ! grep -q 'Beam request interrupted' "$err_path"; then
+    echo "expected $label to report bounded connection-owned interruption" >&2
     cat "$err_path" >&2
     exit 1
   fi
@@ -166,12 +159,12 @@ signal_owner_pid="$beam_wrapper_last_owner_pid"
     exit 1
   fi
   if [ "$interrupt_status" = "0" ]; then
-    echo "expected wrapper run-at SIGINT path to exit non-zero after broker cancellation" >&2
+    echo "expected wrapper run-at SIGINT path to exit non-zero after connection interruption" >&2
     cat "$interrupt_out" >&2
     cat "$interrupt_err" >&2
     exit 1
   fi
-  expect_sigint_cancelled "wrapper SIGINT path" "$interrupt_out" "$interrupt_err" wrapper-sigint
+  expect_sigint_aborted "wrapper SIGINT path" "$interrupt_out" "$interrupt_err" wrapper-sigint
 
   interrupt_anon_out="$(beam_wrapper_mktemp_file interrupt-anon-out)"
   interrupt_anon_err="$(beam_wrapper_mktemp_file interrupt-anon-err)"
@@ -182,16 +175,16 @@ signal_owner_pid="$beam_wrapper_last_owner_pid"
     exit 1
   fi
   if [ "$interrupt_anon_status" = "0" ]; then
-    echo "expected anonymous wrapper run-at SIGINT path to exit non-zero after broker cancellation" >&2
+    echo "expected anonymous wrapper run-at SIGINT path to exit non-zero after connection interruption" >&2
     cat "$interrupt_anon_out" >&2
     cat "$interrupt_anon_err" >&2
     exit 1
   fi
-  expect_sigint_cancelled "anonymous wrapper SIGINT path" "$interrupt_anon_out" "$interrupt_anon_err" ""
+  expect_sigint_aborted "anonymous wrapper SIGINT path" "$interrupt_anon_out" "$interrupt_anon_err" ""
 
   post_interrupt_hover="$("$beam_script" --root "$signal_root" hover tests/scenario/docs/CommandA.lean "$command_version" 0 4)"
   if [ "$(BEAM_JSON_PAYLOAD="$post_interrupt_hover" read_json_text_field ok)" != "true" ]; then
-    echo "expected wrapper SIGINT cancellation to preserve the isolated Beam daemon session" >&2
+    echo "expected wrapper SIGINT interruption to preserve the isolated Beam daemon session" >&2
     printf '%s\n' "$post_interrupt_hover" >&2
     exit 1
   fi
@@ -334,13 +327,13 @@ PY
     exit 1
   fi
   if [ "$interrupt_quiet_status" = "0" ]; then
-    echo "expected non-progress wrapper run-at SIGINT path to exit non-zero after broker cancellation" >&2
+    echo "expected non-progress wrapper run-at SIGINT path to exit non-zero after connection interruption" >&2
     cat "$interrupt_quiet_out" >&2
     cat "$interrupt_quiet_err" >&2
     exit 1
   fi
 
-  expect_sigint_cancelled "non-progress wrapper SIGINT path" "$interrupt_quiet_out" "$interrupt_quiet_err" "$interrupt_quiet_request_id"
+  expect_sigint_aborted "non-progress wrapper SIGINT path" "$interrupt_quiet_out" "$interrupt_quiet_err" "$interrupt_quiet_request_id"
 
   interrupt_quiet_anon_out="$(beam_wrapper_mktemp_file interrupt-quiet-anon-out)"
   interrupt_quiet_anon_err="$(beam_wrapper_mktemp_file interrupt-quiet-anon-err)"
@@ -351,12 +344,12 @@ PY
     exit 1
   fi
   if [ "$interrupt_quiet_anon_status" = "0" ]; then
-    echo "expected anonymous non-progress wrapper run-at SIGINT path to exit non-zero after broker cancellation" >&2
+    echo "expected anonymous non-progress wrapper run-at SIGINT path to exit non-zero after connection interruption" >&2
     cat "$interrupt_quiet_anon_out" >&2
     cat "$interrupt_quiet_anon_err" >&2
     exit 1
   fi
-  expect_sigint_cancelled "anonymous non-progress wrapper SIGINT path" "$interrupt_quiet_anon_out" "$interrupt_quiet_anon_err" ""
+  expect_sigint_aborted "anonymous non-progress wrapper SIGINT path" "$interrupt_quiet_anon_out" "$interrupt_quiet_anon_err" ""
 
   "$beam_script" --root "$signal_root" stop > /dev/null 2>&1 || true
 )

@@ -24,6 +24,7 @@ import Beam.Broker.Lean
 import Beam.Broker.LakeSave
 import Beam.Broker.Readiness
 import Beam.Broker.SyncResult
+import Beam.Daemon.Startup
 import Beam.LSP.Save
 import Beam.Path
 import Std.Sync.Mutex
@@ -1437,6 +1438,7 @@ private def maxDaemonClients : Nat :=
 private def DaemonTransport.create (endpoint : Transport.Endpoint) : IO DaemonTransport := do
   let stop ← IO.mkRef false
   let listener ← Transport.bindAndListen endpoint 16
+  let endpoint ← Transport.listenerEndpoint listener
   pure { endpoint, listener, stop, clientPermits := ← ClientPermits.create maxDaemonClients }
 
 private def requestStop (transport : DaemonTransport) : IO Unit := do
@@ -2926,6 +2928,20 @@ private def withDaemonResources
   finally
     resources.close
 
+private def emitWrapperReady
+    (transport : DaemonTransport)
+    (identity : DaemonIdentity) : IO Unit := do
+  let port :=
+    match transport.endpoint with
+    | .tcp port => port.toNat
+  let ready : Beam.Daemon.StartupReady := {
+    port
+    identity
+  }
+  let stdout ← IO.getStdout
+  stdout.putStrLn (toJson ready).compress
+  stdout.flush
+
 def main (args : List String) : IO Unit := do
   let opts ← IO.ofExcept <| parseCliOptions {} args
   let some root := opts.root?
@@ -2964,7 +2980,10 @@ def main (args : List String) : IO Unit := do
     leanPlugin? := leanPlugin?
     rocqCmd? := opts.rocqCmd?
   }
-  withDaemonResources opts config workspaceId mode root fun resources =>
+  withDaemonResources opts config workspaceId mode root fun resources => do
+    match mode with
+    | .wrapper identity _ => emitWrapperReady resources.transport identity
+    | .standalone _ => pure ()
     acceptLoop resources.runtime resources.transport
 
 end Beam.Broker

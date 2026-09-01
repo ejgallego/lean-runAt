@@ -12,6 +12,7 @@ import Beam.Cli.Project
 import Beam.Daemon.Debug
 import Beam.Daemon.Paths
 import Beam.Daemon.Registry
+import Beam.Daemon.Startup
 
 open Lean
 
@@ -145,21 +146,52 @@ private def newPrivateTempPath
   let nonce := String.ofList <| (← IO.getRandomBytes 16).toList.flatMap byteHex
   pure <| dir / s!"{stem}-{nonce}.tmp"
 
-/-- Write one private file through a random exclusive inode, then publish it atomically. -/
-private def writePrivateFileAtomically
-    (dir target : System.FilePath)
-    (stem contents : String) : IO Unit := do
+/-- Create one private temporary inode and retain its already-open handle. -/
+private def createPrivateTempFile
+    (dir : System.FilePath)
+    (stem : String) : IO (System.FilePath × IO.FS.Handle) := do
   let tmp ← newPrivateTempPath dir stem
   try
-    IO.FS.withFile tmp .writeNew fun handle => do
-      -- The private parent protects the inode from its creation. Mode 0600 remains defense in
-      -- depth if parent permissions drift after publication.
-      IO.setAccessRights tmp {
-        user := { read := true, write := true }
-      }
-      handle.putStr contents
-      handle.flush
-    IO.FS.rename tmp target
+    let handle ← IO.FS.Handle.mk tmp .writeNew
+    -- The private parent protects the inode from its creation. Mode 0600 remains defense in
+    -- depth if parent permissions drift after publication.
+    IO.setAccessRights tmp {
+      user := { read := true, write := true }
+    }
+    pure (tmp, handle)
+  catch err =>
+    try
+      if ← tmp.pathExists then
+        IO.FS.removeFile tmp
+    catch _ =>
+      pure ()
+    throw err
+
+/-- Write one private child file through a random exclusive inode, then publish it atomically. -/
+private def writePrivateFileAtomically
+    (dir : System.FilePath)
+    (leaf stem contents : String) : IO Unit := do
+  let (tmp, handle) ← createPrivateTempFile dir stem
+  try
+    handle.putStr contents
+    handle.flush
+    IO.FS.rename tmp (dir / leaf)
+  catch err =>
+    try
+      if ← tmp.pathExists then
+        IO.FS.removeFile tmp
+    catch _ =>
+      pure ()
+    throw err
+
+/-- Publish one private empty child file while retaining its exact open handle for later writes. -/
+private def openPrivateFileAtomically
+    (dir : System.FilePath)
+    (leaf stem : String) : IO IO.FS.Handle := do
+  let (tmp, handle) ← createPrivateTempFile dir stem
+  try
+    IO.FS.rename tmp (dir / leaf)
+    pure handle
   catch err =>
     try
       if ← tmp.pathExists then
@@ -169,7 +201,7 @@ private def writePrivateFileAtomically
     throw err
 
 private def writeRegistry (control : ProjectControl) (entry : SessionDescriptor) : IO Unit := do
-  writePrivateFileAtomically control.dir control.registry "beam-daemon"
+  writePrivateFileAtomically control.dir "beam-daemon.json" "beam-daemon"
     ((toJson entry).pretty ++ "\n")
 
 private def writeExistingRegistry (control : ProjectControl) (entry : SessionDescriptor) : IO Unit := do
@@ -263,17 +295,6 @@ def observeProjectRegistry
     (explicitControlDir? : Option System.FilePath := none) : IO RegistryObservation := do
   observeProjectControl root (← projectControl root explicitControlDir?)
 
-private def selectPort : IO UInt16 := do
-  let now ← IO.monoNanosNow
-  let seed := now % 20000 + 30000
-  if seed < UInt16.size then
-    pure seed.toUInt16
-  else
-    pure 37654
-
-private def selectEndpoint : IO Transport.Endpoint := do
-  pure <| .tcp (← selectPort)
-
 private def daemonFailureIncidentRetainCount : Nat :=
   50
 
@@ -315,6 +336,7 @@ private def daemonFailureIncidentKind? : BrokerClientFailure → Option String
   | .invalidResponse _ => some "invalidBrokerResponse"
   | .streamCallback _ => none
   | .responseTimeout _ => some "brokerResponseTimeout"
+  | .interrupted => none
 
 private def daemonFailureIncidentTimestampLabel (timestamp : String) : String :=
   (timestamp.replace "-" "").replace ":" ""
@@ -370,7 +392,9 @@ private def writeDaemonFailureIncident?
       startupLogTail := logTail?.map (fun (_, tail) => tail)
     }
     let path ← daemonFailureIncidentPath root kind observedAt explicitControlDir?
-    writePrivateFileAtomically dir path "incident" ((toJson incident).pretty ++ "\n")
+    let some leaf := path.fileName
+      | return none
+    writePrivateFileAtomically dir leaf "incident" ((toJson incident).pretty ++ "\n")
     try
       pruneDaemonFailureIncidents root explicitControlDir?
     catch _ =>
@@ -398,34 +422,32 @@ def daemonFailureMessage
     pure <| appendMaybeSection msg <|
       incidentPath?.map fun path => s!"Beam daemon incident: {path}"
 
-private structure DaemonStartupFailure where
-  message : String
-  endpointInUse : Bool := false
-
 private def daemonStartupFailure
-    (endpoint : Transport.Endpoint)
     (logPath : System.FilePath)
-    (detail : String) : IO DaemonStartupFailure := do
+    (detail : String) : IO String := do
   let msg := if detail.isEmpty then
-    s!"failed to start Beam daemon on {endpointSummary endpoint}"
+    "failed to start Beam daemon"
   else
-    s!"failed to start Beam daemon on {endpointSummary endpoint}\n{detail}"
+    s!"failed to start Beam daemon\n{detail}"
   if ← logPath.pathExists then
     let logText := Beam.trimLine (← IO.FS.readFile logPath)
     if logText.isEmpty then
-      pure { message := msg }
+      pure msg
     else
-      pure {
-        message := msg ++ s!"\nstartup log ({logPath}):\n{logText}"
-        endpointInUse := startupLogSuggestsEndpointInUse logText
-      }
+      pure <| msg ++ s!"\nstartup log ({logPath}):\n{logText}"
   else
-    pure { message := msg }
+    pure msg
 
 private abbrev daemonStdio : IO.Process.StdioConfig where
   stdin := .piped
-  stdout := .null
-  stderr := .null
+  stdout := .piped
+  stderr := .piped
+
+private abbrev DaemonLogDrainTask := Task (Except IO.Error Unit)
+
+private structure StartedDaemon where
+  child : IO.Process.Child daemonStdio
+  stderrDrain : DaemonLogDrainTask
 
 private partial def waitForDaemonChildExit
     {cfg : IO.Process.StdioConfig}
@@ -446,30 +468,32 @@ private def terminateDaemonChild
   catch _ =>
     pure ()
 
-private def startDaemon
-    (desired : DesiredConfig)
-    (endpoint : Transport.Endpoint)
-    (logPath : System.FilePath)
-    (identity : DaemonIdentity)
-    (capability : String) : IO (IO.Process.Child daemonStdio) := do
-  let mut args : List String := [
-    "--root", desired.root.toString,
-    "--workspace-id", projectDaemonWorkspaceId,
-    "--daemon-id", identity.daemonId,
-    "--config-hash", identity.configHash,
-    "--session-owner-stdin"
-  ]
-  match endpoint with
-  | .tcp port =>
-      args := args ++ ["--port", toString port.toNat]
-  if let some leanCmd := desired.leanCmd? then
-    args := args ++ ["--lean-cmd", leanCmd]
-  if let some plugin := desired.plugin? then
-    args := args ++ ["--lean-plugin", plugin.toString]
-  if let some rocqCmd := desired.rocqCmd? then
-    args := args ++ ["--rocq-cmd", rocqCmd]
-  let some logDir := logPath.parent
-    | throw <| IO.userError s!"Beam daemon startup log has no parent directory: {logPath}"
+private partial def drainDaemonStderr
+    (source target : IO.FS.Handle) : IO Unit := do
+  let chunk ← source.read 8192
+  if chunk.isEmpty then
+    target.flush
+  else
+    target.write chunk
+    target.flush
+    drainDaemonStderr source target
+
+private partial def finishDaemonLogDrain
+    (task : DaemonLogDrainTask)
+    (tries : Nat := 20) : IO Unit := do
+  if ← IO.hasFinished task then
+    discard <| IO.wait task
+  else if tries == 0 then
+    IO.cancel task
+  else
+    IO.sleep 50
+    finishDaemonLogDrain task (tries - 1)
+
+private def terminateStartedDaemon (started : StartedDaemon) : IO Unit := do
+  terminateDaemonChild started.child
+  finishDaemonLogDrain started.stderrDrain
+
+private def validateDaemonStartupLog (logPath : System.FilePath) : IO Unit := do
   try
     let metadata ← logPath.symlinkMetadata
     match metadata.type with
@@ -483,78 +507,117 @@ private def startDaemon
   catch
   | .noFileOrDirectory .. => pure ()
   | err => throw err
-  writePrivateFileAtomically logDir logPath "beam-daemon-startup" ""
-  let cmd := String.intercalate " " ((desired.daemonBin.toString :: args).map shellQuote)
-  let shell := s!"exec {cmd} >{shellQuote logPath.toString} 2>&1"
+
+private def startDaemon
+    (desired : DesiredConfig)
+    (logPath : System.FilePath)
+    (identity : DaemonIdentity)
+    (capability : String) : IO StartedDaemon := do
+  let mut args : Array String := #[
+    "--root", desired.root.toString,
+    "--workspace-id", projectDaemonWorkspaceId,
+    "--daemon-id", identity.daemonId,
+    "--config-hash", identity.configHash,
+    "--session-owner-stdin",
+    "--port", "0"
+  ]
+  if let some leanCmd := desired.leanCmd? then
+    args := args ++ #["--lean-cmd", leanCmd]
+  if let some plugin := desired.plugin? then
+    args := args ++ #["--lean-plugin", plugin.toString]
+  if let some rocqCmd := desired.rocqCmd? then
+    args := args ++ #["--rocq-cmd", rocqCmd]
+  let some logDir := logPath.parent
+    | throw <| IO.userError s!"Beam daemon startup log has no parent directory: {logPath}"
+  let some logLeaf := logPath.fileName
+    | throw <| IO.userError s!"Beam daemon startup log has no file name: {logPath}"
+  validateDaemonStartupLog logPath
+  let logHandle ← openPrivateFileAtomically logDir logLeaf "beam-daemon-startup"
   let child ← IO.Process.spawn {
     toStdioConfig := daemonStdio
-    cmd := "sh"
-    args := #["-c", shell]
+    cmd := desired.daemonBin.toString
+    args
     cwd := some desired.root
     setsid := true
   }
+  let stderrDrain ←
+    try
+      IO.asTask (prio := Task.Priority.dedicated) <| drainDaemonStderr child.stderr logHandle
+    catch err =>
+      terminateDaemonChild child
+      throw err
+  let started : StartedDaemon := { child, stderrDrain }
   try
     child.stdin.putStrLn capability
     child.stdin.flush
-    pure child
+    pure started
   catch err =>
     -- Once spawned, the retained child handle owns the whole setsid process group. Do not leak
     -- that acquisition when publishing the capability through the owner pipe fails.
-    terminateDaemonChild child
+    terminateStartedDaemon started
     throw err
 
 private def daemonStartupTimeoutMs : Nat :=
   30000
 
-private partial def waitForDaemonUntil
-    (child : IO.Process.Child daemonStdio)
-    (endpoint : Transport.Endpoint)
-    (logPath : System.FilePath)
-    (root : System.FilePath)
-    (identity : DaemonIdentity)
-    (capability : String)
-    (deadlineNanos : Nat)
-    (timeoutDetail : String) : IO (Except DaemonStartupFailure Unit) := do
-  if (← child.tryWait).isSome then
-    return .error (← daemonStartupFailure endpoint logPath
-      "Beam daemon process exited before responding")
-  if (← IO.monoNanosNow) >= deadlineNanos then
-    return .error (← daemonStartupFailure endpoint logPath timeoutDetail)
-  let retryOrFail (detail : String) : IO (Except DaemonStartupFailure Unit) := do
-    if (← child.tryWait).isSome then
-      .error <$> daemonStartupFailure endpoint logPath "Beam daemon process exited before responding"
-    else if (← IO.monoNanosNow) >= deadlineNanos then
-      .error <$> daemonStartupFailure endpoint logPath detail
-    else
-      IO.sleep 100
-      waitForDaemonUntil child endpoint logPath root identity capability deadlineNanos detail
-  match ← daemonGenerationStatus endpoint projectDaemonWorkspaceId root identity capability with
-  | .exact => pure (.ok ())
-  | .wrongRoot daemonRoot =>
-      pure <| .error {
-        message := endpointOccupancyError endpoint (System.FilePath.mk daemonRoot) root
-        endpointInUse := true
-      }
-  | .wrongGeneration daemonRoot =>
-      pure <| .error {
-        message := endpointGenerationMismatchError endpoint (System.FilePath.mk daemonRoot)
-        endpointInUse := true
-      }
-  | .unrecognized failure =>
-      retryOrFail (endpointProtocolError endpoint failure.detail)
-  | .unavailable =>
-      retryOrFail "Beam daemon did not become ready before timeout"
+private def maxDaemonReadyBytes : Nat :=
+  16 * 1024
 
-private def waitForDaemon
-    (child : IO.Process.Child daemonStdio)
-    (endpoint : Transport.Endpoint)
-    (logPath : System.FilePath)
-    (root : System.FilePath)
+private def readDaemonReadyLine (source : IO.FS.Handle) : IO String := do
+  let mut bytes := ByteArray.empty
+  repeat
+    if bytes.size >= maxDaemonReadyBytes then
+      throw <| IO.userError s!"Beam daemon readiness exceeds {maxDaemonReadyBytes} bytes"
+    let chunk ← source.read 1
+    if chunk.isEmpty then
+      throw <| IO.userError "Beam daemon closed its readiness pipe before reporting readiness"
+    if chunk[0]! == '\n'.toUInt8 then
+      break
+    bytes := bytes ++ chunk
+  let some line := String.fromUTF8? bytes
+    | throw <| IO.userError "Beam daemon readiness is not valid UTF-8"
+  pure line
+
+private def decodeDaemonReady
     (identity : DaemonIdentity)
-    (capability : String) : IO (Except DaemonStartupFailure Unit) := do
+    (line : String) : Except String Transport.Endpoint := do
+  let json ← Json.parse line
+  let ready ← fromJson? (α := Beam.Daemon.StartupReady) json
+  unless ready.schemaVersion == Beam.Daemon.startupReadySchemaVersion do
+    throw s!"unsupported Beam daemon readiness schema {ready.schemaVersion}"
+  unless ready.identity == identity do
+    throw "Beam daemon readiness identity does not match the spawned generation"
+  unless ready.port > 0 && ready.port < UInt16.size do
+    throw s!"Beam daemon readiness port {ready.port} is outside 1-65535"
+  pure <| .tcp ready.port.toUInt16
+
+private partial def waitForDaemonReadyUntil
+    (started : StartedDaemon)
+    (identity : DaemonIdentity)
+    (readyTask : Task (Except IO.Error String))
+    (deadlineNanos : Nat) : IO (Except String Transport.Endpoint) := do
+  if ← IO.hasFinished readyTask then
+    let result ← IO.wait readyTask
+    match result with
+    | .ok line => pure <| decodeDaemonReady identity line
+    | .error err => pure <| .error s!"could not read Beam daemon readiness: {err}"
+  else if (← started.child.tryWait).isSome then
+    IO.cancel readyTask
+    pure <| .error "Beam daemon process exited before reporting readiness"
+  else if (← IO.monoNanosNow) >= deadlineNanos then
+    IO.cancel readyTask
+    pure <| .error "Beam daemon did not report readiness before timeout"
+  else
+    IO.sleep 50
+    waitForDaemonReadyUntil started identity readyTask deadlineNanos
+
+private def waitForDaemonReady
+    (started : StartedDaemon)
+    (identity : DaemonIdentity) : IO (Except String Transport.Endpoint) := do
+  let readyTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+    readDaemonReadyLine started.child.stdout
   let deadlineNanos := (← IO.monoNanosNow) + daemonStartupTimeoutMs * 1000000
-  waitForDaemonUntil child endpoint logPath root identity capability deadlineNanos
-    "Beam daemon did not become ready before timeout"
+  waitForDaemonReadyUntil started identity readyTask deadlineNanos
 
 private def newDaemonGenerationId (configHash : String) : IO String := do
   let startedMonoNanos ← IO.monoNanosNow
@@ -597,36 +660,33 @@ private def registryEntryFor
     startedAt := ← Beam.utcTimestamp
   }
 
-private partial def startDaemonEntry
+private def startDaemonEntry
     (desired : DesiredConfig)
-    (controlDir : System.FilePath)
-    (tries : Nat := 10) : IO (SessionDescriptor × IO.Process.Child daemonStdio) := do
-  let endpoint ← selectEndpoint
+    (controlDir : System.FilePath) : IO (SessionDescriptor × StartedDaemon) := do
   let logPath ← daemonStartupLogPathFor desired.root (some controlDir)
   let daemonId ← newDaemonGenerationId desired.configHash
   let identity : DaemonIdentity := { daemonId, configHash := desired.configHash }
   let capability ← newDaemonCapability
-  let child ← startDaemon desired endpoint logPath identity capability
-  let readiness : Except DaemonStartupFailure SessionDescriptor ←
+  let started ← startDaemon desired logPath identity capability
+  let readiness : Except String SessionDescriptor ←
     try
-      match ← waitForDaemon child endpoint logPath desired.root identity capability with
-      | .ok () =>
-          let entry ← registryEntryFor desired daemonId capability child.pid.toNat endpoint
-          pure (.ok entry)
-      | .error failure =>
-          pure (.error failure)
+      match ← waitForDaemonReady started identity with
+      | .ok endpoint =>
+          if (← started.child.tryWait).isSome then
+            pure <| .error "Beam daemon exited immediately after reporting readiness"
+          else
+            let entry ← registryEntryFor desired daemonId capability started.child.pid.toNat endpoint
+            pure (.ok entry)
+      | .error detail => pure (.error detail)
     catch err =>
-      terminateDaemonChild child
+      terminateStartedDaemon started
       throw err
   match readiness with
   | .ok entry =>
-      pure (entry, child)
-  | .error failure =>
-    terminateDaemonChild child
-    let endpointOccupied ← endpointAcceptsConnection endpoint
-    if shouldRetryStartup tries endpointOccupied failure.endpointInUse then
-      return ← startDaemonEntry desired controlDir (tries - 1)
-    throw <| IO.userError failure.message
+      pure (entry, started)
+  | .error detail =>
+      terminateStartedDaemon started
+      throw <| IO.userError (← daemonStartupFailure logPath detail)
 
 def desiredConfig (home root : System.FilePath) (required : Backend) : IO DesiredConfig := do
   let (daemonBin, plugin?, leanCmd?, toolchain?, bundleId) ←
@@ -919,13 +979,14 @@ def recoverProjectDaemon
 
 private abbrev detachedDaemonStdio : IO.Process.StdioConfig where
   stdin := .null
-  stdout := .null
-  stderr := .null
+  stdout := .piped
+  stderr := .piped
 
 private structure OwnedProjectDaemon where
   client : ProjectDaemonClient
   entry : SessionDescriptor
   child : IO.Process.Child daemonStdio
+  stderrDrain : DaemonLogDrainTask
 
 structure ProjectDaemonOwner where
   client : ProjectDaemonClient
@@ -980,16 +1041,17 @@ private def startOwnedProjectDaemon
       throw <| IO.userError <| sessionSelectorMismatchMessage desired.root control.dir entry
   | .recoveryRequired blocker =>
       throw <| IO.userError <| blocker.message desired.root control.dir
-  let (entry, child) ← startDaemonEntry desired control.dir
+  let (entry, started) ← startDaemonEntry desired control.dir
   try
     writeRegistry control entry
   catch err =>
-    terminateDaemonChild child
+    terminateStartedDaemon started
     throw err
   pure {
     client := .ofSessionDescriptor entry control.dir
     entry
-    child
+    child := started.child
+    stderrDrain := started.stderrDrain
   }
 
 private def closeDaemonOwnerPipe
@@ -1054,19 +1116,23 @@ private def forceOwnedDaemonChild
 private def finishOwnedDaemonChild
     (owned : OwnedProjectDaemon)
     (exitCodeRef : IO.Ref (Option UInt32)) : IO OwnedDaemonFinish := do
-  if let some exitCode ← exitCodeRef.get then
-    return classifyOwnedDaemonExit exitCode
-  try
-    let child ← closeDaemonOwnerPipe owned.child
-    attemptCleanup <| waitForOwnedDaemonExit child exitCodeRef 100
-    match ← exitCodeRef.get with
-    | some exitCode => pure <| classifyOwnedDaemonExit exitCode
-    | none =>
-        -- `startDaemon` uses `setsid`; Lean's retained child handle therefore kills the complete
-        -- daemon process group rather than only the broker PID.
-        forceOwnedDaemonChild child exitCodeRef
-  catch _ =>
-    forceOwnedDaemonChild owned.child exitCodeRef
+  let finish ←
+    if let some exitCode ← exitCodeRef.get then
+      pure <| classifyOwnedDaemonExit exitCode
+    else
+      try
+        let child ← closeDaemonOwnerPipe owned.child
+        attemptCleanup <| waitForOwnedDaemonExit child exitCodeRef 100
+        match ← exitCodeRef.get with
+        | some exitCode => pure <| classifyOwnedDaemonExit exitCode
+        | none =>
+            -- `startDaemon` uses `setsid`; Lean's retained child handle therefore kills the complete
+            -- daemon process group rather than only the broker PID.
+            forceOwnedDaemonChild child exitCodeRef
+      catch _ =>
+        forceOwnedDaemonChild owned.child exitCodeRef
+  finishDaemonLogDrain owned.stderrDrain
+  pure finish
 
 private def markOwnedRegistryDraining
     (root controlDir : System.FilePath)
@@ -1114,7 +1180,7 @@ private def finishOwnedProjectDaemon
   if exitedBeforeOwnerCleanup && !registryWasDraining then
     -- An unexpected daemon exit is not evidence that its complete process tree disappeared. Keep
     -- the exact live generation fenced so observation projects it to recovery-required state.
-    pure ()
+    finishDaemonLogDrain owned.stderrDrain
   else
     markOwnedRegistryDraining root controlDir owned.entry
     match ← finishOwnedDaemonChild owned exitCodeRef with

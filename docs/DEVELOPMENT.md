@@ -439,6 +439,13 @@ by an attaching command. Persisted PIDs are display-only diagnostics, never prob
 used as automatic stale-reclamation proof. Only the foreground owner may force termination, through
 its retained child handle and process group.
 
+Owner startup delegates endpoint allocation to the OS. The daemon binds loopback port `0`, obtains
+the assigned port, and emits one bounded, typed, versioned readiness message on its private stdout pipe only
+after its listener and lifetime watchers are installed. The owner validates the readiness generation
+and configuration before publishing the session descriptor. Daemon stderr is drained into the exact
+private startup-log inode opened by the owner; startup does not invoke a shell, reopen the checked
+pathname, guess a port, probe for readiness, or parse log text as control flow.
+
 The owner watches its exact descriptor generation and daemon child. `lean-beam --root ROOT stop` changes
 that generation from `live` to `draining` under the control lock before sending authenticated
 shutdown. A repeated stop observes the committed drain and does not deliver another request; a
@@ -507,8 +514,9 @@ Keep these invariants covered:
 - persisted numeric PIDs are never signalled or used for automatic stale reclamation
 - every wrapper request is bound to its random generation capability, and transport frame, initial
   request, connection, and task counts are bounded
-- request IDs are unique and cancellation is exact within a workspace; per-admission tokens retain
-  exact disconnect and close semantics
+- an interrupted wrapper call closes its own one-request connection, whose server-side disconnect
+  watcher cancels that exact admission; explicit request IDs remain available for cross-process
+  `cancel`, and per-admission tokens retain exact disconnect and close semantics
 - the regressions for this path are
   [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh) and
   [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)
@@ -549,10 +557,11 @@ normal-priority work on low-core runners. The cheap regression guard is
 [scripts/check-task-priority.sh](../scripts/check-task-priority.sh).
 
 Shared registry, startup-log, and incident paths live in
-[Beam/Daemon/Paths.lean](../Beam/Daemon/Paths.lean). Daemon registry management, explicit owner
-lifetime, endpoint selection, and explicit non-signalling recovery live in
+[Beam/Daemon/Paths.lean](../Beam/Daemon/Paths.lean), and the typed parent/daemon readiness message
+lives in [Beam/Daemon/Startup.lean](../Beam/Daemon/Startup.lean). Daemon registry management,
+explicit owner lifetime, OS-assigned endpoint readiness, and explicit non-signalling recovery live in
 [Beam/Cli/DaemonManager.lean](../Beam/Cli/DaemonManager.lean). Broker request plumbing,
-progress messages, cancellation-on-interrupt, and response failure notes live in
+progress messages, connection-owned cancellation-on-interrupt, and response failure notes live in
 [Beam/Cli/Broker.lean](../Beam/Cli/Broker.lean). User-facing stdout/stderr formatting helpers live
 in [Beam/Cli/Output.lean](../Beam/Cli/Output.lean). Doctor, validated/compatible toolchain registry,
 install layout/manifest, and MCP config reporting live in

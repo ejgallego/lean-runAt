@@ -36,6 +36,7 @@ inductive BrokerClientFailure where
   | invalidResponse (detail : String)
   | streamCallback (error : IO.Error)
   | responseTimeout (timeoutMs : Nat)
+  | interrupted
 
 def BrokerClientFailure.detail : BrokerClientFailure → String
   | .transport operation error =>
@@ -44,6 +45,7 @@ def BrokerClientFailure.detail : BrokerClientFailure → String
   | .invalidResponse detail => detail
   | .responseTimeout timeoutMs =>
       s!"Beam daemon response timed out after {timeoutMs} ms"
+  | .interrupted => "Beam request interrupted"
 
 instance : Repr BrokerClientFailure where
   reprPrec failure _ := Std.Format.text <|
@@ -52,6 +54,7 @@ instance : Repr BrokerClientFailure where
     | .invalidResponse detail => s!"BrokerClientFailure.invalidResponse {detail}"
     | .streamCallback error => s!"BrokerClientFailure.streamCallback {error}"
     | .responseTimeout timeoutMs => s!"BrokerClientFailure.responseTimeout {timeoutMs}"
+    | .interrupted => "BrokerClientFailure.interrupted"
 
 private def decodeStreamMessage (msg : String) : Except String StreamMessage := do
   match Json.parse msg with
@@ -73,12 +76,17 @@ private structure ResponseDeadline where
   timeoutMs : Nat
   deadlineNanos : Nat
 
+private inductive ResponseWait where
+  | unbounded
+  | deadline (deadline : ResponseDeadline)
+  | interruptible (interrupted : IO Bool)
+
 /-- Send one request while preserving transport, response, callback, and timeout failures. -/
 private partial def sendRequestWithStreamResultCore
     (endpoint : Endpoint)
     (req : Request)
     (onStream : StreamMessage → IO Unit)
-    (responseTimeoutMs? : Option Nat) : IO (Except BrokerClientFailure Response) := do
+    (wait : ResponseWait) : IO (Except BrokerClientFailure Response) := do
   let client ←
     match ← captureClientFailure (.transport .connect) (Transport.connect endpoint) with
     | .ok client => pure client
@@ -88,19 +96,20 @@ private partial def sendRequestWithStreamResultCore
         Transport.sendMsg client (toJson req).compress with
     | .ok () => pure ()
     | .error failure => return .error failure
-    let deadline? : Option ResponseDeadline ← responseTimeoutMs?.mapM fun timeoutMs => do
-      pure {
-        timeoutMs
-        deadlineNanos := (← IO.monoNanosNow) + timeoutMs * 1000000
-      }
-    let rec loop : IO (Except BrokerClientFailure Response) := do
+    let rec receiveResponse : IO (Except BrokerClientFailure Response) := do
       let msg ←
-        match deadline? with
-        | none =>
+        match wait with
+        | .unbounded =>
             match ← captureClientFailure (.transport .receive) (Transport.recvMsg client) with
             | .ok msg => pure msg
             | .error failure => return .error failure
-        | some deadline =>
+        | .interruptible interrupted =>
+            match ← captureClientFailure (.transport .receive) <|
+                Transport.recvMsgInterruptibly client interrupted with
+            | .ok (.message msg) => pure msg
+            | .ok .interrupted => return .error .interrupted
+            | .error failure => return .error failure
+        | .deadline deadline =>
             match ← captureClientFailure (.transport .receive) <|
                 Transport.recvMsgUntil client deadline.deadlineNanos with
             | .ok (some msg) => pure msg
@@ -120,8 +129,8 @@ private partial def sendRequestWithStreamResultCore
       | .response _ response =>
           pure <| .ok response
       | .fileProgress .. | .diagnostic .. =>
-          loop
-    loop
+          receiveResponse
+    receiveResponse
   finally
     Transport.closeConnection client
 
@@ -130,7 +139,7 @@ partial def sendRequestWithStreamResult
     (endpoint : Endpoint)
     (req : Request)
     (onStream : StreamMessage → IO Unit) : IO (Except BrokerClientFailure Response) := do
-  sendRequestWithStreamResultCore endpoint req onStream none
+  sendRequestWithStreamResultCore endpoint req onStream .unbounded
 
 /-- Send one request with an absolute timeout for receiving its complete response stream. -/
 partial def sendRequestWithStreamTimeoutResult
@@ -138,7 +147,11 @@ partial def sendRequestWithStreamTimeoutResult
     (req : Request)
     (timeoutMs : Nat)
     (onStream : StreamMessage → IO Unit) : IO (Except BrokerClientFailure Response) := do
-  sendRequestWithStreamResultCore endpoint req onStream (some timeoutMs)
+  let deadline : ResponseDeadline := {
+    timeoutMs
+    deadlineNanos := (← IO.monoNanosNow) + timeoutMs * 1000000
+  }
+  sendRequestWithStreamResultCore endpoint req onStream (.deadline deadline)
 
 /-- Send one request with typed client failures and structured progress callbacks. -/
 partial def sendRequestWithCallbacksResult
@@ -153,5 +166,20 @@ partial def sendRequestWithCallbacksResult
         callbacks.onFileProgress progress
     | .diagnostic _ diagnostic =>
         callbacks.onDiagnostic diagnostic
+
+/-- Send one request whose owning client may interrupt the exact in-flight connection. -/
+partial def sendRequestWithCallbacksInterruptiblyResult
+    (endpoint : Endpoint)
+    (req : Request)
+    (interrupted : IO Bool)
+    (callbacks : StreamCallbacks := {}) : IO (Except BrokerClientFailure Response) := do
+  sendRequestWithStreamResultCore endpoint req (fun stream => do
+    match stream with
+    | .response .. =>
+        pure ()
+    | .fileProgress _ progress =>
+        callbacks.onFileProgress progress
+    | .diagnostic _ diagnostic =>
+        callbacks.onDiagnostic diagnostic) (.interruptible interrupted)
 
 end Beam.Broker

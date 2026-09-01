@@ -323,8 +323,11 @@ Use `lean-beam`, not raw JSON and not raw LSP.
 - `lean-beam serve` prints a backend-readiness JSON response on stdout and keeps the wrapper
   process alive as the session owner; an inherited pipe ties daemon lifetime to that process without
   heartbeat files or lease expiry
-- Beam selects the internal loopback endpoint; callers select sessions by root and optional
-  session directory rather than by transport details
+- the OS assigns the internal loopback endpoint and the daemon reports it through a private typed
+  readiness handshake; callers select sessions by root and optional session directory rather than
+  by transport details
+- interrupting an ordinary wrapper call closes its one-request connection so the daemon cancels
+  that exact admission; `lean-beam cancel <id>` remains available for cross-process cancellation
 - interrupting the holder or using `lean-beam --root ROOT stop` performs bounded owner cleanup;
   killing the holder closes the owner pipe and requests cooperative daemon shutdown, while the
   session fence remains for explicit recovery

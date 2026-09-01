@@ -248,6 +248,10 @@ client protocol.
   Unix-domain/per-user native IPC remains a possible later transport improvement.
 - A startup failure that reports `operation not permitted` through `.beam/beam-daemon-startup.log` is
   usually an environment restriction, not a bundle-resolution mismatch.
+- Wrapper daemon startup uses an OS-assigned loopback port and a bounded private typed readiness message;
+  the owner publishes the descriptor only after validating the reported generation and
+  configuration. Daemon stderr is copied to the already-open private startup log without a shell or
+  a second pathname lookup.
 - Once the Beam daemon is running, a Lean or Rocq backend handshake failure is returned with the
   bounded tail of that backend's stderr. This backend diagnostic is separate from the selected
   session directory's daemon startup log, which covers startup of the Beam daemon process itself.
@@ -257,7 +261,11 @@ client protocol.
   `brokerResponseTimeout`; callback/display failures do not create daemon incidents. Beam keeps the
   latest 50 incident records, and `lean-beam doctor` lists recent incident paths. Incident logging
   never recreates a deleted project or session directory.
-- Cancellation is cooperative; prompt stopping depends on inner elaboration polling interruption.
+- `Ctrl-C` on a wrapper operation closes that operation's one-request connection; the daemon's
+  disconnect watcher cancels the exact admitted request without requiring a caller-supplied request
+  ID. The interrupted client exits nonzero without fabricating a terminal broker response on
+  stdout. `lean-beam cancel ID` remains the explicit cross-process cancellation surface.
+  Cancellation is cooperative; prompt stopping depends on inner elaboration polling interruption.
 - Wrapper sessions deliberately publish one frozen workspace. Remote workspaces and same-source
   multi-toolchain mirrors are not implemented yet.
 

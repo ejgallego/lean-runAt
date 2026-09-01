@@ -204,8 +204,9 @@ What is not a valid checkpoint target:
 - streamed stderr progress/diagnostic lines are annotated as `beam[<id>]: ...`
 - a second live request using the same id is rejected with `invalidParams`
 - `lean-beam cancel <id>` cancels an in-flight broker request by that `clientRequestId`
-- when `BEAM_REQUEST_ID` is set, `Ctrl-C` asks the broker to cancel that request before the local
-  CLI exits
+- `Ctrl-C` interrupts the owning one-request connection, and the daemon cancels that exact admitted
+  request when it observes the disconnect; this does not require `BEAM_REQUEST_ID`, exits nonzero,
+  and does not fabricate a terminal stdout response after the connection is gone
 
 ## File Progress And Readiness
 
