@@ -2678,7 +2678,7 @@ private def watchClientDisconnectUntil
     -- disconnect cancels the exact admitted request. Normal request completion interrupts this
     -- receive so the watcher cannot outlive its connection handler.
     match ← Transport.recvMsgInterruptibly client requestDone with
-    | .message _ => discard <| handle.cancel
+    | .completed _ => discard <| handle.cancel
     | .interrupted => pure ()
   catch _ =>
     unless ← requestDone do

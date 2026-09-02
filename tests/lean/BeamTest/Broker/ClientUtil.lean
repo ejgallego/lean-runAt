@@ -15,6 +15,10 @@ namespace BeamTest.Broker.TestUtil
 def testWorkspaceId : Beam.Broker.WorkspaceId :=
   "beam-test-project"
 
+/-- Keep test broker requests bounded without imposing production-scale timing assumptions. -/
+def testBrokerRequestTimeoutMs : Nat :=
+  120000
+
 /--
 Address ordinary fixture requests to the workspace created by the broker test harness.
 
@@ -46,7 +50,8 @@ def runClientWithStream
     IO (Beam.Broker.Response × Array Beam.Broker.SyncFileProgress × Array Beam.Broker.StreamDiagnostic) := do
   let progressRef ← IO.mkRef #[]
   let diagnosticRef ← IO.mkRef #[]
-  let result ← Beam.Broker.sendRequestWithCallbacksResult endpoint (inFixtureWorkspace req) {
+  let result ← Beam.Broker.sendRequestWithCallbacksTimeoutResult endpoint (inFixtureWorkspace req)
+    testBrokerRequestTimeoutMs {
     onFileProgress := fun progress =>
       progressRef.modify fun seen => seen.push progress
     onDiagnostic := fun diagnostic =>
@@ -59,7 +64,8 @@ def runClientWithProgress
     (endpoint : Beam.Broker.Endpoint)
     (req : Beam.Broker.Request) : IO (Beam.Broker.Response × Array ProgressEvent) := do
   let progressRef ← IO.mkRef #[]
-  let result ← Beam.Broker.sendRequestWithStreamResult endpoint (inFixtureWorkspace req) (server := .standalone) fun stream =>
+  let result ← Beam.Broker.sendRequestWithStreamTimeoutResult endpoint (inFixtureWorkspace req)
+      testBrokerRequestTimeoutMs (server := .standalone) fun stream =>
     match stream with
     | .fileProgress clientRequestId? progress =>
         progressRef.modify fun seen => seen.push { clientRequestId?, progress }
@@ -73,7 +79,8 @@ def runClientWithProgress
 
 def runClient (endpoint : Beam.Broker.Endpoint) (req : Beam.Broker.Request) : IO Beam.Broker.Response := do
   clientResponse "broker request failed" <|
-    ← Beam.Broker.sendRequestWithCallbacksResult endpoint (inFixtureWorkspace req)
+    ← Beam.Broker.sendRequestWithCallbacksTimeoutResult endpoint (inFixtureWorkspace req)
+      testBrokerRequestTimeoutMs
       (server := .standalone)
 
 def requireFileProgress (label : String) (resp : Beam.Broker.Response) :
@@ -129,7 +136,8 @@ def runBrokerStream
     (endpoint : Beam.Broker.Endpoint)
     (req : Beam.Broker.Request) : IO (Array Beam.Broker.StreamMessage) := do
   let messagesRef ← IO.mkRef #[]
-  match ← Beam.Broker.sendRequestWithStreamResult endpoint (inFixtureWorkspace req) (server := .standalone) fun message =>
+  match ← Beam.Broker.sendRequestWithStreamTimeoutResult endpoint (inFixtureWorkspace req)
+      testBrokerRequestTimeoutMs (server := .standalone) fun message =>
       messagesRef.modify (·.push message) with
   | .ok _ => pure (← messagesRef.get)
   | .error failure =>

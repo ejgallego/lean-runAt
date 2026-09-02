@@ -91,7 +91,7 @@ private def versionIdentityJson (home : System.FilePath) : IO Json := do
     (beamCli? := some appPath.toString)
   pure identity.asJson
 
-private def feedbackDaemonResponseTimeoutMs : Nat :=
+private def feedbackDaemonRequestTimeoutMs : Nat :=
   5000
 
 private def collectDaemonRequest
@@ -100,7 +100,7 @@ private def collectDaemonRequest
     (request : Request)
     (warnings : Array String) : IO (Json × Array String) := do
   let response ← sendRequestWithStreamTimeoutResult client.endpoint
-    (client.sealRequest request) feedbackDaemonResponseTimeoutMs (fun _ => pure ())
+    (client.sealRequest request) feedbackDaemonRequestTimeoutMs (fun _ => pure ())
     (.wrapper client.identity)
   pure <| Beam.Feedback.clientResponsePayloadOrWarning label response warnings
 

@@ -112,7 +112,7 @@ private structure DaemonProbe where
   root : String
   identity : DaemonIdentity
 
-private def daemonProbeResponseTimeoutMs : Nat :=
+private def daemonProbeRequestTimeoutMs : Nat :=
   2000
 
 private def daemonProbeOfResponse (resp : Response) : Except BrokerClientFailure DaemonProbe :=
@@ -138,7 +138,7 @@ private def daemonProbe
     (capability? : Option String := none) : IO (Except BrokerClientFailure DaemonProbe) := do
   match ← sendRequestWithStreamTimeoutResult endpoint
       { op := .stats, workspaceId? := some workspaceId, daemonCapability? := capability? }
-      daemonProbeResponseTimeoutMs (fun _ => pure ())
+      daemonProbeRequestTimeoutMs (fun _ => pure ())
       server with
   | .ok resp => pure <| daemonProbeOfResponse resp
   | .error failure => pure <| .error failure

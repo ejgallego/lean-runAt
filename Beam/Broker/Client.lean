@@ -85,7 +85,6 @@ private structure RequestDeadline where
   deadlineNanos : Nat
 
 private inductive RequestWait where
-  | unbounded
   | deadline (deadline : RequestDeadline)
   | interruptible (interrupted : IO Bool)
 
@@ -99,13 +98,6 @@ private def verifyServerHello
     (wait : RequestWait) : IO (Except BrokerClientFailure Unit) := do
   let greeting ←
     match wait with
-    | .unbounded =>
-        let deadlineNanos := (← IO.monoNanosNow) + serverHelloTimeoutMs * 1000000
-        match ← captureClientFailure (.transport .receive) <|
-            Transport.recvMsgUntil client deadlineNanos with
-        | .ok (some greeting) => pure greeting
-        | .ok none => return .error (.requestTimeout serverHelloTimeoutMs)
-        | .error failure => return .error failure
     | .deadline deadline =>
         match ← captureClientFailure (.transport .receive) <|
             Transport.recvMsgUntil client deadline.deadlineNanos with
@@ -135,23 +127,17 @@ private partial def sendRequestWithStreamResultCore
   let requestText := (toJson req).compress
   let client ←
     match wait with
-    | .unbounded =>
-      match ← captureClientFailure (.transport .connect) (Transport.connect endpoint) with
-      | .ok client => pure client
-      | .error failure => return .error failure
     | .deadline deadline =>
       match ← captureClientFailure (.transport .connect) <|
           Transport.connectUntil endpoint deadline.deadlineNanos with
       | .ok (.completed client) => pure client
       | .ok .timedOut => return .error (.requestTimeout deadline.timeoutMs)
-      | .ok .interrupted => return .error (.invalidResponse "bounded Beam daemon connect was interrupted")
       | .error failure => return .error failure
     | .interruptible interrupted =>
       match ← captureClientFailure (.transport .connect) <|
           Transport.connectInterruptibly endpoint interrupted with
       | .ok (.completed client) => pure client
       | .ok .interrupted => return .error .interrupted
-      | .ok .timedOut => return .error (.invalidResponse "interruptible Beam daemon connect timed out")
       | .error failure => return .error failure
   let abandoned ← IO.mkRef false
   try
@@ -161,11 +147,6 @@ private partial def sendRequestWithStreamResultCore
       | .error failure => return .error failure
     let sendResult ←
       match wait with
-      | .unbounded =>
-          match ← captureClientFailure (.transport .send) <|
-              Transport.sendMsg client requestText with
-          | .ok () => pure <| Except.ok ()
-          | .error failure => pure <| Except.error failure
       | .deadline deadline =>
           match ← captureClientFailure (.transport .send) <|
               Transport.sendMsgUntil client requestText deadline.deadlineNanos with
@@ -173,9 +154,6 @@ private partial def sendRequestWithStreamResultCore
           | .ok .timedOut =>
               abandoned.set true
               pure <| Except.error (.requestTimeout deadline.timeoutMs)
-          | .ok .interrupted =>
-              abandoned.set true
-              pure <| Except.error (.invalidResponse "bounded Beam daemon send was interrupted")
           | .error failure => pure <| Except.error failure
       | .interruptible interrupted =>
           match ← captureClientFailure (.transport .send) <|
@@ -184,9 +162,6 @@ private partial def sendRequestWithStreamResultCore
           | .ok .interrupted =>
               abandoned.set true
               pure <| Except.error .interrupted
-          | .ok .timedOut =>
-              abandoned.set true
-              pure <| Except.error (.invalidResponse "interruptible Beam daemon send timed out")
           | .error failure => pure <| Except.error failure
     match sendResult with
     | .ok () => pure ()
@@ -194,14 +169,10 @@ private partial def sendRequestWithStreamResultCore
     let rec receiveResponse : IO (Except BrokerClientFailure Response) := do
       let msg ←
         match wait with
-        | .unbounded =>
-            match ← captureClientFailure (.transport .receive) (Transport.recvMsg client) with
-            | .ok msg => pure msg
-            | .error failure => return .error failure
         | .interruptible interrupted =>
             match ← captureClientFailure (.transport .receive) <|
                 Transport.recvMsgInterruptibly client interrupted with
-            | .ok (.message msg) => pure msg
+            | .ok (.completed msg) => pure msg
             | .ok .interrupted => return .error .interrupted
             | .error failure => return .error failure
         | .deadline deadline =>
@@ -232,14 +203,6 @@ private partial def sendRequestWithStreamResultCore
     else
       Transport.closeConnection client
 
-/-- Send one request while preserving transport, response, and callback failures as typed data. -/
-partial def sendRequestWithStreamResult
-    (endpoint : Endpoint)
-    (req : Request)
-    (onStream : StreamMessage → IO Unit)
-    (server : ServerExpectation) : IO (Except BrokerClientFailure Response) := do
-  sendRequestWithStreamResultCore endpoint req onStream .unbounded server
-
 /-- Send one request with one absolute timeout across connect, greeting, send, and response. -/
 partial def sendRequestWithStreamTimeoutResult
     (endpoint : Endpoint)
@@ -253,13 +216,14 @@ partial def sendRequestWithStreamTimeoutResult
   }
   sendRequestWithStreamResultCore endpoint req onStream (.deadline deadline) server
 
-/-- Send one request with typed client failures and structured progress callbacks. -/
-partial def sendRequestWithCallbacksResult
+/-- Send one request with one absolute timeout and structured progress callbacks. -/
+partial def sendRequestWithCallbacksTimeoutResult
     (endpoint : Endpoint)
     (req : Request)
+    (timeoutMs : Nat)
     (callbacks : StreamCallbacks := {})
     (server : ServerExpectation) : IO (Except BrokerClientFailure Response) := do
-  sendRequestWithStreamResult endpoint req (server := server) fun stream => do
+  sendRequestWithStreamTimeoutResult endpoint req timeoutMs (server := server) fun stream => do
     match stream with
     | .response .. =>
         pure ()
