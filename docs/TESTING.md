@@ -297,8 +297,8 @@ are specifically checking the CI budget. The focused daemon lifecycle fixture ex
 its toolchain into one owned shared cache before timing daemon startup, so cold bundle compilation
 is not misdiagnosed as a daemon-readiness timeout.
 The focused CLI daemon test also checks that a failed stderr evidence sink does not stop pipe
-draining, that sink failure observation is synchronized, and that an unproven writer produces a
-bounded `writerUnreaped` outcome rather than an unbounded task join.
+draining, that sink failure observation is synchronized, and that a pipe held open past leader exit
+produces a bounded `pipeStillOpen` outcome rather than an unbounded task join.
 
 The focused harness also accepts `no-progress-sync` to isolate whether a timeout depends on MCP
 progress notifications or the underlying `lean_sync` / `waitForDiagnostics` path.

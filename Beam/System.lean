@@ -20,8 +20,9 @@ partial def waitTaskWithTimeout
       return some (← IO.wait task)
     if remainingMs == 0 then
       return none
-    IO.sleep pollMs.toUInt32
-    loop (remainingMs - min pollMs remainingMs)
+    let sleepMs := min (max pollMs 1) remainingMs
+    IO.sleep sleepMs.toUInt32
+    loop (remainingMs - sleepMs)
   loop timeoutMs
 
 /-- Return the POSIX permission bits reported by `lstat`, without following the final symlink. -/

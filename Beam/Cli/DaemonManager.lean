@@ -238,21 +238,21 @@ private def removeRegistryGeneration (control : ProjectControl) (entry : Session
         removeRegistry control
   | .absent | .invalid _ => pure ()
 
-private def daemonShutdownResponseTimeoutMs : Nat :=
+private def daemonShutdownRequestTimeoutMs : Nat :=
   30000
 
-/-- Ask a daemon to shut down without allowing its response stream to hold CLI control forever. -/
+/-- Ask a daemon to shut down without allowing the complete request to hold CLI control forever. -/
 def requestDaemonShutdown
     (endpoint : Transport.Endpoint)
     (identity : DaemonIdentity)
     (capability : String)
-    (responseTimeoutMs : Nat := daemonShutdownResponseTimeoutMs) :
+    (requestTimeoutMs : Nat := daemonShutdownRequestTimeoutMs) :
     IO (Except BrokerClientFailure Response) := do
   sendRequestWithStreamTimeoutResult endpoint {
       op := .shutdown
       daemonCapability? := some capability
     }
-    responseTimeoutMs (fun _ => pure ()) (.wrapper identity)
+    requestTimeoutMs (fun _ => pure ()) (.wrapper identity)
 
 inductive RegistryUnsafeReason where
   | endpointProbeFailed (failure : BrokerClientFailure)
@@ -369,7 +369,7 @@ private def daemonFailureIncidentKind? : BrokerClientFailure → Option String
   | .transport _ _ => some "brokerTransportFailure"
   | .invalidResponse _ => some "invalidBrokerResponse"
   | .streamCallback _ => none
-  | .responseTimeout _ => some "brokerResponseTimeout"
+  | .requestTimeout _ => some "brokerRequestTimeout"
   | .interrupted => none
 
 private def daemonFailureIncidentTimestampLabel (timestamp : String) : String :=
@@ -484,12 +484,12 @@ private structure StartedDaemon where
 private partial def waitForDaemonChildExit
     {cfg : IO.Process.StdioConfig}
     (child : IO.Process.Child cfg)
-    (tries : Nat := 20) : IO Bool := do
+    (tries : Nat := 20) : IO (Option UInt32) := do
   match ← child.tryWait with
-  | some _ => pure true
+  | some exitCode => pure <| some exitCode
   | none =>
       if tries == 0 then
-        pure false
+        pure none
       else
         IO.sleep 100
         waitForDaemonChildExit child (tries - 1)
@@ -498,23 +498,25 @@ private def terminateDaemonChild
     {cfg : IO.Process.StdioConfig}
     (child : IO.Process.Child cfg) : IO Bool := do
   try
-    if (← child.tryWait).isNone then
-      child.kill
-    waitForDaemonChildExit child
+    match ← child.tryWait with
+    | some _ => pure true
+    | none =>
+        child.kill
+        pure (← waitForDaemonChildExit child).isSome
   catch _ =>
     pure false
 
 private def finishDaemonLogDrain
     (capture : Beam.StderrCapture)
-    (writerReaped : Bool) : IO Beam.StderrCaptureOutcome := do
-  if writerReaped then
+    (leaderReaped : Bool) : IO Beam.StderrCaptureOutcome := do
+  if leaderReaped then
     capture.finishAfterWriterExit
   else
-    pure .writerUnreaped
+    pure .pipeStillOpen
 
 private def terminateStartedDaemon (started : StartedDaemon) : IO Unit := do
-  let writerReaped ← terminateDaemonChild started.child
-  discard <| finishDaemonLogDrain started.stderrCapture writerReaped
+  let leaderReaped ← terminateDaemonChild started.child
+  discard <| finishDaemonLogDrain started.stderrCapture leaderReaped
 
 private def daemonStderrTailLimit : Nat :=
   16 * 1024
@@ -645,8 +647,8 @@ private def waitForDaemonReady
     if ← IO.hasFinished readyTask then
       discard <| IO.wait readyTask
     else
-      let writerReaped ← terminateDaemonChild started.child
-      if writerReaped then
+      let leaderReaped ← terminateDaemonChild started.child
+      if leaderReaped then
         discard <| Beam.waitTaskWithTimeout readyTask 1000
 
 private def newDaemonGenerationId (configHash : String) : IO String := do
@@ -802,7 +804,7 @@ def RegistryUnsafeReason.message : RegistryUnsafeReason → String
       | .transport .connect _ =>
           s!"the recorded daemon endpoint is unavailable: {failure.detail}"
       | .transport .send _ | .transport .receive _ | .invalidResponse _ | .streamCallback _
-      | .responseTimeout _ | .interrupted =>
+      | .requestTimeout _ | .interrupted =>
           s!"the recorded endpoint did not validate as the expected Beam generation: {failure.detail}"
   | .wrongEndpointRoot daemonRoot => s!"the recorded endpoint serves another root: {daemonRoot}"
   | .wrongGeneration daemonRoot =>
@@ -1099,18 +1101,14 @@ private def closeDaemonOwnerPipe
   let (_ownerPipe, child) ← child.takeStdin
   pure child
 
-private partial def waitForOwnedDaemonExit
+private def waitForOwnedDaemonExit
     {cfg : IO.Process.StdioConfig}
     (child : IO.Process.Child cfg)
     (exitCodeRef : IO.Ref (Option UInt32))
     (tries : Nat) : IO Unit := do
-  if (← exitCodeRef.get).isSome || tries == 0 then
-    return
-  if let some exitCode ← child.tryWait then
-    exitCodeRef.set (some exitCode)
-  else
-    IO.sleep 100
-    waitForOwnedDaemonExit child exitCodeRef (tries - 1)
+  if (← exitCodeRef.get).isNone then
+    if let some exitCode ← waitForDaemonChildExit child tries then
+      exitCodeRef.set (some exitCode)
 
 private def removeOwnedRegistry
     (root controlDir : System.FilePath)
@@ -1127,24 +1125,27 @@ private def attemptCleanup (act : IO Unit) : IO Unit := do
   catch _ =>
     pure ()
 
-private inductive OwnedDaemonFinish where
+private inductive OwnedDaemonProcessOutcome where
   | exitedCleanly
   | forcedReaped
   | exitedAbnormally (exitCode : UInt32)
-  | captureFailed (error : IO.Error)
   | unreaped
 
-private def classifyOwnedDaemonExit (exitCode : UInt32) : OwnedDaemonFinish :=
+private structure OwnedDaemonFinish where
+  process : OwnedDaemonProcessOutcome
+  stderr : Beam.StderrCaptureOutcome
+
+private def classifyOwnedDaemonExit (exitCode : UInt32) : OwnedDaemonProcessOutcome :=
   if exitCode == 0 then .exitedCleanly else .exitedAbnormally exitCode
 
-private def OwnedDaemonFinish.writerReaped : OwnedDaemonFinish → Bool
+private def OwnedDaemonProcessOutcome.leaderReaped : OwnedDaemonProcessOutcome → Bool
   | .unreaped => false
-  | .exitedCleanly | .forcedReaped | .exitedAbnormally _ | .captureFailed _ => true
+  | .exitedCleanly | .forcedReaped | .exitedAbnormally _ => true
 
 private def forceOwnedDaemonChild
     {cfg : IO.Process.StdioConfig}
     (child : IO.Process.Child cfg)
-    (exitCodeRef : IO.Ref (Option UInt32)) : IO OwnedDaemonFinish := do
+    (exitCodeRef : IO.Ref (Option UInt32)) : IO OwnedDaemonProcessOutcome := do
   let killSent ←
     try
       child.kill
@@ -1160,7 +1161,7 @@ private def forceOwnedDaemonChild
 private def finishOwnedDaemonChild
     (owned : OwnedProjectDaemon)
     (exitCodeRef : IO.Ref (Option UInt32)) : IO OwnedDaemonFinish := do
-  let finish ←
+  let process ←
     if let some exitCode ← exitCodeRef.get then
       pure <| classifyOwnedDaemonExit exitCode
     else
@@ -1175,10 +1176,8 @@ private def finishOwnedDaemonChild
             forceOwnedDaemonChild child exitCodeRef
       catch _ =>
         forceOwnedDaemonChild owned.started.child exitCodeRef
-  match ← finishDaemonLogDrain owned.started.stderrCapture finish.writerReaped with
-  | .drained => pure finish
-  | .sourceFailed err => pure <| .captureFailed err
-  | .writerUnreaped => pure .unreaped
+  let stderr ← finishDaemonLogDrain owned.started.stderrCapture process.leaderReaped
+  pure { process, stderr }
 
 private def markOwnedRegistryDraining
     (root controlDir : System.FilePath)
@@ -1231,23 +1230,30 @@ private def finishOwnedProjectDaemon
     | .drained => pure ()
     | .sourceFailed err =>
         IO.eprintln s!"Beam daemon stderr source failed after abnormal exit: {err}"
-    | .writerUnreaped =>
+    | .pipeStillOpen =>
         IO.eprintln "Beam daemon stderr remained open after its leader exited"
   else
     markOwnedRegistryDraining root controlDir owned.entry
-    match ← finishOwnedDaemonChild owned exitCodeRef with
-    | .exitedCleanly | .forcedReaped =>
-        removeOwnedRegistry root controlDir owned.entry
-    | .exitedAbnormally _ =>
-        restoreOwnedRegistryRecoveryFence root controlDir owned.entry
-    | .captureFailed err =>
+    let finish ← finishOwnedDaemonChild owned exitCodeRef
+    match finish.stderr with
+    | .sourceFailed err =>
         IO.eprintln s!"Beam daemon stderr source failed during cleanup: {err}"
         restoreOwnedRegistryRecoveryFence root controlDir owned.entry
-    | .unreaped =>
+    | .pipeStillOpen =>
         let tail := (← owned.started.stderrCapture.snapshot).trimAscii.toString
         unless tail.isEmpty do
           IO.eprintln s!"Beam daemon could not be fully reaped; stderr tail:\n{tail}"
         pure ()
+    | .drained =>
+        match finish.process with
+        | .exitedCleanly | .forcedReaped =>
+            removeOwnedRegistry root controlDir owned.entry
+        | .exitedAbnormally _ =>
+            restoreOwnedRegistryRecoveryFence root controlDir owned.entry
+        | .unreaped =>
+            -- This combination is unreachable through `finishDaemonLogDrain`, but keeping the
+            -- conservative policy explicit makes both product components independently total.
+            pure ()
 
 def withProjectDaemonOwner
     (home root : System.FilePath)

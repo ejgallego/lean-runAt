@@ -258,15 +258,15 @@ client protocol.
   configuration. Daemon stderr is copied to the already-open private startup log only until
   readiness or a 64-KiB bound, without a shell or a second pathname lookup. A log-sink failure is
   retained as startup failure while the shared bounded capture continues draining the daemon pipe.
-  Capture cleanup is bounded and reports an unreaped writer instead of waiting indefinitely on a
+  Capture cleanup is bounded and reports a still-open pipe instead of waiting indefinitely on a
   synchronous pipe read; abnormal daemon exits include the retained stderr tail in their diagnostic.
 - Once the Beam daemon is running, a Lean or Rocq backend handshake failure is returned with the
   bounded tail of that backend's stderr. This backend diagnostic is separate from the selected
   session directory's daemon startup log, which covers startup of the Beam daemon process itself.
-- Typed broker transport, invalid-response, and response-timeout failures include registry/log
+- Typed broker transport, invalid-response, and request-timeout failures include registry/log
   context and, while the selected private session directory still exists, write a JSON incident
   record below it. Incident kinds are `brokerTransportFailure`, `invalidBrokerResponse`, and
-  `brokerResponseTimeout`; callback/display failures do not create daemon incidents. Beam keeps the
+  `brokerRequestTimeout`; callback/display failures do not create daemon incidents. Beam keeps the
   latest 50 incident records, and `lean-beam doctor` lists recent incident paths. Incident logging
   never recreates a deleted project or session directory.
 - `Ctrl-C` is observed across wrapper connect, generation greeting, request send, and response

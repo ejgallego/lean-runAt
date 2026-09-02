@@ -9,7 +9,11 @@ import Std.Sync.Mutex
 
 namespace Beam
 
-/-- A best-effort stderr sink returns whether it should receive another chunk. -/
+/--
+A best-effort stderr sink returns whether it should receive another chunk. Sink callbacks must
+complete within a caller-appropriate bound: disabling a sink waits for any callback already in
+progress so it can report a stable failure state.
+-/
 abbrev StderrSink := ByteArray → IO Bool
 
 /-- The bounded result of releasing an owned stderr capture. -/
@@ -18,8 +22,8 @@ inductive StderrCaptureOutcome where
   | drained
   /-- The source stopped with an I/O error after the writer exited. -/
   | sourceFailed (error : IO.Error)
-  /-- The writer, or another process holding its pipe, could not be proven gone. -/
-  | writerUnreaped
+  /-- EOF was not observed within the bound because some process may still hold the pipe open. -/
+  | pipeStillOpen
 
 private structure StderrSinkState where
   sink? : Option StderrSink
@@ -112,7 +116,7 @@ def StderrCapture.disableSinkAndAwaitCurrentWrite
 Finish a capture after its writer has been reaped. This operation never tries to cancel the blocking
 pipe read: Lean task cancellation cannot interrupt the synchronous `Handle.read`. If EOF is not
 observed within the bound, a descendant still owns the pipe (or writer exit was misclassified), so
-the caller receives `writerUnreaped` instead of waiting indefinitely.
+the caller receives `pipeStillOpen` instead of waiting indefinitely.
 -/
 def StderrCapture.finishAfterWriterExit
     (capture : StderrCapture)
@@ -120,6 +124,6 @@ def StderrCapture.finishAfterWriterExit
   match ← Beam.waitTaskWithTimeout capture.drainTask timeoutMs with
   | some (.ok ()) => pure .drained
   | some (.error err) => pure <| .sourceFailed err
-  | none => pure .writerUnreaped
+  | none => pure .pipeStillOpen
 
 end Beam

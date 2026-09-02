@@ -156,8 +156,8 @@ private def checkSilentEndpointProbeTimeout : IO Unit := do
       match ← Beam.Daemon.daemonGenerationStatus endpoint
           Beam.Cli.projectDaemonWorkspaceId (System.FilePath.mk "/tmp") identity
           "test-capability" with
-      | .probeFailed (.responseTimeout timeoutMs) =>
-          require "silent endpoint should preserve its typed response timeout"
+      | .probeFailed (.requestTimeout timeoutMs) =>
+          require "silent endpoint should preserve its typed request timeout"
             (timeoutMs == 2000)
       | .probeFailed failure =>
           throw <| IO.userError s!"silent endpoint reported {repr failure}"
@@ -178,8 +178,8 @@ private def checkSilentShutdownTimeout : IO Unit := do
       match ← Beam.Cli.requestDaemonShutdown endpoint
           { daemonId := "silent-endpoint", configHash := "silent-endpoint" }
           "test-capability" 50 with
-      | .error (.responseTimeout timeoutMs) =>
-          require "silent shutdown should preserve its typed response timeout" (timeoutMs == 50)
+      | .error (.requestTimeout timeoutMs) =>
+          require "silent shutdown should preserve its typed request timeout" (timeoutMs == 50)
       | .error failure =>
           throw <| IO.userError s!"silent shutdown reported {repr failure}"
       | .ok response =>
@@ -342,7 +342,7 @@ private def checkStderrCaptureSurvivesSinkFailure : IO Unit := do
       match ← capture.finishAfterWriterExit with
       | .drained => pure ()
       | .sourceFailed err => throw err
-      | .writerUnreaped => throw <| IO.userError "stderr capture did not finish"
+      | .pipeStillOpen => throw <| IO.userError "stderr capture did not finish"
       let some failure ← capture.disableSinkAndAwaitCurrentWrite
         | throw <| IO.userError "stderr capture did not retain its sink failure"
       requireSubstring "stderr sink failure" "intentional stderr sink failure" failure.toString
@@ -393,7 +393,7 @@ private def checkStderrSinkDisableIsSynchronized : IO Unit := do
       match ← capture.finishAfterWriterExit with
       | .drained => pure ()
       | .sourceFailed err => throw err
-      | .writerUnreaped => throw <| IO.userError "synchronized stderr capture did not finish"
+      | .pipeStillOpen => throw <| IO.userError "synchronized stderr capture did not finish"
   finally
     release.set true
     if ← path.pathExists then
@@ -410,7 +410,7 @@ private def checkStderrCaptureDoesNotJoinInheritedPipe : IO Unit := do
   discard <| proc.wait
   let started ← IO.monoNanosNow
   match ← capture.finishAfterWriterExit 50 with
-  | .writerUnreaped => pure ()
+  | .pipeStillOpen => pure ()
   | .drained | .sourceFailed _ =>
       throw <| IO.userError "an inherited stderr pipe should remain unreaped before its writer exits"
   let elapsedMs := ((← IO.monoNanosNow) - started) / 1000000
@@ -420,7 +420,7 @@ private def checkStderrCaptureDoesNotJoinInheritedPipe : IO Unit := do
   match ← capture.finishAfterWriterExit with
   | .drained => pure ()
   | .sourceFailed err => throw err
-  | .writerUnreaped =>
+  | .pipeStillOpen =>
       throw <| IO.userError "stderr capture did not drain after the descendant exited"
 
 private def requireRequestJson

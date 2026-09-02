@@ -197,8 +197,9 @@ private partial def waitForProcessExitWithTimeout
         if remainingMs == 0 then
           pure false
         else
-          IO.sleep pollMs.toUInt32
-          loop (remainingMs - min pollMs remainingMs)
+          let sleepMs := min (max pollMs 1) remainingMs
+          IO.sleep sleepMs.toUInt32
+          loop (remainingMs - sleepMs)
   loop timeoutMs
 
 private def terminateBackendProcess (proc : IO.Process.Child brokerStdio) : IO Bool := do
@@ -230,11 +231,11 @@ private def terminateBackendProcess (proc : IO.Process.Child brokerStdio) : IO B
 
 private def finishBackendStderrCapture
     (capture : BackendStderrCapture)
-    (writerReaped : Bool) : IO Beam.StderrCaptureOutcome := do
-  if writerReaped then
+    (leaderReaped : Bool) : IO Beam.StderrCaptureOutcome := do
+  if leaderReaped then
     capture.finishAfterWriterExit
   else
-    pure .writerUnreaped
+    pure .pipeStillOpen
 
 private def startBackendStderrCaptureOrTerminate
     (backend : Backend)
@@ -251,15 +252,15 @@ private def terminateBackendFailure
     (phase cause : String)
     (proc : IO.Process.Child brokerStdio)
     (capture : BackendStderrCapture) : IO String := do
-  let writerReaped ← terminateBackendProcess proc
-  let captureOutcome ← finishBackendStderrCapture capture writerReaped
+  let leaderReaped ← terminateBackendProcess proc
+  let captureOutcome ← finishBackendStderrCapture capture leaderReaped
   let message ← backendFailureMessage backend phase cause capture
   pure <| match captureOutcome with
     | .drained => message
     | .sourceFailed err =>
         message ++ s!"\nbackend stderr source also failed while draining: {err}"
-    | .writerUnreaped =>
-        message ++ "\nbackend stderr writer could not be reaped; its bounded capture remains active"
+    | .pipeStillOpen =>
+        message ++ "\nbackend stderr pipe remained open; its bounded capture remains active"
 
 private def sessionExited (session : Session) : IO Bool := do
   try
@@ -571,16 +572,16 @@ private def shutdownSession (session : Session) : IO Unit := do
       ({ method := "exit", param := Json.null : Lean.JsonRpc.Notification Json })
   catch _ =>
     pure ()
-  let writerReaped ←
+  let leaderReaped ←
     if ← waitForProcessExitWithTimeout session.proc sessionShutdownReplyTimeoutMs then
       pure true
     else
       terminateBackendProcess session.proc
-  match ← finishBackendStderrCapture session.stderrCapture writerReaped with
+  match ← finishBackendStderrCapture session.stderrCapture leaderReaped with
   | .drained => pure ()
   | .sourceFailed err =>
       throw <| IO.userError s!"backend stderr source failed while draining: {err}"
-  | .writerUnreaped =>
+  | .pipeStillOpen =>
       -- A descendant can retain the pipe after the backend leader is reaped. This is an explicit
       -- bounded resource outcome, not a reason to make an otherwise completed shutdown fail.
       traceBroker "backend stderr remained open after its leader exited"

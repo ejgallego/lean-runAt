@@ -43,7 +43,7 @@ inductive BrokerClientFailure where
   | transport (operation : BrokerTransportOperation) (error : IO.Error)
   | invalidResponse (detail : String)
   | streamCallback (error : IO.Error)
-  | responseTimeout (timeoutMs : Nat)
+  | requestTimeout (timeoutMs : Nat)
   | interrupted
 
 def BrokerClientFailure.detail : BrokerClientFailure → String
@@ -51,8 +51,8 @@ def BrokerClientFailure.detail : BrokerClientFailure → String
       s!"Beam daemon {operation.label} failed: {error}"
   | .streamCallback error => error.toString
   | .invalidResponse detail => detail
-  | .responseTimeout timeoutMs =>
-      s!"Beam daemon response timed out after {timeoutMs} ms"
+  | .requestTimeout timeoutMs =>
+      s!"Beam daemon request timed out after {timeoutMs} ms"
   | .interrupted => "Beam request interrupted"
 
 instance : Repr BrokerClientFailure where
@@ -61,7 +61,7 @@ instance : Repr BrokerClientFailure where
     | .transport operation error => s!"BrokerClientFailure.transport {repr operation} {error}"
     | .invalidResponse detail => s!"BrokerClientFailure.invalidResponse {detail}"
     | .streamCallback error => s!"BrokerClientFailure.streamCallback {error}"
-    | .responseTimeout timeoutMs => s!"BrokerClientFailure.responseTimeout {timeoutMs}"
+    | .requestTimeout timeoutMs => s!"BrokerClientFailure.requestTimeout {timeoutMs}"
     | .interrupted => "BrokerClientFailure.interrupted"
 
 private def decodeStreamMessage (msg : String) : Except String StreamMessage := do
@@ -104,20 +104,20 @@ private def verifyServerHello
         match ← captureClientFailure (.transport .receive) <|
             Transport.recvMsgUntil client deadlineNanos with
         | .ok (some greeting) => pure greeting
-        | .ok none => return .error (.responseTimeout serverHelloTimeoutMs)
+        | .ok none => return .error (.requestTimeout serverHelloTimeoutMs)
         | .error failure => return .error failure
     | .deadline deadline =>
         match ← captureClientFailure (.transport .receive) <|
             Transport.recvMsgUntil client deadline.deadlineNanos with
         | .ok (some greeting) => pure greeting
-        | .ok none => return .error (.responseTimeout deadline.timeoutMs)
+        | .ok none => return .error (.requestTimeout deadline.timeoutMs)
         | .error failure => return .error failure
     | .interruptible interrupted =>
         let deadlineNanos := (← IO.monoNanosNow) + serverHelloTimeoutMs * 1000000
         match ← captureClientFailure (.transport .receive) <|
             Transport.recvMsgInterruptiblyUntil client deadlineNanos interrupted with
         | .ok (.completed greeting) => pure greeting
-        | .ok .timedOut => return .error (.responseTimeout serverHelloTimeoutMs)
+        | .ok .timedOut => return .error (.requestTimeout serverHelloTimeoutMs)
         | .ok .interrupted => return .error .interrupted
         | .error failure => return .error failure
   match ServerHello.decode expectedIdentity greeting with
@@ -143,7 +143,7 @@ private partial def sendRequestWithStreamResultCore
       match ← captureClientFailure (.transport .connect) <|
           Transport.connectUntil endpoint deadline.deadlineNanos with
       | .ok (.completed client) => pure client
-      | .ok .timedOut => return .error (.responseTimeout deadline.timeoutMs)
+      | .ok .timedOut => return .error (.requestTimeout deadline.timeoutMs)
       | .ok .interrupted => return .error (.invalidResponse "bounded Beam daemon connect was interrupted")
       | .error failure => return .error failure
     | .interruptible interrupted =>
@@ -172,7 +172,7 @@ private partial def sendRequestWithStreamResultCore
           | .ok (.completed ()) => pure <| Except.ok ()
           | .ok .timedOut =>
               abandoned.set true
-              pure <| Except.error (.responseTimeout deadline.timeoutMs)
+              pure <| Except.error (.requestTimeout deadline.timeoutMs)
           | .ok .interrupted =>
               abandoned.set true
               pure <| Except.error (.invalidResponse "bounded Beam daemon send was interrupted")
@@ -208,7 +208,7 @@ private partial def sendRequestWithStreamResultCore
             match ← captureClientFailure (.transport .receive) <|
                 Transport.recvMsgUntil client deadline.deadlineNanos with
             | .ok (some msg) => pure msg
-            | .ok none => return .error (.responseTimeout deadline.timeoutMs)
+            | .ok none => return .error (.requestTimeout deadline.timeoutMs)
             | .error failure => return .error failure
       let stream ←
         match decodeStreamMessage msg with

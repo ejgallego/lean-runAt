@@ -21,7 +21,7 @@ private def homeFixture : IO String := do
 private def checkBestEffortBrokerWarning : IO Unit := do
   let warnings := #["existing warning"]
   let (payload, warnings) := Beam.Feedback.clientResponsePayloadOrWarning "stats"
-    (.error (.responseTimeout 250)) warnings
+    (.error (.requestTimeout 250)) warnings
   requireJsonNull "timed-out feedback broker payload" "payload"
     (Json.mkObj [("payload", payload)])
   require "feedback should preserve existing warnings" (warnings[0]? == some "existing warning")

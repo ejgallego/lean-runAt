@@ -454,7 +454,11 @@ private startup-log inode opened by the owner until readiness or a 64-KiB bound.
 capture continues draining into a bounded in-memory tail if that file sink fails, records the first
 sink failure, and never lets evidence IO block the daemon pipe. Sink shutdown is synchronized with
 the current write. Capture finalization never assumes task cancellation interrupts a synchronous
-pipe read: it joins only after writer exit and otherwise returns a bounded `writerUnreaped` outcome.
+pipe read: it joins only after writer exit and otherwise returns a bounded `pipeStillOpen` outcome.
+`StderrSink` callbacks must complete within a caller-appropriate bound because disabling a sink
+waits for any callback already in progress before reporting its stable failure state.
+Owner cleanup retains process exit and stderr capture as independent outcomes, so a capture failure
+cannot erase an abnormal daemon exit or accidentally authorize registry removal.
 Startup does not invoke a shell,
 reopen the checked pathname, guess a port, probe for readiness, or parse log text as control flow.
 
