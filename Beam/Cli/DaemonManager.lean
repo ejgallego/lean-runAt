@@ -13,6 +13,7 @@ import Beam.Daemon.Debug
 import Beam.Daemon.Paths
 import Beam.Daemon.Registry
 import Beam.Daemon.Startup
+import Beam.StderrCapture
 
 open Lean
 
@@ -171,10 +172,16 @@ private def createPrivateTempFile
 private def writePrivateFileAtomically
     (dir : System.FilePath)
     (leaf stem contents : String) : IO Unit := do
-  let (tmp, handle) ← createPrivateTempFile dir stem
+  let tmp ← newPrivateTempPath dir stem
   try
-    handle.putStr contents
-    handle.flush
+    -- Unlike the startup-log acquisition below, ordinary publication does not retain a handle
+    -- across rename. The scoped handle is closed before the temporary inode is published.
+    IO.FS.withFile tmp .writeNew fun handle => do
+      IO.setAccessRights tmp {
+        user := { read := true, write := true }
+      }
+      handle.putStr contents
+      handle.flush
     IO.FS.rename tmp (dir / leaf)
   catch err =>
     try
@@ -208,6 +215,7 @@ private def writeExistingRegistry (control : ProjectControl) (entry : SessionDes
   -- Teardown must not create a path while the project tree is being removed. Rewrite through an
   -- already existing file handle; if the registry was concurrently unlinked, this updates only the
   -- unlinked inode and cannot recreate the project or control directory.
+  requireRegularRegistryLeaf control.registry
   IO.FS.withFile control.registry .readWrite fun handle => do
     handle.rewind
     handle.putStr ((toJson entry).pretty ++ "\n")
@@ -235,6 +243,7 @@ private def daemonShutdownResponseTimeoutMs : Nat :=
 /-- Ask a daemon to shut down without allowing its response stream to hold CLI control forever. -/
 def requestDaemonShutdown
     (endpoint : Transport.Endpoint)
+    (identity : DaemonIdentity)
     (capability : String)
     (responseTimeoutMs : Nat := daemonShutdownResponseTimeoutMs) :
     IO (Except BrokerClientFailure Response) := do
@@ -242,7 +251,7 @@ def requestDaemonShutdown
       op := .shutdown
       daemonCapability? := some capability
     }
-    responseTimeoutMs (fun _ => pure ())
+    responseTimeoutMs (fun _ => pure ()) (expectedIdentity? := some identity)
 
 inductive RegistryUnsafeReason where
   | endpointProbeFailed (failure : BrokerClientFailure)
@@ -292,7 +301,7 @@ private def observeProjectRegistryAt
   | .selected entry =>
       let endpoint := registryEndpoint entry
       match ← daemonGenerationStatus endpoint entry.workspace.workspaceId root
-          entry.identity entry.capability with
+          entry.identity entry.capability (verifyServerIdentity := true) with
       | .exact => pure <| .live entry
       | .probeFailed failure =>
           pure <| .recoveryRequired (.unusable entry (.endpointProbeFailed failure))
@@ -466,11 +475,9 @@ private abbrev daemonStdio : IO.Process.StdioConfig where
   stdout := .piped
   stderr := .piped
 
-private abbrev DaemonLogDrainTask := Task (Except IO.Error Unit)
-
 private structure StartedDaemon where
   child : IO.Process.Child daemonStdio
-  stderrDrain : DaemonLogDrainTask
+  stderrCapture : Beam.StderrCapture
 
 private partial def waitForDaemonChildExit
     {cfg : IO.Process.StdioConfig}
@@ -491,16 +498,6 @@ private def terminateDaemonChild
   catch _ =>
     pure ()
 
-private partial def drainDaemonStderr
-    (source target : IO.FS.Handle) : IO Unit := do
-  let chunk ← source.read 8192
-  if chunk.isEmpty then
-    target.flush
-  else
-    target.write chunk
-    target.flush
-    drainDaemonStderr source target
-
 /-- Cancel an unfinished task and wait until it has relinquished its underlying IO resource. -/
 private def settleTask (task : Task α) : IO Unit := do
   unless ← IO.hasFinished task do
@@ -510,19 +507,26 @@ private def settleTask (task : Task α) : IO Unit := do
       discard <| IO.wait task
 
 private partial def finishDaemonLogDrain
-    (task : DaemonLogDrainTask)
+    (capture : Beam.StderrCapture)
     (tries : Nat := 20) : IO Unit := do
+  let task := capture.drainTask
   if ← IO.hasFinished task then
     discard <| IO.wait task
   else if tries == 0 then
     settleTask task
   else
     IO.sleep 50
-    finishDaemonLogDrain task (tries - 1)
+    finishDaemonLogDrain capture (tries - 1)
 
 private def terminateStartedDaemon (started : StartedDaemon) : IO Unit := do
   terminateDaemonChild started.child
-  finishDaemonLogDrain started.stderrDrain
+  finishDaemonLogDrain started.stderrCapture
+
+private def daemonStderrTailLimit : Nat :=
+  16 * 1024
+
+private def daemonStartupLogLimit : Nat :=
+  64 * 1024
 
 private def validateDaemonStartupLog (logPath : System.FilePath) : IO Unit := do
   try
@@ -571,13 +575,23 @@ private def startDaemon
     cwd := some desired.root
     setsid := true
   }
-  let stderrDrain ←
+  let stderrCapture ←
     try
-      IO.asTask (prio := Task.Priority.dedicated) <| drainDaemonStderr child.stderr logHandle
+      let written ← IO.mkRef 0
+      let sink : Beam.StderrSink := fun chunk => do
+        let count ← written.get
+        let remaining := daemonStartupLogLimit - min daemonStartupLogLimit count
+        let keep := min remaining chunk.size
+        if keep > 0 then
+          logHandle.write (chunk.extract 0 keep)
+          logHandle.flush
+          written.set (count + keep)
+        pure (count + keep < daemonStartupLogLimit)
+      Beam.StderrCapture.start child.stderr daemonStderrTailLimit (some sink)
     catch err =>
       terminateDaemonChild child
       throw err
-  let started : StartedDaemon := { child, stderrDrain }
+  let started : StartedDaemon := { child, stderrCapture }
   try
     child.stdin.putStrLn capability
     child.stdin.flush
@@ -617,13 +631,20 @@ private def waitForDaemonReady
   let deadlineNanos := (← IO.monoNanosNow) + daemonStartupTimeoutMs * 1000000
   try
     let result ← waitForDaemonReadyUntil started identity readyTask deadlineNanos
-    match result with
-    | .ok _ => pure result
-    | .error _ =>
+    started.stderrCapture.disableSink
+    let sinkFailure? ← started.stderrCapture.sinkFailure?
+    match result, sinkFailure? with
+    | .ok _, some err =>
+        terminateDaemonChild started.child
+        pure <| .error s!"Beam daemon startup log capture failed: {err}"
+    | .ok _, none => pure result
+    | .error detail, sinkFailure? =>
         -- End the writer before joining the readiness reader. This guarantees pipe EOF even on a
         -- platform where cancelling the dedicated task does not interrupt a blocking handle read.
         terminateDaemonChild started.child
-        pure result
+        pure <| .error <| match sinkFailure? with
+          | some err => detail ++ s!"\nBeam daemon startup log capture also failed: {err}"
+          | none => detail
   finally
     settleTask readyTask
 
@@ -734,6 +755,7 @@ def desiredConfig (home root : System.FilePath) (required : Backend) : IO Desire
 
 structure ProjectDaemonClient where
   endpoint : Transport.Endpoint
+  identity : DaemonIdentity
   capability : String
   workspaceId : WorkspaceId
   controlDir : System.FilePath
@@ -753,6 +775,7 @@ def ProjectDaemonClient.ofSessionDescriptor
     (entry : SessionDescriptor)
     (controlDir : System.FilePath) : ProjectDaemonClient := {
     endpoint := registryEndpoint entry
+    identity := entry.identity
     capability := entry.capability
     workspaceId := entry.workspace.workspaceId
     controlDir
@@ -915,7 +938,7 @@ def shutdownRegisteredProjectDaemon
   | .alreadyStopping => pure .alreadyStopping
   | .committed entry =>
       let delivery ←
-        match ← requestDaemonShutdown (registryEndpoint entry) entry.capability with
+        match ← requestDaemonShutdown (registryEndpoint entry) entry.identity entry.capability with
         | .ok (.successResult ..) => pure .acknowledged
         | .ok (.errorResult failure) => pure <| .rejected failure
         | .error failure => pure <| .failed failure
@@ -937,6 +960,7 @@ private def registeredGenerationStatus
     (entry : SessionDescriptor) : IO DaemonGenerationStatus := do
   let endpoint := registryEndpoint entry
   daemonGenerationStatus endpoint entry.workspace.workspaceId root entry.identity entry.capability
+    (verifyServerIdentity := true)
 
 /--
 Explicitly quarantine one unusable session descriptor without treating persisted PIDs as signal
@@ -980,6 +1004,8 @@ def recoverProjectDaemon
         | .probeFailed _ =>
             let quarantine ← quarantineRegistry control
             pure <| .recoveredGeneration entry.daemonId quarantine
+    | .invalid (.unsafeLeaf detail) =>
+        throw <| IO.userError detail
     | .invalid _ =>
         unless forceOpaque do
           throw <| IO.userError
@@ -1139,7 +1165,7 @@ private def finishOwnedDaemonChild
             forceOwnedDaemonChild child exitCodeRef
       catch _ =>
         forceOwnedDaemonChild owned.started.child exitCodeRef
-  finishDaemonLogDrain owned.started.stderrDrain
+  finishDaemonLogDrain owned.started.stderrCapture
   pure finish
 
 private def markOwnedRegistryDraining
@@ -1188,7 +1214,7 @@ private def finishOwnedProjectDaemon
   if exitedBeforeOwnerCleanup && !registryWasDraining then
     -- An unexpected daemon exit is not evidence that its complete process tree disappeared. Keep
     -- the exact live generation fenced so observation projects it to recovery-required state.
-    finishDaemonLogDrain owned.started.stderrDrain
+    finishDaemonLogDrain owned.started.stderrCapture
   else
     markOwnedRegistryDraining root controlDir owned.entry
     match ← finishOwnedDaemonChild owned exitCodeRef with

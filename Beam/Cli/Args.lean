@@ -252,14 +252,15 @@ private def resolveSessionDirArg (dir : String) : IO System.FilePath := do
   | err => throw err
 
 partial def parseCliOptions (opts : CliOptions) : List String → IO CliOptions
-  | [] => pure opts
   | "--root" :: root :: rest => do
       let root ← resolveExplicitRootArg root
       parseCliOptions { opts with explicitRoot? := some root } rest
   | "--session-dir" :: dir :: rest => do
       let dir ← resolveSessionDirArg dir
       parseCliOptions { opts with explicitControlDir? := some dir } rest
-  | arg :: rest =>
-      parseCliOptions { opts with args := opts.args ++ [arg] } rest
+  | rest =>
+      -- Global selectors are prefixes. Once the command starts, its complete argument tail is
+      -- opaque here, including a command-level `--` and any Lean text that follows it.
+      pure { opts with args := rest }
 
 end Beam.Cli

@@ -20,7 +20,7 @@ def maxStartupReadyBytes : Nat :=
 
 /-- One typed message emitted after a wrapper daemon has bound its OS-assigned listener. -/
 structure StartupReady where
-  schemaVersion : Nat := startupReadySchemaVersion
+  schemaVersion : Nat
   port : Nat
   identity : Beam.Broker.DaemonIdentity
   deriving FromJson, ToJson
@@ -29,7 +29,7 @@ def StartupReady.ofEndpoint
     (endpoint : Beam.Broker.Transport.Endpoint)
     (identity : Beam.Broker.DaemonIdentity) : StartupReady :=
   match endpoint with
-  | .tcp port => { port := port.toNat, identity }
+  | .tcp port => { schemaVersion := startupReadySchemaVersion, port := port.toNat, identity }
 
 def StartupReady.encodeLine (ready : StartupReady) : String :=
   (toJson ready).compress

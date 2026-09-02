@@ -29,6 +29,7 @@ private def projectDaemonClientForTest
     (endpoint : Beam.Broker.Transport.Endpoint)
     (controlDir : System.FilePath) : Beam.Cli.ProjectDaemonClient := {
   endpoint
+  identity := { daemonId := "test-generation", configHash := "test-config" }
   capability := "test-capability"
   workspaceId := Beam.Cli.projectDaemonWorkspaceId
   controlDir
@@ -53,6 +54,15 @@ private def expectIoErrorContains (label needle : String) (act : IO α) : IO Uni
 
 private def requireSubstring (label needle haystack : String) : IO Unit := do
   require s!"{label}: expected '{needle}' in '{haystack}'" (Beam.Cli.hasSubstring haystack needle)
+
+private def createSymlink
+    (label : String) (target link : System.FilePath) : IO Unit := do
+  let out ← IO.Process.output {
+    cmd := "ln"
+    args := #["-s", target.toString, link.toString]
+  }
+  if out.exitCode != 0 then
+    throw <| IO.userError s!"failed to create {label} symlink\n{out.stderr}"
 
 private def brokerTransportFailure (detail : String) : Beam.Broker.BrokerClientFailure :=
   .transport .receive (IO.userError detail)
@@ -91,6 +101,10 @@ private def readSingleDaemonFailureIncidentJson (root : System.FilePath) : IO Js
 private def closeAcceptedConnection (listener : Beam.Broker.Transport.Listener) : IO Unit := do
   let conn ← Beam.Broker.Transport.accept listener
   try
+    Beam.Broker.Transport.sendMsg conn <| toJson (Beam.Broker.ServerHello.current {
+      daemonId := "test-generation"
+      configHash := "test-config"
+    }) |>.compress
     -- Read the complete request before closing so the client failure is deterministically on the
     -- receive boundary. The operating system may still describe that close as EOF or ECONNRESET.
     discard <| Beam.Broker.Transport.recvMsg conn
@@ -141,7 +155,7 @@ private def checkSilentEndpointProbeTimeout : IO Unit := do
       }
       match ← Beam.Daemon.daemonGenerationStatus endpoint
           Beam.Cli.projectDaemonWorkspaceId (System.FilePath.mk "/tmp") identity
-          "test-capability" with
+          "test-capability" (verifyServerIdentity := true) with
       | .probeFailed (.responseTimeout timeoutMs) =>
           require "silent endpoint should preserve its typed response timeout"
             (timeoutMs == 2000)
@@ -161,7 +175,9 @@ private def checkSilentShutdownTimeout : IO Unit := do
     let serverTask ← IO.asTask (prio := Task.Priority.dedicated) <|
       holdAcceptedConnection listener release
     try
-      match ← Beam.Cli.requestDaemonShutdown endpoint "test-capability" 50 with
+      match ← Beam.Cli.requestDaemonShutdown endpoint
+          { daemonId := "silent-endpoint", configHash := "silent-endpoint" }
+          "test-capability" 50 with
       | .error (.responseTimeout timeoutMs) =>
           require "silent shutdown should preserve its typed response timeout" (timeoutMs == 50)
       | .error failure =>
@@ -179,6 +195,10 @@ private def serveDisconnectCancelledPlainRequest
     (requestObserved : IO.Promise Unit) : IO Unit := do
   let requestConn ← Beam.Broker.Transport.accept listener
   try
+    Beam.Broker.Transport.sendMsg requestConn <| toJson (Beam.Broker.ServerHello.current {
+      daemonId := "test-generation"
+      configHash := "test-config"
+    }) |>.compress
     let requestText ← Beam.Broker.Transport.recvMsg requestConn
     let requestJson ← IO.ofExcept <| Json.parse requestText
     let _request : Beam.Broker.Request ← IO.ofExcept <| fromJson? requestJson
@@ -213,6 +233,67 @@ private def checkPlainBrokerTaskCancellation : IO Unit := do
     | .ok () => pure ()
     | .error err => throw err
 
+private def serveWrongDaemonGreeting
+    (listener : Beam.Broker.Transport.Listener) : IO Bool := do
+  let conn ← Beam.Broker.Transport.accept listener
+  try
+    Beam.Broker.Transport.sendMsg conn <| toJson (Beam.Broker.ServerHello.current {
+      daemonId := "wrong-generation"
+      configHash := "wrong-config"
+    }) |>.compress
+    let deadline := (← IO.monoNanosNow) + 500 * 1000000
+    let requestSeen ←
+      try
+        pure (← Beam.Broker.Transport.recvMsgUntil conn deadline).isSome
+      catch _ =>
+        pure false
+    pure requestSeen
+  finally
+    Beam.Broker.Transport.closeConnection conn
+
+private def checkWrongGreetingProtectsRequest : IO Unit := do
+  withBrokerListener fun listener endpoint => do
+    let serverTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      serveWrongDaemonGreeting listener
+    let msg ← expectIoErrorMessage "wrong daemon greeting" <|
+      Beam.Cli.requestBroker (System.FilePath.mk "/tmp")
+        (projectDaemonClientForTest endpoint (System.FilePath.mk "/tmp")) {
+          op := .runAt
+          path? := some "Secret.lean"
+          version? := some 1
+          line? := some 0
+          character? := some 0
+          text? := some "secret speculative text"
+        }
+    requireSubstring "wrong daemon greeting" "identity does not match" msg
+    match ← IO.wait serverTask with
+    | .ok requestSeen =>
+        require "a wrong daemon generation must not receive the capability-bound request"
+          (!requestSeen)
+    | .error err => throw err
+
+private def checkStderrCaptureSurvivesSinkFailure : IO Unit := do
+  let path := System.FilePath.mk s!"/tmp/beam-stderr-capture-{← IO.monoNanosNow}.txt"
+  let contents := String.ofList (List.replicate 20000 'x')
+  try
+    IO.FS.writeFile path contents
+    IO.FS.withFile path .read fun source => do
+      let sink : Beam.StderrSink := fun _ =>
+        throw <| IO.userError "intentional stderr sink failure"
+      let capture ← Beam.StderrCapture.start source 1024 (some sink)
+      match ← IO.wait capture.drainTask with
+      | .error err => throw err
+      | .ok () => pure ()
+      let some failure ← capture.sinkFailure?
+        | throw <| IO.userError "stderr capture did not retain its sink failure"
+      requireSubstring "stderr sink failure" "intentional stderr sink failure" failure.toString
+      let tail ← capture.snapshot
+      require "stderr capture should continue draining into its bounded tail after sink failure"
+        (tail.length == 1024)
+  finally
+    if ← path.pathExists then
+      IO.FS.removeFile path
+
 private def requireRequestJson
     (label : String)
     (actual expected : Beam.Broker.Request) : IO Unit := do
@@ -232,6 +313,7 @@ private def sampleBrokerHandle : Beam.Broker.Handle := {
 private def checkProjectDaemonRequestSealing : IO Unit := do
   let selectedClient : Beam.Cli.ProjectDaemonClient := {
     endpoint := .tcp 42424
+    identity := { daemonId := "selected-generation", configHash := "selected-config" }
     capability := "test-capability"
     workspaceId := "selected-workspace"
     controlDir := System.FilePath.mk "/tmp/beam-selected-control"
@@ -387,6 +469,19 @@ private def checkCliRootParsing : IO Unit := do
     require "explicit session directory should remain an exact selection"
       (opts.explicitControlDir? == some expectedControl)
     require "global selectors should not leak into command arguments" (opts.args == ["stats"])
+    let literalSelectors ← Beam.Cli.parseCliOptions {} [
+      "run-at", "Demo.lean", "1", "0", "0", "--",
+      "--root", "/tmp/literal-root", "--session-dir", "/tmp/literal-session"
+    ]
+    require "command-level -- should make literal --root text opaque to global parsing"
+      (literalSelectors.explicitRoot?.isNone)
+    require "command-level -- should make literal --session-dir text opaque to global parsing"
+      (literalSelectors.explicitControlDir?.isNone)
+    require "global parsing should preserve the complete command tail after its first argument"
+      (literalSelectors.args == [
+        "run-at", "Demo.lean", "1", "0", "0", "--",
+        "--root", "/tmp/literal-root", "--session-dir", "/tmp/literal-session"
+      ])
   finally
     if ← root.pathExists then
       IO.FS.removeDirAll root
@@ -855,6 +950,24 @@ private def checkTypedRegistryReads : IO Unit := do
     let debugRegistry ← IO.ofExcept <| debug.getObjVal? "registry"
     requireJsonString "daemon debug context must redact its capability"
       "capability" "<redacted>" debugRegistry
+
+    let symlinkTarget := root / "registry-symlink-target.json"
+    let targetText := validText
+    IO.FS.writeFile symlinkTarget targetText
+    IO.FS.removeFile registryPath
+    createSymlink "registry fixture" symlinkTarget registryPath
+    match ← Beam.Daemon.readRegistry root with
+    | .invalid (.unsafeLeaf detail) =>
+        requireSubstring "symlinked registry detail" "symbolic links are not accepted" detail
+    | state => throw <| IO.userError s!"symlinked registry was classified as {state.status}"
+    expectIoErrorContains "stop should reject a symlinked registry"
+      "symbolic links are not accepted"
+      (Beam.Cli.shutdownRegisteredProjectDaemon root)
+    expectIoErrorContains "recovery should reject a symlinked registry"
+      "symbolic links are not accepted"
+      (Beam.Cli.recoverProjectDaemon root none true)
+    require "registry operations must not mutate a symlink target"
+      ((← IO.FS.readFile symlinkTarget) == targetText)
   finally
     try
       if ← root.pathExists then
@@ -1047,15 +1160,6 @@ private def checkLeanModuleNamePathHelpers : IO Unit := do
     (Beam.leanModuleNameForPath? root (root / "Foo" / "Bar.v") == none)
   require "outside rooted Lean path should not become module name"
     (Beam.leanModuleNameForPath? root (p "/tmp/other-root/Foo.lean") == none)
-
-private def createSymlink
-    (label : String) (target link : System.FilePath) : IO Unit := do
-  let out ← IO.Process.output {
-    cmd := "ln"
-    args := #["-s", target.toString, link.toString]
-  }
-  if out.exitCode != 0 then
-    throw <| IO.userError s!"failed to create {label} symlink\n{out.stderr}"
 
 private def checkPathCanonicalization : IO Unit := do
   let stamp ← IO.monoNanosNow
@@ -1418,6 +1522,8 @@ def main : IO Unit := do
   checkSilentEndpointProbeTimeout
   checkSilentShutdownTimeout
   checkPlainBrokerTaskCancellation
+  checkWrongGreetingProtectsRequest
+  checkStderrCaptureSurvivesSinkFailure
   checkBrokerConnectionClosedIncident
   checkTypedRegistryReads
   checkDaemonFailureIncidentRetention

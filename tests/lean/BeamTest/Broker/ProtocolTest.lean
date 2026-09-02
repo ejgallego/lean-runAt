@@ -59,6 +59,33 @@ private def checkDaemonReadinessProtocol : IO Unit := do
       unless err.contains "outside 1-65535" do
         throw <| IO.userError s!"unexpected daemon readiness port error: {err}"
 
+  let missingVersion := Json.mkObj [
+    ("port", toJson 43123),
+    ("identity", toJson identity)
+  ]
+  match fromJson? (α := Beam.Daemon.StartupReady) missingVersion with
+  | .ok _ => throw <| IO.userError "daemon readiness accepted a missing schema version"
+  | .error _ => pure ()
+
+private def checkServerHelloProtocol : IO Unit := do
+  let identity : DaemonIdentity := {
+    daemonId := "hello-generation"
+    configHash := "hello-config"
+  }
+  let hello := ServerHello.current identity
+  match ServerHello.decode identity (toJson hello).compress with
+  | .ok () => pure ()
+  | .error err => throw <| IO.userError s!"valid daemon greeting failed to decode: {err}"
+  let wrongIdentity : DaemonIdentity := {
+    daemonId := "other-generation"
+    configHash := identity.configHash
+  }
+  match ServerHello.decode wrongIdentity (toJson hello).compress with
+  | .ok () => throw <| IO.userError "daemon greeting accepted the wrong generation identity"
+  | .error err =>
+      unless err.contains "identity does not match" do
+        throw <| IO.userError s!"unexpected daemon greeting identity error: {err}"
+
 private def decodeResponse (label : String) (json : Json) : IO Response := do
   match fromJson? json with
   | .ok resp => pure resp
@@ -1176,6 +1203,7 @@ private def checkWrapperDaemonAuthorization : IO Unit := do
 
 def main : IO Unit := do
   checkDaemonReadinessProtocol
+  checkServerHelloProtocol
   checkResponseJsonShape
   checkStreamMessageDecode
   checkResponseJsonDecode

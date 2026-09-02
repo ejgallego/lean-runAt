@@ -560,6 +560,9 @@ def receive_frame(sock):
     return json.loads(payload)
 
 with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+    hello = receive_frame(sock)
+    if hello.get("schemaVersion") != 1:
+        raise RuntimeError(f"unexpected daemon greeting: {hello}")
     request = json.dumps({
         "op": "shutdown",
         "daemonCapability": "not-the-owner-capability",
@@ -574,12 +577,14 @@ with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
         raise RuntimeError(f"unexpected unauthorized-shutdown response: {response}")
 
 with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+    receive_frame(sock)
     sock.sendall(b"16777217\n")
     response = receive_frame(sock)
     if "exceeds 16777216 bytes" not in response.get("payload", {}).get("error", {}).get("message", ""):
         raise RuntimeError(f"unexpected oversized-frame response: {response}")
 
 with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+    receive_frame(sock)
     time.sleep(5.5)
     response = receive_frame(sock)
     if "initial request timed out" not in response.get("payload", {}).get("error", {}).get("message", ""):
@@ -755,6 +760,10 @@ with Server(("127.0.0.1", 0), socketserver.BaseRequestHandler) as server:
         print(server.server_address[1], file=stream, flush=True)
     conn, _ = server.get_request()
     with conn:
+        send_frame(conn, {
+            "schemaVersion": 1,
+            "identity": {"daemonId": daemon_id, "configHash": config_hash},
+        })
         request = receive_frame(conn)
         if request.get("op") != "stats":
             raise RuntimeError(f"expected stats probe, got {request!r}")
@@ -773,6 +782,10 @@ with Server(("127.0.0.1", 0), socketserver.BaseRequestHandler) as server:
         })
     conn, _ = server.get_request()
     with conn:
+        send_frame(conn, {
+            "schemaVersion": 1,
+            "identity": {"daemonId": daemon_id, "configHash": config_hash},
+        })
         receive_frame(conn)
         # Deliberately close without a response after the caller has committed `draining`.
 PY

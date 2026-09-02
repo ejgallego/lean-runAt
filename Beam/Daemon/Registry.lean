@@ -17,11 +17,13 @@ inductive RegistryProblem where
   | missingSchema
   | unsupportedSchema (schemaVersion : Nat)
   | malformed (detail : String)
+  | unsafeLeaf (detail : String)
 
 def RegistryProblem.detail : RegistryProblem → String
   | .missingSchema => "session descriptor has no schemaVersion"
   | .unsupportedSchema version => s!"unsupported session descriptor schemaVersion {version}"
   | .malformed detail => detail
+  | .unsafeLeaf detail => detail
 
 /-- Typed result of reading the versioned on-disk session descriptor. -/
 inductive RegistryRead where
@@ -84,8 +86,23 @@ private def validateSessionDescriptor (entry : SessionDescriptor) : Except Strin
   validateWorkspaceBinding entry.workspace
 
 def readRegistryAt (path : System.FilePath) : IO RegistryRead := do
-  unless ← path.pathExists do
-    return .absent
+  let metadata? ←
+    try
+      pure <| some (← path.symlinkMetadata)
+    catch
+    | .noFileOrDirectory .. => pure none
+    | err =>
+        return .invalid <| .malformed s!"could not inspect registry: {err}"
+  let some metadata := metadata?
+    | return .absent
+  match metadata.type with
+  | .symlink =>
+      return .invalid <| .unsafeLeaf
+        s!"unsafe session descriptor {path}: symbolic links are not accepted"
+  | .dir | .other =>
+      return .invalid <| .unsafeLeaf
+        s!"unsafe session descriptor {path}: expected a regular file"
+  | .file => pure ()
   try
     let text ← IO.FS.readFile path
     let json ←
@@ -109,6 +126,16 @@ def readRegistryAt (path : System.FilePath) : IO RegistryRead := do
         | .error err => pure <| .invalid <| .malformed s!"invalid registry schema: {err}"
   catch err =>
     pure <| .invalid <| .malformed s!"could not read registry: {err}"
+
+/-- Refuse to reopen an unsafe descriptor leaf for in-place lifecycle mutation. -/
+def requireRegularRegistryLeaf (path : System.FilePath) : IO Unit := do
+  let metadata ← path.symlinkMetadata
+  match metadata.type with
+  | .file => pure ()
+  | .symlink =>
+      throw <| IO.userError s!"unsafe session descriptor {path}: symbolic links are not accepted"
+  | .dir | .other =>
+      throw <| IO.userError s!"unsafe session descriptor {path}: expected a regular file"
 
 def readRegistry (root : System.FilePath) : IO RegistryRead := do
   readRegistryAt (← registryPath root)

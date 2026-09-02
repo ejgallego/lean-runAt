@@ -195,9 +195,10 @@ client protocol.
   marks admitted requests for cancellation, and closes backend sessions and the daemon after those
   requests drain; a backend success that completed before cancellation remains successful. This
   happens without heartbeat timeouts or filesystem leases and works across PID namespaces because
-  authority does not depend on observing persisted PIDs. Ordinary calls select the descriptor and
-  use their capability-bound operation as the definitive endpoint observation; lifecycle and
-  diagnostic commands additionally use bounded root and generation-identity probes. Each wrapper
+  authority does not depend on observing persisted PIDs. Ordinary calls select the descriptor,
+  verify its generation through a bounded greeting on the request's own connection, and only then
+  send the capability-bound operation; lifecycle and diagnostic commands additionally classify
+  bounded root and generation-identity probe results. Each wrapper
   request carries a random per-generation capability from a mode-`0600` descriptor inside a
   mode-`0700` session directory. A paused owner retains the session; a killed owner closes the pipe;
   explicit
@@ -236,7 +237,9 @@ client protocol.
   creates and privatizes a missing leaf, but accepts an existing path only when it is a real,
   non-symlinked mode-`0700` directory. It rejects broader existing permissions without changing
   them. Explicit symbolic-link leaves are rejected before canonicalization, and read-only status or
-  attachment operations revalidate the exact leaf and its permissions without mutating it.
+  attachment operations revalidate the exact leaf and its permissions without mutating it. The
+  capability-bearing `beam-daemon.json` leaf is likewise rejected when it is a symbolic link or not
+  a regular file; stop and recovery do not read or mutate its target.
   Wrapper sessions contain exactly one frozen workspace; dynamic workspace mutation remains
   unavailable in wrapper mode. MCP retains its independent multi-workspace behavior.
 - Deleting the project tree also deletes its default project-local fence. Workflows that may remove
@@ -252,8 +255,9 @@ client protocol.
   usually an environment restriction, not a bundle-resolution mismatch.
 - Wrapper daemon startup uses an OS-assigned loopback port and a bounded private typed readiness message;
   the owner publishes the descriptor only after validating the reported generation and
-  configuration. Daemon stderr is copied to the already-open private startup log without a shell or
-  a second pathname lookup.
+  configuration. Daemon stderr is copied to the already-open private startup log only until
+  readiness or a 64-KiB bound, without a shell or a second pathname lookup. A log-sink failure is
+  retained as startup failure while the shared bounded capture continues draining the daemon pipe.
 - Once the Beam daemon is running, a Lean or Rocq backend handshake failure is returned with the
   bounded tail of that backend's stderr. This backend diagnostic is separate from the selected
   session directory's daemon startup log, which covers startup of the Beam daemon process itself.
@@ -264,8 +268,9 @@ client protocol.
   latest 50 incident records, and `lean-beam doctor` lists recent incident paths. Incident logging
   never recreates a deleted project or session directory.
 - `Ctrl-C` on a wrapper operation closes that operation's one-request connection; the daemon's
-  disconnect watcher cancels the exact admitted request without requiring a caller-supplied request
-  ID. The interrupted client exits nonzero without fabricating a terminal broker response on
+  connection-owned disconnect watcher cancels the exact admitted request without requiring a
+  caller-supplied request ID and is joined when the handler completes. The interrupted client exits
+  nonzero without fabricating a terminal broker response on
   stdout. `lean-beam cancel ID` remains the explicit cross-process cancellation surface.
   Cancellation is cooperative; prompt stopping depends on inner elaboration polling interruption.
 - Wrapper sessions deliberately publish one frozen workspace. Remote workspaces and same-source

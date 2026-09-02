@@ -84,6 +84,7 @@ private def prepareWrapperBrokerRequest
 
 private def awaitBrokerResponseWithInterrupts
     (endpoint : Transport.Endpoint)
+    (expectedIdentity : DaemonIdentity)
     (req : Request)
     (visibleClientRequestId? : Option String)
     (progressSpec? : Option BrokerWaitSpec)
@@ -111,6 +112,7 @@ private def awaitBrokerResponseWithInterrupts
           emit <| spec.stillWaitingMsg seconds
       pure interrupted
     let result ← sendRequestWithCallbacksInterruptiblyResult endpoint req interrupted callbacks
+      (expectedIdentity? := some expectedIdentity)
     match result with
     | .ok response =>
         if let some spec := progressSpec? then
@@ -129,7 +131,8 @@ private def requestBrokerResponse
   let wrapperReq ← prepareWrapperBrokerRequest client req
   let visibleClientRequestId? := wrapperReq.clientRequestId?
   let response ← withBrokerErrorContext root client do
-    awaitBrokerResponseWithInterrupts client.endpoint wrapperReq visibleClientRequestId? none
+    awaitBrokerResponseWithInterrupts client.endpoint client.identity wrapperReq
+      visibleClientRequestId? none
   pure { response, visibleClientRequestId? }
 
 /-- Send one wrapper request without printing or interpreting its response. -/
@@ -367,8 +370,8 @@ def callBrokerWithProgress
   }
   let progressSpec? := if showProgress then some spec else none
   let resp ← withBrokerErrorContext root client do
-    awaitBrokerResponseWithInterrupts client.endpoint req visibleClientRequestId? progressSpec?
-      callbacks
+    awaitBrokerResponseWithInterrupts client.endpoint client.identity req
+      visibleClientRequestId? progressSpec? callbacks
   match responseErrorSummary? spec.action spec.failureBoundary resp with
   | some note =>
       IO.eprintln <| annotateRequestMessage visibleClientRequestId? note

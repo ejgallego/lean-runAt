@@ -134,10 +134,12 @@ private def daemonProbeOfResponse (resp : Response) : Except BrokerClientFailure
 private def daemonProbe
     (endpoint : Transport.Endpoint)
     (workspaceId : WorkspaceId)
+    (expectedIdentity? : Option DaemonIdentity := none)
     (capability? : Option String := none) : IO (Except BrokerClientFailure DaemonProbe) := do
   match ← sendRequestWithStreamTimeoutResult endpoint
       { op := .stats, workspaceId? := some workspaceId, daemonCapability? := capability? }
-      daemonProbeResponseTimeoutMs (fun _ => pure ()) with
+      daemonProbeResponseTimeoutMs (fun _ => pure ())
+      (expectedIdentity? := expectedIdentity?) with
   | .ok resp => pure <| daemonProbeOfResponse resp
   | .error failure => pure <| .error failure
 
@@ -154,8 +156,10 @@ def daemonGenerationStatus
     (workspaceId : WorkspaceId)
     (root : System.FilePath)
     (identity : DaemonIdentity)
-    (capability : String) : IO DaemonGenerationStatus := do
-  match ← daemonProbe endpoint workspaceId (some capability) with
+    (capability : String)
+    (verifyServerIdentity : Bool := false) : IO DaemonGenerationStatus := do
+  let expectedIdentity? := if verifyServerIdentity then some identity else none
+  match ← daemonProbe endpoint workspaceId expectedIdentity? (some capability) with
   | .error failure => pure <| .probeFailed failure
   | .ok probe =>
       unless ← Beam.sameFilePath (System.FilePath.mk probe.root) root do

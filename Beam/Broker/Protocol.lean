@@ -20,6 +20,36 @@ structure DaemonIdentity where
   configHash : String
   deriving BEq, Repr, FromJson, ToJson
 
+def serverHelloSchemaVersion : Nat :=
+  1
+
+/-- Identity greeting emitted by a wrapper daemon before it accepts one request connection. -/
+structure ServerHello where
+  schemaVersion : Nat
+  identity : DaemonIdentity
+  deriving Repr, FromJson, ToJson
+
+def ServerHello.current (identity : DaemonIdentity) : ServerHello := {
+  schemaVersion := serverHelloSchemaVersion
+  identity
+}
+
+def ServerHello.decode
+    (expectedIdentity : DaemonIdentity)
+    (msg : String) : Except String Unit := do
+  let json ←
+    match Json.parse msg with
+    | .ok json => pure json
+    | .error err => throw s!"invalid Beam daemon greeting json: {err}"
+  let hello ←
+    match fromJson? (α := ServerHello) json with
+    | .ok hello => pure hello
+    | .error err => throw s!"invalid Beam daemon greeting payload: {err}"
+  unless hello.schemaVersion == serverHelloSchemaVersion do
+    throw s!"unsupported Beam daemon greeting schema {hello.schemaVersion}"
+  unless hello.identity == expectedIdentity do
+    throw "Beam daemon greeting identity does not match the selected session"
+
 instance : Repr Lsp.DiagnosticSeverity where
   reprPrec severity _ :=
     match severity with

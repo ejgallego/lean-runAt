@@ -27,6 +27,7 @@ import Beam.Broker.SyncResult
 import Beam.Daemon.Startup
 import Beam.LSP.Save
 import Beam.Path
+import Beam.StderrCapture
 import Std.Sync.Mutex
 
 open Lean
@@ -47,47 +48,10 @@ abbrev brokerStdio : IO.Process.StdioConfig where
 private def backendStderrTailLimit : Nat :=
   16 * 1024
 
-private def backendStderrReadSize : USize :=
-  4096
-
-private def isUtf8ContinuationByte (byte : UInt8) : Bool :=
-  decide (128 ≤ byte.toNat ∧ byte.toNat < 192)
-
-private def utf8BoundaryAtOrAfter (bytes : ByteArray) (offset : Nat) : Nat :=
-  let rec loop (offset : Nat) : Nat → Nat
-    | 0 => offset
-    | fuel + 1 =>
-        if h : offset < bytes.size then
-          if isUtf8ContinuationByte bytes[offset] then
-            loop (offset + 1) fuel
-          else
-            offset
-        else
-          offset
-  loop offset 3
-
-structure BackendStderrCapture where
-  tail : Std.Mutex ByteArray
-  drainTask : Task (Except IO.Error Unit)
-
-private partial def drainBackendStderr
-    (stderr : IO.FS.Handle)
-    (tail : Std.Mutex ByteArray) : IO Unit := do
-  let chunk ← stderr.read backendStderrReadSize
-  unless chunk.isEmpty do
-    tail.atomically do
-      let combined := (← get) ++ chunk
-      if combined.size > backendStderrTailLimit then
-        let start := utf8BoundaryAtOrAfter combined (combined.size - backendStderrTailLimit)
-        set <| combined.extract start combined.size
-      else
-        set combined
-    drainBackendStderr stderr tail
+abbrev BackendStderrCapture := Beam.StderrCapture
 
 def startBackendStderrCapture (stderr : IO.FS.Handle) : IO BackendStderrCapture := do
-  let tail ← Std.Mutex.new ByteArray.empty
-  let drainTask ← IO.asTask (prio := Task.Priority.dedicated) <| drainBackendStderr stderr tail
-  pure { tail, drainTask }
+  Beam.StderrCapture.start stderr backendStderrTailLimit
 
 structure Session where
   workspaceId : WorkspaceId
@@ -208,8 +172,7 @@ private def backendName : Backend → String
   | .rocq => "Rocq"
 
 private def BackendStderrCapture.snapshot (capture : BackendStderrCapture) : IO String := do
-  let bytes ← capture.tail.atomically get
-  pure <| (String.fromUTF8? bytes).getD "<backend stderr tail is not valid UTF-8>"
+  Beam.StderrCapture.snapshot capture
 
 private def BackendStderrCapture.awaitDrain
     (capture : BackendStderrCapture)
@@ -1030,6 +993,10 @@ inductive ServerMode where
 
 def ServerMode.identity? : ServerMode → Option DaemonIdentity
   | .standalone identity? => identity?
+  | .wrapper identity _ => some identity
+
+private def ServerMode.wrapperIdentity? : ServerMode → Option DaemonIdentity
+  | .standalone _ => none
   | .wrapper identity _ => some identity
 
 private def ServerMode.validate : ServerMode → Except String Unit
@@ -2693,16 +2660,20 @@ private def watchSessionOwnerStdin
   unless ← transport.stop.get do
     closeAndRequestStop server transport
 
-private def watchClientDisconnect
+private def watchClientDisconnectUntil
     (client : Transport.Connection)
-    (handle : RequestHandle) : IO Unit := do
+    (handle : RequestHandle)
+    (requestDone : IO Bool) : IO Unit := do
   try
-    -- The daemon transport accepts one request per connection. A second receive therefore blocks
-    -- until the client closes or dies; either outcome should cancel an unfinished admission.
-    discard <| Transport.recvMsg client
+    -- The daemon transport accepts one request per connection. A second message is invalid and a
+    -- disconnect cancels the exact admitted request. Normal request completion interrupts this
+    -- receive so the watcher cannot outlive its connection handler.
+    match ← Transport.recvMsgInterruptibly client requestDone with
+    | .message _ => discard <| handle.cancel
+    | .interrupted => pure ()
   catch _ =>
-    pure ()
-  discard <| handle.cancel
+    unless ← requestDone do
+      discard <| handle.cancel
 
 private def handleClient
     (server : ServerRuntime)
@@ -2715,6 +2686,10 @@ private def handleClient
       (toJson (StreamMessage.response clientRequestId? resp)).compress
     terminalSentRef.set true
   try
+    if let some identity := server.mode.wrapperIdentity? then
+      -- The greeting pins this connection to the descriptor-selected wrapper generation before
+      -- the peer discloses its capability or semantic request contents.
+      Transport.sendMsg client (toJson (ServerHello.current identity)).compress
     let initialRequestTimeoutMs := 5000
     let deadlineNanos := (← IO.monoNanosNow) + initialRequestTimeoutMs * 1000000
     let some msg ← Transport.recvMsgUntil client deadlineNanos
@@ -2743,9 +2718,19 @@ private def handleClient
         let emitDiagnostic : StreamDiagnostic → IO Unit := fun diagnostic =>
           Transport.sendMsg client
             (toJson (StreamMessage.diagnostic req.clientRequestId? diagnostic)).compress
-        let resp ← server.dispatchRequestWithHandle req (fun handle => do
-          let _ ← IO.asTask (prio := Task.Priority.dedicated) <| watchClientDisconnect client handle
-          pure true) (some emitProgress) (some emitDiagnostic)
+        let requestDone ← IO.mkRef false
+        let watcherRef ← IO.mkRef (none : Option (Task (Except IO.Error Unit)))
+        let resp ←
+          try
+            server.dispatchRequestWithHandle req (fun handle => do
+              let watcher ← IO.asTask (prio := Task.Priority.dedicated) <|
+                watchClientDisconnectUntil client handle requestDone.get
+              watcherRef.set (some watcher)
+              pure true) (some emitProgress) (some emitDiagnostic)
+          finally
+            requestDone.set true
+            if let some watcher ← watcherRef.get then
+              discard <| IO.wait watcher
         -- Request validation alone does not grant shutdown authority. Only stop the listener once
         -- dispatch has authenticated the capability and started runtime closure.
         let stopsTransport ←

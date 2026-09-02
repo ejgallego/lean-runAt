@@ -422,8 +422,13 @@ hash, and random capability through piped stdin, and retains the pipe's write en
 the lock or descriptor, Beam creates a missing control leaf with mode `0700`, or validates that an
 existing leaf is a real, non-symlinked directory already using mode `0700`. It never changes an
 existing selection's permissions. The mode-`0600` descriptor is written through an exclusive
-random temporary path and publishes `live` or `draining`. Every wrapper request, including
-cancellation, generation probes, and shutdown, presents the capability. The daemon watches the
+random temporary path and publishes `live` or `draining`; descriptor reads and in-place lifecycle
+updates reject a symbolic-link or non-file descriptor leaf. Every wrapper request, including
+cancellation, generation probes, and shutdown, first verifies the selected generation through the
+daemon's bounded same-connection identity greeting and then presents the capability. The greeting
+prevents a stale descriptor whose port was reused from receiving request contents or fabricating a
+valid wrapper result; it is identity pinning, not a cryptographic proof against an actively hostile
+process that already knows the descriptor. The daemon watches the
 pipe's read end;
 EOF closes admission, marks admitted requests for cancellation, shuts down backend sessions, and
 stops the listener. There is no heartbeat, lease, or time-based retirement fence.
@@ -431,8 +436,9 @@ stops the listener. There is no heartbeat, lease, or time-based retirement fence
 Ordinary wrapper commands never start a daemon or recompute its desired toolchain/bundle
 configuration. Without taking the session mutation lock or creating control files, they select the
 canonical root's frozen workspace binding, then send their one capability-bound operation. That
-operation is the definitive endpoint observation; ordinary calls do not add a separate identity
-probe. Descriptor selection remains observation-only: absent, legacy, malformed, unsupported, or
+operation uses one connection: the daemon greeting is checked before the request is sent, without
+adding a separate probe connection. Descriptor selection remains observation-only: absent, legacy,
+malformed, unsupported, unsafe-leaf, or
 draining states are never rewritten by an attaching command, and connection or protocol failures
 likewise cannot change lifecycle state. Lifecycle and diagnostic commands use bounded authenticated
 identity probes when they need to classify endpoint health or exact generation. Persisted PIDs are
@@ -444,8 +450,10 @@ Owner startup delegates endpoint allocation to the OS. The daemon binds loopback
 the assigned port, and emits one bounded, typed, versioned readiness message on its private stdout pipe only
 after its listener and lifetime watchers are installed. The owner validates the readiness generation
 and configuration before publishing the session descriptor. Daemon stderr is drained into the exact
-private startup-log inode opened by the owner; startup does not invoke a shell, reopen the checked
-pathname, guess a port, probe for readiness, or parse log text as control flow.
+private startup-log inode opened by the owner until readiness or a 64-KiB bound. The shared stderr
+capture continues draining into a bounded in-memory tail if that file sink fails, records the first
+sink failure, and never lets evidence IO block the daemon pipe. Startup does not invoke a shell,
+reopen the checked pathname, guess a port, probe for readiness, or parse log text as control flow.
 
 The owner watches its exact descriptor generation and daemon child. `lean-beam --root ROOT stop` changes
 that generation from `live` to `draining` under the control lock before sending authenticated
@@ -514,9 +522,11 @@ Keep these invariants covered:
   abrupt owner loss remains fenced and relies on cooperative daemon cleanup
 - persisted numeric PIDs are never signalled or used for automatic stale reclamation
 - every wrapper request is bound to its random generation capability, and transport frame, initial
-  request, connection, and task counts are bounded
+  request, connection, and task counts are bounded; the selected generation's same-connection
+  greeting is verified before capability or semantic contents are sent
 - an interrupted wrapper call closes its own one-request connection, whose server-side disconnect
-  watcher cancels that exact admission; explicit request IDs remain available for cross-process
+  watcher cancels that exact admission and is joined by that connection handler; explicit request
+  IDs remain available for cross-process
   `cancel`, and per-admission tokens retain exact disconnect and close semantics
 - the regressions for this path are
   [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh) and
