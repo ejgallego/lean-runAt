@@ -34,6 +34,21 @@ def BrokerFailureCode.name : BrokerFailureCode → String
   | .saveTargetNotModule => saveTargetNotModuleCode
   | .internalError => "internalError"
 
+def BrokerFailureCode.all : Array BrokerFailureCode := #[
+  .invalidParams,
+  .requestCancelled,
+  .contentModified,
+  .workerExited,
+  .syncBarrierIncomplete,
+  .saveTraceStale,
+  .saveUnsupportedSetup,
+  .saveTargetNotModule,
+  .internalError
+]
+
+def BrokerFailureCode.ofName? (name : String) : Option BrokerFailureCode :=
+  BrokerFailureCode.all.find? fun code => code.name == name
+
 structure BrokerFailure where
   code : BrokerFailureCode
   message : String := ""

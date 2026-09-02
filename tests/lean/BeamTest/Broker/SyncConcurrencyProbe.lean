@@ -113,9 +113,10 @@ private def writeInvalidStressSyncFiles (root : System.FilePath) (count : Nat) :
 private def syncRequest
     (path : String)
     (clientRequestId : String) : Beam.Broker.Request := {
-  op := .syncFile
+  payload := .syncFile {
+    path := path
+  }
   clientRequestId? := some clientRequestId
-  path? := some path
 }
 
 private def requireSyncOk (label : String) (resp : Beam.Broker.Response) : IO Unit := do
@@ -348,7 +349,7 @@ def main : IO Unit := do
       pure ()
   try
     waitForBrokerReadyForRoot endpoint root
-    discard <| expectOk (← runClient endpoint { op := .ensure })
+    discard <| expectOk (← runClient endpoint Beam.Broker.Request.ensure)
     let fastPath := "tests/scenario/docs/CommandA.lean"
     requireSyncOk "warm fast sync" <| ← runClient endpoint (syncRequest fastPath "probe-warm")
 
@@ -365,7 +366,7 @@ def main : IO Unit := do
     runStressProbe endpoint root
     runSameFileSupersessionProbe endpoint root traceRef
 
-    let shutdownResp ← runClient endpoint { op := .shutdown }
+    let shutdownResp ← runClient endpoint Beam.Broker.Request.shutdown
     discard <| expectOk shutdownResp
     IO.sleep 100
     checkOptionalOverlapTrace (← traceRef.get)

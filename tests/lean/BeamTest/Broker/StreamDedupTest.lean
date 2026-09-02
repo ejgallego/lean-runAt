@@ -189,13 +189,14 @@ def checkRunAtStreamsSetupDiagnostics : IO Unit := do
   let streamedRef ← IO.mkRef #[]
   try
     let resp ← server.dispatchRequest {
-      op := .runAt
+      payload := .runAt {
+        path := "Tracked.lean"
+        version := 1
+        line := 0
+        character := 2
+        text := "#check tracked"
+      }
       workspaceId? := some fixtureWorkspaceId
-      path? := some "Tracked.lean"
-      version? := some 1
-      line? := some 0
-      character? := some 2
-      text? := some "#check tracked"
     } (emitDiagnostic? := some fun diagnostic =>
       streamedRef.modify fun seen => seen.push diagnostic)
     if !resp.ok then

@@ -576,7 +576,7 @@ private def handleBeamStats
           ("uptimeMs", toJson (0 : Nat)),
           ("workspaces", Json.mkObj [])
         ]
-  let brokerResp ← runtime.dispatchRequest { op := .stats }
+  let brokerResp ← runtime.dispatchRequest Beam.Broker.Request.stats
   match normalizeBrokerResponse .beamStats brokerResp with
   | .error err =>
       pure <| callToolErrorResult err
@@ -656,12 +656,12 @@ private def collectFeedbackRuntimePayload
       pure (Json.null, Json.null, warnings.push "no active MCP Lean runtime was available for stats/open-files")
   | some runtime =>
       let statsResp ← runtime.dispatchRequest {
-        op := .stats
+        payload := .stats
         workspaceId? := some workspaceId
       }
       let (stats, warnings) := Beam.Feedback.responsePayloadOrWarning "stats" statsResp warnings
       let openResp ← runtime.dispatchRequest {
-        op := .openDocs
+        payload := .openDocs
         workspaceId? := some workspaceId
       }
       let (openDocs, warnings) := Beam.Feedback.responsePayloadOrWarning "open-files" openResp warnings

@@ -34,14 +34,17 @@ private def runPrepareSave : IO Unit := do
 private def runWriteSaveTrace : IO Unit := do
   let request : LakeHelperWriteTraceRequest ← readRequest
   lakeHelperWriteLeanSaveTrace request
-  writeResponse <| Response.success (Json.mkObj [])
+  writeResponse <| Response.success (toJson ({} : LakeHelperAck))
 
 def main (args : List String) : IO Unit := do
   try
     match args with
-    | ["server-env"] => runServerEnv
-    | ["prepare-save"] => runPrepareSave
-    | ["write-save-trace"] => runWriteSaveTrace
+    | [operation] =>
+        match LakeHelperOperation.ofString? operation with
+        | some .serverEnv => runServerEnv
+        | some .prepareSave => runPrepareSave
+        | some .writeSaveTrace => runWriteSaveTrace
+        | none => throw <| IO.userError "invalid target Lake helper operation"
     | _ => throw <| IO.userError "invalid target Lake helper operation"
   catch error =>
     writeResponse <| BrokerFailure.toResponse {

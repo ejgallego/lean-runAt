@@ -60,12 +60,11 @@ def main : IO Unit := do
   let broker ← spawnLeanBroker endpoint root
   try
     waitForBrokerReadyForRoot endpoint root
-    discard <| expectOk (← runClient endpoint { op := .ensure })
+    discard <| expectOk (← runClient endpoint Beam.Broker.Request.ensure)
 
     writeSaveWarningFile root "-- default warning-only save"
     let (defaultResp, defaultProgress, defaultDiagnostics) ← runClientWithStream endpoint {
-      op := .saveOlean
-      path? := some "SaveSmoke/B.lean"
+      payload := .saveOlean { path := "SaveSmoke/B.lean" }
     }
     let defaultPayload ← expectOk defaultResp
     expectNoReplayDiagnosticsField "default save_olean" defaultPayload
@@ -88,9 +87,10 @@ def main : IO Unit := do
 
     writeSaveWarningFile root "-- full warning-only save"
     let (fullResp, fullProgress, streamedDiagnostics) ← runClientWithStream endpoint {
-      op := .saveOlean
-      path? := some "SaveSmoke/B.lean"
-      diagnosticScope? := some .all
+      payload := .saveOlean {
+        path := "SaveSmoke/B.lean"
+        diagnosticScope? := some .all
+      }
     }
     let fullPayload ← expectOk fullResp
     expectNoReplayDiagnosticsField "full save_olean" fullPayload
@@ -115,9 +115,10 @@ def main : IO Unit := do
     expectWarningDiagnosticPresent "full save_olean" streamedDiagnostics
 
     let (repeatResp, repeatProgress, repeatDiagnostics) ← runClientWithStream endpoint {
-      op := .saveOlean
-      path? := some "SaveSmoke/B.lean"
-      diagnosticScope? := some .all
+      payload := .saveOlean {
+        path := "SaveSmoke/B.lean"
+        diagnosticScope? := some .all
+      }
     }
     let repeatPayload ← expectOk repeatResp
     expectNoReplayDiagnosticsField "unchanged full save_olean" repeatPayload
@@ -143,9 +144,10 @@ def main : IO Unit := do
       "def brokenSave : Nat := \"oops\""
     ] ++ "\n"
     let (errorResp, _errorProgress, errorDiagnostics) ← runClientWithStream endpoint {
-      op := .saveOlean
-      path? := some "SaveSmoke/B.lean"
-      diagnosticScope? := some .all
+      payload := .saveOlean {
+        path := "SaveSmoke/B.lean"
+        diagnosticScope? := some .all
+      }
     }
     expectErrCode errorResp "invalidParams"
     let some error := errorResp.error?
@@ -175,10 +177,11 @@ def main : IO Unit := do
 
     writeSaveWarningFile root "-- full close-save"
     let (closeResp, closeProgress, closeDiagnostics) ← runClientWithStream endpoint {
-      op := .close
-      path? := some "SaveSmoke/B.lean"
-      saveArtifacts? := some true
-      diagnosticScope? := some .all
+      payload := .close {
+        path := "SaveSmoke/B.lean"
+        saveArtifacts? := some true
+        diagnosticScope? := some .all
+      }
     }
     let closePayload ← expectOk closeResp
     expectNoReplayDiagnosticsField "full close-save" closePayload
@@ -208,12 +211,12 @@ def main : IO Unit := do
     expectWarningDiagnosticPresent "full close-save" closeDiagnostics
 
     let openDocsPayload ← expectOk <| ← runClient endpoint {
-      op := .openDocs
+      Beam.Broker.Request.openDocs with
       workspaceId? := some testWorkspaceId
     }
     expectNoTrackedLeanDoc openDocsPayload "SaveSmoke/B.lean"
 
-    discard <| expectOk (← runClient endpoint { op := .shutdown })
+    discard <| expectOk (← runClient endpoint Beam.Broker.Request.shutdown)
   finally
     try
       broker.kill

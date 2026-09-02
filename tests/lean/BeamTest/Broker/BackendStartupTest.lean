@@ -100,7 +100,7 @@ private def checkStartupFailure
   let broker ← spawnLeanBrokerWithPlugin endpoint root plugin fakeServer.toString
   try
     waitForBrokerReadyForRoot endpoint root
-    let resp ← runClient endpoint { op := .ensure }
+    let resp ← runClient endpoint Beam.Broker.Request.ensure
     if resp.ok then
       throw <| IO.userError s!"expected backend startup failure, got success {(toJson resp).compress}"
     let some err := resp.error?

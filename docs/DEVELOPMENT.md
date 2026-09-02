@@ -249,12 +249,13 @@ When adding an MCP-facing operation:
 8. Run the projection/protocol builds and executables, the concurrent stdio scenario,
    `git diff --check`, and `bash tests/test-beam-fast.sh`.
 
-Broker requests remain a shared record for the CLI, MCP projection, and daemon transport, but field
-ownership is operation-specific. Update `Op.optionalRequestFields` with every new broker field and
-keep `Request.validateFields` at both the JSON decoder and direct dispatch boundary. Do not let an
-operation silently ignore a field owned by another operation. The broker protocol's `.cancel`
-operation is workspace-scoped and is identified by that workspace plus `cancelRequestId`; the
-CLI wrapper adapter injects its fixed workspace and does not let callers select one.
+Broker `Request` values use a small routing/correlation envelope around a tagged `RequestPayload`.
+The explicit codec keeps the daemon wire format flat: `op` selects the payload decoder, required
+operation fields decode directly to non-optional fields, and unrelated fields are rejected. Add new
+fields to only their owning payload variant and its codec. Keep `Request.validateFields` at the JSON
+decoder and direct dispatch boundaries for common-envelope routing invariants. The broker protocol's
+`.cancel` operation is workspace-scoped and is identified by that workspace plus `cancelRequestId`;
+the CLI wrapper adapter injects its fixed workspace and does not let callers select one.
 
 Broker `Response` and `StreamMessage` values are tagged unions internally. Their explicit JSON
 codecs retain the public `ok` and `kind` discriminants while preventing mismatched payloads from
@@ -333,9 +334,10 @@ internally it coordinates several responsibilities around the LSP process:
   but daemon paths must not enter Lake APIs that can terminate the process
 
 `ServerRuntime.dispatchRequestWithHandle` is the asynchronous admission boundary for in-process
-consumers such as MCP. It validates operation field ownership, registers the request's active
+consumers such as MCP. It validates common routing invariants, registers the request's active
 identity, exposes one opaque `RequestHandle`, and owns unregistering that handle on success,
-rejection, or exception. A handle uses a per-admission token and must become
+rejection, or exception. Operation field ownership is already enforced by the tagged payload and
+the flat JSON decoder. A handle uses a per-admission token and must become
 inert after that lexical scope, including when a later request reuses the same client request ID.
 Keep ordinary daemon and CLI dispatch on
 `ServerRuntime.dispatchRequest`; transport layers must not mutate the active-request registry
