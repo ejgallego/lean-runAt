@@ -452,7 +452,10 @@ after its listener and lifetime watchers are installed. The owner validates the 
 and configuration before publishing the session descriptor. Daemon stderr is drained into the exact
 private startup-log inode opened by the owner until readiness or a 64-KiB bound. The shared stderr
 capture continues draining into a bounded in-memory tail if that file sink fails, records the first
-sink failure, and never lets evidence IO block the daemon pipe. Startup does not invoke a shell,
+sink failure, and never lets evidence IO block the daemon pipe. Sink shutdown is synchronized with
+the current write. Capture finalization never assumes task cancellation interrupts a synchronous
+pipe read: it joins only after writer exit and otherwise returns a bounded `writerUnreaped` outcome.
+Startup does not invoke a shell,
 reopen the checked pathname, guess a port, probe for readiness, or parse log text as control flow.
 
 The owner watches its exact descriptor generation and daemon child. `lean-beam --root ROOT stop` changes
@@ -524,7 +527,9 @@ Keep these invariants covered:
 - every wrapper request is bound to its random generation capability, and transport frame, initial
   request, connection, and task counts are bounded; the selected generation's same-connection
   greeting is verified before capability or semantic contents are sent
-- an interrupted wrapper call closes its own one-request connection, whose server-side disconnect
+- an interrupted wrapper call observes cancellation during connect, greeting, send, and receive,
+  then relinquishes its own one-request connection without waiting behind a blocked write; the
+  server-side disconnect
   watcher cancels that exact admission and is joined by that connection handler; explicit request
   IDs remain available for cross-process
   `cancel`, and per-admission tokens retain exact disconnect and close semantics

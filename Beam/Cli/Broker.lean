@@ -112,7 +112,7 @@ private def awaitBrokerResponseWithInterrupts
           emit <| spec.stillWaitingMsg seconds
       pure interrupted
     let result ← sendRequestWithCallbacksInterruptiblyResult endpoint req interrupted callbacks
-      (expectedIdentity? := some expectedIdentity)
+      (.wrapper expectedIdentity)
     match result with
     | .ok response =>
         if let some spec := progressSpec? then

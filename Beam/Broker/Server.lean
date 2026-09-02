@@ -28,6 +28,7 @@ import Beam.Daemon.Startup
 import Beam.LSP.Save
 import Beam.Path
 import Beam.StderrCapture
+import Beam.System
 import Std.Sync.Mutex
 
 open Lean
@@ -154,30 +155,12 @@ private def resolvePath (root : System.FilePath) (path : System.FilePath) : IO S
 def sessionUri (path : System.FilePath) : String :=
   (System.Uri.pathToUri path : String)
 
-private partial def waitForTaskWithTimeout
-    (task : Task α)
-    (timeoutMs : Nat)
-    (pollMs : Nat := 50) : IO (Option α) := do
-  let rec loop (remainingMs : Nat) : IO (Option α) := do
-    if ← IO.hasFinished task then
-      return some (← IO.wait task)
-    if remainingMs == 0 then
-      return none
-    IO.sleep pollMs.toUInt32
-    loop (remainingMs - min pollMs remainingMs)
-  loop timeoutMs
-
 private def backendName : Backend → String
   | .lean => "Lean"
   | .rocq => "Rocq"
 
 private def BackendStderrCapture.snapshot (capture : BackendStderrCapture) : IO String := do
   Beam.StderrCapture.snapshot capture
-
-private def BackendStderrCapture.awaitDrain
-    (capture : BackendStderrCapture)
-    (timeoutMs : Nat := 500) : IO Unit := do
-  discard <| waitForTaskWithTimeout capture.drainTask timeoutMs
 
 private def backendFailureMessage
     (backend : Backend)
@@ -218,7 +201,7 @@ private partial def waitForProcessExitWithTimeout
           loop (remainingMs - min pollMs remainingMs)
   loop timeoutMs
 
-private def terminateBackendProcess (proc : IO.Process.Child brokerStdio) : IO Unit := do
+private def terminateBackendProcess (proc : IO.Process.Child brokerStdio) : IO Bool := do
   let running ←
     try
       pure (← proc.tryWait).isNone
@@ -241,9 +224,17 @@ private def terminateBackendProcess (proc : IO.Process.Child brokerStdio) : IO U
         pure ()
       discard <| waitForProcessExitWithTimeout proc sessionShutdownReplyTimeoutMs
   try
-    discard <| proc.tryWait
+    pure (← proc.tryWait).isSome
   catch _ =>
-    pure ()
+    pure false
+
+private def finishBackendStderrCapture
+    (capture : BackendStderrCapture)
+    (writerReaped : Bool) : IO Beam.StderrCaptureOutcome := do
+  if writerReaped then
+    capture.finishAfterWriterExit
+  else
+    pure .writerUnreaped
 
 private def startBackendStderrCaptureOrTerminate
     (backend : Backend)
@@ -251,7 +242,7 @@ private def startBackendStderrCaptureOrTerminate
   try
     startBackendStderrCapture proc.stderr
   catch err =>
-    terminateBackendProcess proc
+    discard <| terminateBackendProcess proc
     throw <| IO.userError <|
       s!"{backendName backend} backend failed during startup before stderr capture: {err}"
 
@@ -260,9 +251,15 @@ private def terminateBackendFailure
     (phase cause : String)
     (proc : IO.Process.Child brokerStdio)
     (capture : BackendStderrCapture) : IO String := do
-  terminateBackendProcess proc
-  capture.awaitDrain
-  backendFailureMessage backend phase cause capture
+  let writerReaped ← terminateBackendProcess proc
+  let captureOutcome ← finishBackendStderrCapture capture writerReaped
+  let message ← backendFailureMessage backend phase cause capture
+  pure <| match captureOutcome with
+    | .drained => message
+    | .sourceFailed err =>
+        message ++ s!"\nbackend stderr source also failed while draining: {err}"
+    | .writerUnreaped =>
+        message ++ "\nbackend stderr writer could not be reaped; its bounded capture remains active"
 
 private def sessionExited (session : Session) : IO Bool := do
   try
@@ -560,12 +557,12 @@ private def shutdownSession (session : Session) : IO Unit := do
       let (session, pending) ←
         startRequestJsonTrackedDetailed session "shutdown" Json.null
       let task ← IO.asTask (prio := Task.Priority.dedicated) pending.awaitOutcome
-      if (← waitForTaskWithTimeout task sessionShutdownReplyTimeoutMs).isNone then
+      if (← Beam.waitTaskWithTimeout task sessionShutdownReplyTimeoutMs).isNone then
         PendingRequestStore.failAll session.pending <| BrokerFailure.toResponseFailure {
           code := .workerExited
           message := "backend session shutdown timed out"
         }
-        discard <| waitForTaskWithTimeout task sessionShutdownReplyTimeoutMs
+        discard <| Beam.waitTaskWithTimeout task sessionShutdownReplyTimeoutMs
       pure session
     catch _ =>
       pure session
@@ -574,8 +571,19 @@ private def shutdownSession (session : Session) : IO Unit := do
       ({ method := "exit", param := Json.null : Lean.JsonRpc.Notification Json })
   catch _ =>
     pure ()
-  unless ← waitForProcessExitWithTimeout session.proc sessionShutdownReplyTimeoutMs do
-    terminateBackendProcess session.proc
+  let writerReaped ←
+    if ← waitForProcessExitWithTimeout session.proc sessionShutdownReplyTimeoutMs then
+      pure true
+    else
+      terminateBackendProcess session.proc
+  match ← finishBackendStderrCapture session.stderrCapture writerReaped with
+  | .drained => pure ()
+  | .sourceFailed err =>
+      throw <| IO.userError s!"backend stderr source failed while draining: {err}"
+  | .writerUnreaped =>
+      -- A descendant can retain the pipe after the backend leader is reaped. This is an explicit
+      -- bounded resource outcome, not a reason to make an otherwise completed shutdown fail.
+      traceBroker "backend stderr remained open after its leader exited"
 
 def sendRequestJsonTrackedDetailed
     (session : Session)
@@ -666,7 +674,7 @@ private def acquireBackendSession
       throw <| IO.userError <| ←
         terminateBackendFailure backend "during startup" err.toString proc stderrCapture
   try
-    match ← waitForTaskWithTimeout initializeTask backendInitializeTimeoutMs with
+    match ← Beam.waitTaskWithTimeout initializeTask backendInitializeTimeoutMs with
     | some (.ok ()) => pure ()
     | some (.error err) => throw err
     | none =>
@@ -684,7 +692,7 @@ private def acquireBackendSession
     IO.cancel initializeTask
     let message ←
       terminateBackendFailure backend "during startup" err.toString proc stderrCapture
-    discard <| waitForTaskWithTimeout initializeTask sessionShutdownReplyTimeoutMs
+    discard <| Beam.waitTaskWithTimeout initializeTask sessionShutdownReplyTimeoutMs
     throw <| IO.userError message
 
 private def requireWorkspace (workspaceId : WorkspaceId) : M WorkspaceState := do

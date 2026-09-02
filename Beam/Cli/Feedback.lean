@@ -101,7 +101,7 @@ private def collectDaemonRequest
     (warnings : Array String) : IO (Json × Array String) := do
   let response ← sendRequestWithStreamTimeoutResult client.endpoint
     (client.sealRequest request) feedbackDaemonResponseTimeoutMs (fun _ => pure ())
-    (expectedIdentity? := some client.identity)
+    (.wrapper client.identity)
   pure <| Beam.Feedback.clientResponsePayloadOrWarning label response warnings
 
 private def collectDaemonPayload

@@ -221,7 +221,9 @@ private def runThenHoldUntilInterrupted
       watcher.awaitInterrupt
     else if let some exitCode ← owner.exitCode? then
       unless exitCode == 0 do
-        throw <| IO.userError s!"owned Beam daemon exited with status {exitCode}"
+        let tail := (← owner.stderrTail).trimAscii.toString
+        let detail := if tail.isEmpty then "" else s!"\ndaemon stderr tail:\n{tail}"
+        throw <| IO.userError s!"owned Beam daemon exited with status {exitCode}{detail}"
 
 private def serveBackend
     (home : System.FilePath)

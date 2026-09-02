@@ -10,6 +10,20 @@ open Lean
 
 namespace Beam
 
+/-- Wait for a task for at most `timeoutMs`, without cancelling it on timeout. -/
+partial def waitTaskWithTimeout
+    (task : Task α)
+    (timeoutMs : Nat)
+    (pollMs : Nat := 50) : IO (Option α) := do
+  let rec loop (remainingMs : Nat) : IO (Option α) := do
+    if ← IO.hasFinished task then
+      return some (← IO.wait task)
+    if remainingMs == 0 then
+      return none
+    IO.sleep pollMs.toUInt32
+    loop (remainingMs - min pollMs remainingMs)
+  loop timeoutMs
+
 /-- Return the POSIX permission bits reported by `lstat`, without following the final symlink. -/
 @[extern "lean_beam_lstat_mode"]
 private opaque lstatMode (path : @& String) : IO UInt32

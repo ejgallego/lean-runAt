@@ -114,7 +114,8 @@ Current Beam coverage includes:
   focused probe, runtime, sync/save, handle, and diagnostic slices independently
 - focused daemon lifecycle coverage in [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh),
   including the no-implicit-start contract, duplicate-owner rejection, authenticated generation
-  probes, mode-`0700` session-directory and mode-`0600` descriptor publication, rejection of symlinked or non-private
+  probes, interruption of a request whose authenticated endpoint stops reading during send,
+  mode-`0700` session-directory and mode-`0600` descriptor publication, rejection of symlinked or non-private
   existing session paths without mutating their targets, stable missing-path canonicalization,
   wrong-root status classification and recovery rejection with
   byte-for-byte descriptor preservation, unauthorized-shutdown rejection without listener teardown, oversized-frame
@@ -295,6 +296,9 @@ build the local fixture under CI contention. Keep `--timeout 30` for local repro
 are specifically checking the CI budget. The focused daemon lifecycle fixture explicitly prebuilds
 its toolchain into one owned shared cache before timing daemon startup, so cold bundle compilation
 is not misdiagnosed as a daemon-readiness timeout.
+The focused CLI daemon test also checks that a failed stderr evidence sink does not stop pipe
+draining, that sink failure observation is synchronized, and that an unproven writer produces a
+bounded `writerUnreaped` outcome rather than an unbounded task join.
 
 The focused harness also accepts `no-progress-sync` to isolate whether a timeout depends on MCP
 progress notifications or the underlying `lean_sync` / `waitForDiagnostics` path.

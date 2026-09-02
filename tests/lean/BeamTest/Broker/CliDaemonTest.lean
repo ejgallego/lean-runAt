@@ -155,7 +155,7 @@ private def checkSilentEndpointProbeTimeout : IO Unit := do
       }
       match ← Beam.Daemon.daemonGenerationStatus endpoint
           Beam.Cli.projectDaemonWorkspaceId (System.FilePath.mk "/tmp") identity
-          "test-capability" (verifyServerIdentity := true) with
+          "test-capability" with
       | .probeFailed (.responseTimeout timeoutMs) =>
           require "silent endpoint should preserve its typed response timeout"
             (timeoutMs == 2000)
@@ -233,6 +233,64 @@ private def checkPlainBrokerTaskCancellation : IO Unit := do
     | .ok () => pure ()
     | .error err => throw err
 
+private def serveGreetingWithoutReading
+    (listener : Beam.Broker.Transport.Listener)
+    (identity : Beam.Broker.DaemonIdentity)
+    (greeted release : IO.Promise Unit) : IO Unit := do
+  let conn ← Beam.Broker.Transport.accept listener
+  try
+    Beam.Broker.Transport.sendMsg conn <|
+      toJson (Beam.Broker.ServerHello.current identity) |>.compress
+    greeted.resolve ()
+    let some _ ← IO.wait release.result?
+      | throw <| IO.userError "blocked-send release promise dropped"
+    pure ()
+  finally
+    Beam.Broker.Transport.closeConnection conn
+
+private def checkBrokerSendInterruption : IO Unit := do
+  withBrokerListener fun listener endpoint => do
+    let identity : Beam.Broker.DaemonIdentity := {
+      daemonId := "test-generation"
+      configHash := "test-config"
+    }
+    let greeted ← IO.Promise.new
+    let release ← IO.Promise.new
+    let interrupted ← IO.mkRef false
+    let serverTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      serveGreetingWithoutReading listener identity greeted release
+    let largeText := String.ofList (List.replicate (8 * 1024 * 1024) 'x')
+    let clientTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      Beam.Broker.sendRequestWithCallbacksInterruptiblyResult endpoint {
+        op := .runAt
+        workspaceId? := some Beam.Cli.projectDaemonWorkspaceId
+        clientRequestId? := some "blocked-send"
+        daemonCapability? := some "test-capability"
+        path? := some "Secret.lean"
+        version? := some 1
+        line? := some 0
+        character? := some 0
+        text? := some largeText
+      } interrupted.get (server := .wrapper identity)
+    let some _ ← IO.wait greeted.result?
+      | throw <| IO.userError "blocked-send greeting promise dropped"
+    IO.sleep 100
+    interrupted.set true
+    let result? ← Beam.waitTaskWithTimeout clientTask 2000
+    release.resolve ()
+    let some result := result?
+      | throw <| IO.userError "interrupt did not release a blocked Beam request send"
+    match result with
+    | .ok (.error .interrupted) => pure ()
+    | .ok (.error failure) =>
+        throw <| IO.userError s!"blocked send reported {repr failure} instead of interruption"
+    | .ok (.ok response) =>
+        throw <| IO.userError s!"blocked send unexpectedly returned {toJson response}"
+    | .error err => throw err
+    match ← IO.wait serverTask with
+    | .ok () => pure ()
+    | .error err => throw err
+
 private def serveWrongDaemonGreeting
     (listener : Beam.Broker.Transport.Listener) : IO Bool := do
   let conn ← Beam.Broker.Transport.accept listener
@@ -281,10 +339,11 @@ private def checkStderrCaptureSurvivesSinkFailure : IO Unit := do
       let sink : Beam.StderrSink := fun _ =>
         throw <| IO.userError "intentional stderr sink failure"
       let capture ← Beam.StderrCapture.start source 1024 (some sink)
-      match ← IO.wait capture.drainTask with
-      | .error err => throw err
-      | .ok () => pure ()
-      let some failure ← capture.sinkFailure?
+      match ← capture.finishAfterWriterExit with
+      | .drained => pure ()
+      | .sourceFailed err => throw err
+      | .writerUnreaped => throw <| IO.userError "stderr capture did not finish"
+      let some failure ← capture.disableSinkAndAwaitCurrentWrite
         | throw <| IO.userError "stderr capture did not retain its sink failure"
       requireSubstring "stderr sink failure" "intentional stderr sink failure" failure.toString
       let tail ← capture.snapshot
@@ -293,6 +352,76 @@ private def checkStderrCaptureSurvivesSinkFailure : IO Unit := do
   finally
     if ← path.pathExists then
       IO.FS.removeFile path
+
+private abbrev stderrDescendantStdio : IO.Process.StdioConfig where
+  stdin := .null
+  stdout := .null
+  stderr := .piped
+
+private def checkStderrSinkDisableIsSynchronized : IO Unit := do
+  let path := System.FilePath.mk s!"/tmp/beam-stderr-sink-sync-{← IO.monoNanosNow}.txt"
+  let entered ← IO.mkRef false
+  let release ← IO.mkRef false
+  try
+    IO.FS.writeFile path "stderr evidence"
+    IO.FS.withFile path .read fun source => do
+      let sink : Beam.StderrSink := fun _ => do
+        entered.set true
+        while !(← release.get) do
+          IO.sleep 10
+        pure true
+      let capture ← Beam.StderrCapture.start source 1024 (some sink)
+      let rec awaitSinkEntry : Nat → IO Bool
+        | 0 => pure false
+        | fuel + 1 => do
+            if ← entered.get then
+              pure true
+            else
+              IO.sleep 10
+              awaitSinkEntry fuel
+      require "stderr sink did not start its write" (← awaitSinkEntry 100)
+      let disableTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+        capture.disableSinkAndAwaitCurrentWrite
+      IO.sleep 50
+      require "disabling a stderr sink must await its current write"
+        (!(← IO.hasFinished disableTask))
+      release.set true
+      match ← IO.wait disableTask with
+      | .ok none => pure ()
+      | .ok (some err) => throw err
+      | .error err => throw err
+      match ← capture.finishAfterWriterExit with
+      | .drained => pure ()
+      | .sourceFailed err => throw err
+      | .writerUnreaped => throw <| IO.userError "synchronized stderr capture did not finish"
+  finally
+    release.set true
+    if ← path.pathExists then
+      IO.FS.removeFile path
+
+private def checkStderrCaptureDoesNotJoinInheritedPipe : IO Unit := do
+  let proc ← IO.Process.spawn {
+    toStdioConfig := stderrDescendantStdio
+    cmd := "/bin/sh"
+    args := #["-c", "sleep 1 &"]
+    setsid := true
+  }
+  let capture ← Beam.StderrCapture.start proc.stderr 1024
+  discard <| proc.wait
+  let started ← IO.monoNanosNow
+  match ← capture.finishAfterWriterExit 50 with
+  | .writerUnreaped => pure ()
+  | .drained | .sourceFailed _ =>
+      throw <| IO.userError "an inherited stderr pipe should remain unreaped before its writer exits"
+  let elapsedMs := ((← IO.monoNanosNow) - started) / 1000000
+  require "stderr finalization must remain bounded while a descendant owns the pipe"
+    (elapsedMs < 500)
+  IO.sleep 1100
+  match ← capture.finishAfterWriterExit with
+  | .drained => pure ()
+  | .sourceFailed err => throw err
+  | .writerUnreaped =>
+      throw <| IO.userError "stderr capture did not drain after the descendant exited"
 
 private def requireRequestJson
     (label : String)
@@ -1522,8 +1651,11 @@ def main : IO Unit := do
   checkSilentEndpointProbeTimeout
   checkSilentShutdownTimeout
   checkPlainBrokerTaskCancellation
+  checkBrokerSendInterruption
   checkWrongGreetingProtectsRequest
   checkStderrCaptureSurvivesSinkFailure
+  checkStderrSinkDisableIsSynchronized
+  checkStderrCaptureDoesNotJoinInheritedPipe
   checkBrokerConnectionClosedIncident
   checkTypedRegistryReads
   checkDaemonFailureIncidentRetention

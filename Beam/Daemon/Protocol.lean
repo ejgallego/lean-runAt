@@ -134,12 +134,12 @@ private def daemonProbeOfResponse (resp : Response) : Except BrokerClientFailure
 private def daemonProbe
     (endpoint : Transport.Endpoint)
     (workspaceId : WorkspaceId)
-    (expectedIdentity? : Option DaemonIdentity := none)
+    (server : ServerExpectation)
     (capability? : Option String := none) : IO (Except BrokerClientFailure DaemonProbe) := do
   match ← sendRequestWithStreamTimeoutResult endpoint
       { op := .stats, workspaceId? := some workspaceId, daemonCapability? := capability? }
       daemonProbeResponseTimeoutMs (fun _ => pure ())
-      (expectedIdentity? := expectedIdentity?) with
+      server with
   | .ok resp => pure <| daemonProbeOfResponse resp
   | .error failure => pure <| .error failure
 
@@ -150,16 +150,14 @@ inductive DaemonGenerationStatus where
   | exact
   deriving Repr
 
-/-- Classify one endpoint observation against the expected root and wrapper daemon generation. -/
-def daemonGenerationStatus
+private def daemonGenerationStatusUsing
     (endpoint : Transport.Endpoint)
     (workspaceId : WorkspaceId)
     (root : System.FilePath)
     (identity : DaemonIdentity)
-    (capability : String)
-    (verifyServerIdentity : Bool := false) : IO DaemonGenerationStatus := do
-  let expectedIdentity? := if verifyServerIdentity then some identity else none
-  match ← daemonProbe endpoint workspaceId expectedIdentity? (some capability) with
+    (capability? : Option String)
+    (server : ServerExpectation) : IO DaemonGenerationStatus := do
+  match ← daemonProbe endpoint workspaceId server capability? with
   | .error failure => pure <| .probeFailed failure
   | .ok probe =>
       unless ← Beam.sameFilePath (System.FilePath.mk probe.root) root do
@@ -168,5 +166,22 @@ def daemonGenerationStatus
         pure .exact
       else
         pure <| .wrongGeneration probe.root
+
+/-- Classify one wrapper endpoint after proving its expected generation on the same connection. -/
+def daemonGenerationStatus
+    (endpoint : Transport.Endpoint)
+    (workspaceId : WorkspaceId)
+    (root : System.FilePath)
+    (identity : DaemonIdentity)
+    (capability : String) : IO DaemonGenerationStatus := do
+  daemonGenerationStatusUsing endpoint workspaceId root identity (some capability) (.wrapper identity)
+
+/-- Classify an internal standalone broker, which deliberately has no wrapper greeting. -/
+def standaloneDaemonGenerationStatus
+    (endpoint : Transport.Endpoint)
+    (workspaceId : WorkspaceId)
+    (root : System.FilePath)
+    (identity : DaemonIdentity) : IO DaemonGenerationStatus := do
+  daemonGenerationStatusUsing endpoint workspaceId root identity none .standalone
 
 end Beam.Daemon

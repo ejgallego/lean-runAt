@@ -215,7 +215,7 @@ private def brokerRoot? (endpoint : Beam.Broker.Endpoint) : IO (Option String) :
     let result ← Beam.Broker.sendRequestWithCallbacksResult endpoint {
       op := .stats
       workspaceId? := some testWorkspaceId
-    }
+    } (server := .standalone)
     match result with
     | .ok resp =>
         if resp.ok then pure (statsRoot? resp) else pure none

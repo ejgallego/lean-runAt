@@ -112,7 +112,7 @@ def main : IO Unit := do
   let broker ← spawnLeanBroker endpoint root (identity? := some identity)
   try
     waitForBrokerReadyForRoot endpoint root
-    match ← Beam.Daemon.daemonGenerationStatus endpoint testWorkspaceId root identity "test-capability" with
+    match ← Beam.Daemon.standaloneDaemonGenerationStatus endpoint testWorkspaceId root identity with
     | .exact => pure ()
     | status =>
         throw <| IO.userError
@@ -121,13 +121,13 @@ def main : IO Unit := do
         { identity with daemonId := identity.daemonId ++ "-other" },
         { identity with configHash := identity.configHash ++ "-other" }
       ] do
-      match ← Beam.Daemon.daemonGenerationStatus endpoint testWorkspaceId root mismatched "test-capability" with
+      match ← Beam.Daemon.standaloneDaemonGenerationStatus endpoint testWorkspaceId root mismatched with
       | .wrongGeneration _ => pure ()
       | status =>
           throw <| IO.userError s!"daemon generation mismatch was classified as {repr status}"
     let otherRoot := root / "other-root"
     IO.FS.createDirAll otherRoot
-    match ← Beam.Daemon.daemonGenerationStatus endpoint testWorkspaceId otherRoot identity "test-capability" with
+    match ← Beam.Daemon.standaloneDaemonGenerationStatus endpoint testWorkspaceId otherRoot identity with
     | .wrongRoot _ => pure ()
     | status =>
         throw <| IO.userError s!"daemon root mismatch was classified as {repr status}"
@@ -301,7 +301,7 @@ def main : IO Unit := do
 
     sendShutdownAndResetConnection port
     waitForBrokerExit broker
-    match ← Beam.Daemon.daemonGenerationStatus endpoint testWorkspaceId root identity "test-capability" with
+    match ← Beam.Daemon.standaloneDaemonGenerationStatus endpoint testWorkspaceId root identity with
     | .probeFailed (.transport .connect _) => pure ()
     | status =>
         throw <| IO.userError s!"stopped daemon was classified as {repr status}"

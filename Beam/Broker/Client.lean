@@ -18,6 +18,14 @@ structure StreamCallbacks where
 
 abbrev Endpoint := Transport.Endpoint
 
+/-- Which server protocol must be observed before a request may be disclosed. -/
+inductive ServerExpectation where
+  /-- Internal standalone brokers do not emit a wrapper-generation greeting. -/
+  | standalone
+  /-- Wrapper brokers must prove the descriptor-selected generation on this connection. -/
+  | wrapper (identity : DaemonIdentity)
+  deriving Repr, BEq
+
 /-- The transport operation that produced a typed broker client failure. -/
 inductive BrokerTransportOperation where
   | connect
@@ -72,13 +80,13 @@ private def captureClientFailure
   catch e =>
     pure <| .error (failure e)
 
-private structure ResponseDeadline where
+private structure RequestDeadline where
   timeoutMs : Nat
   deadlineNanos : Nat
 
-private inductive ResponseWait where
+private inductive RequestWait where
   | unbounded
-  | deadline (deadline : ResponseDeadline)
+  | deadline (deadline : RequestDeadline)
   | interruptible (interrupted : IO Bool)
 
 private def serverHelloTimeoutMs : Nat :=
@@ -88,18 +96,30 @@ private def serverHelloTimeoutMs : Nat :=
 private def verifyServerHello
     (client : Transport.Connection)
     (expectedIdentity : DaemonIdentity)
-    (wait : ResponseWait) : IO (Except BrokerClientFailure Unit) := do
-  let (timeoutMs, deadlineNanos) ←
-    match wait with
-    | .deadline deadline => pure (deadline.timeoutMs, deadline.deadlineNanos)
-    | .unbounded | .interruptible _ =>
-        pure (serverHelloTimeoutMs, (← IO.monoNanosNow) + serverHelloTimeoutMs * 1000000)
+    (wait : RequestWait) : IO (Except BrokerClientFailure Unit) := do
   let greeting ←
-    match ← captureClientFailure (.transport .receive) <|
-        Transport.recvMsgUntil client deadlineNanos with
-    | .ok (some greeting) => pure greeting
-    | .ok none => return .error (.responseTimeout timeoutMs)
-    | .error failure => return .error failure
+    match wait with
+    | .unbounded =>
+        let deadlineNanos := (← IO.monoNanosNow) + serverHelloTimeoutMs * 1000000
+        match ← captureClientFailure (.transport .receive) <|
+            Transport.recvMsgUntil client deadlineNanos with
+        | .ok (some greeting) => pure greeting
+        | .ok none => return .error (.responseTimeout serverHelloTimeoutMs)
+        | .error failure => return .error failure
+    | .deadline deadline =>
+        match ← captureClientFailure (.transport .receive) <|
+            Transport.recvMsgUntil client deadline.deadlineNanos with
+        | .ok (some greeting) => pure greeting
+        | .ok none => return .error (.responseTimeout deadline.timeoutMs)
+        | .error failure => return .error failure
+    | .interruptible interrupted =>
+        let deadlineNanos := (← IO.monoNanosNow) + serverHelloTimeoutMs * 1000000
+        match ← captureClientFailure (.transport .receive) <|
+            Transport.recvMsgInterruptiblyUntil client deadlineNanos interrupted with
+        | .ok (.completed greeting) => pure greeting
+        | .ok .timedOut => return .error (.responseTimeout serverHelloTimeoutMs)
+        | .ok .interrupted => return .error .interrupted
+        | .error failure => return .error failure
   match ServerHello.decode expectedIdentity greeting with
   | .ok () => pure <| .ok ()
   | .error detail => pure <| .error (.invalidResponse detail)
@@ -109,20 +129,66 @@ private partial def sendRequestWithStreamResultCore
     (endpoint : Endpoint)
     (req : Request)
     (onStream : StreamMessage → IO Unit)
-    (wait : ResponseWait)
-    (expectedIdentity? : Option DaemonIdentity := none) :
+    (wait : RequestWait)
+    (server : ServerExpectation) :
     IO (Except BrokerClientFailure Response) := do
+  let requestText := (toJson req).compress
   let client ←
-    match ← captureClientFailure (.transport .connect) (Transport.connect endpoint) with
-    | .ok client => pure client
-    | .error failure => return .error failure
+    match wait with
+    | .unbounded =>
+      match ← captureClientFailure (.transport .connect) (Transport.connect endpoint) with
+      | .ok client => pure client
+      | .error failure => return .error failure
+    | .deadline deadline =>
+      match ← captureClientFailure (.transport .connect) <|
+          Transport.connectUntil endpoint deadline.deadlineNanos with
+      | .ok (.completed client) => pure client
+      | .ok .timedOut => return .error (.responseTimeout deadline.timeoutMs)
+      | .ok .interrupted => return .error (.invalidResponse "bounded Beam daemon connect was interrupted")
+      | .error failure => return .error failure
+    | .interruptible interrupted =>
+      match ← captureClientFailure (.transport .connect) <|
+          Transport.connectInterruptibly endpoint interrupted with
+      | .ok (.completed client) => pure client
+      | .ok .interrupted => return .error .interrupted
+      | .ok .timedOut => return .error (.invalidResponse "interruptible Beam daemon connect timed out")
+      | .error failure => return .error failure
+  let abandoned ← IO.mkRef false
   try
-    if let some expectedIdentity := expectedIdentity? then
+    if let .wrapper expectedIdentity := server then
       match ← verifyServerHello client expectedIdentity wait with
       | .ok () => pure ()
       | .error failure => return .error failure
-    match ← captureClientFailure (.transport .send) <|
-        Transport.sendMsg client (toJson req).compress with
+    let sendResult ←
+      match wait with
+      | .unbounded =>
+          match ← captureClientFailure (.transport .send) <|
+              Transport.sendMsg client requestText with
+          | .ok () => pure <| Except.ok ()
+          | .error failure => pure <| Except.error failure
+      | .deadline deadline =>
+          match ← captureClientFailure (.transport .send) <|
+              Transport.sendMsgUntil client requestText deadline.deadlineNanos with
+          | .ok (.completed ()) => pure <| Except.ok ()
+          | .ok .timedOut =>
+              abandoned.set true
+              pure <| Except.error (.responseTimeout deadline.timeoutMs)
+          | .ok .interrupted =>
+              abandoned.set true
+              pure <| Except.error (.invalidResponse "bounded Beam daemon send was interrupted")
+          | .error failure => pure <| Except.error failure
+      | .interruptible interrupted =>
+          match ← captureClientFailure (.transport .send) <|
+              Transport.sendMsgInterruptibly client requestText interrupted with
+          | .ok (.completed ()) => pure <| Except.ok ()
+          | .ok .interrupted =>
+              abandoned.set true
+              pure <| Except.error .interrupted
+          | .ok .timedOut =>
+              abandoned.set true
+              pure <| Except.error (.invalidResponse "interruptible Beam daemon send timed out")
+          | .error failure => pure <| Except.error failure
+    match sendResult with
     | .ok () => pure ()
     | .error failure => return .error failure
     let rec receiveResponse : IO (Except BrokerClientFailure Response) := do
@@ -161,36 +227,39 @@ private partial def sendRequestWithStreamResultCore
           receiveResponse
     receiveResponse
   finally
-    Transport.closeConnection client
+    if ← abandoned.get then
+      pure ()
+    else
+      Transport.closeConnection client
 
 /-- Send one request while preserving transport, response, and callback failures as typed data. -/
 partial def sendRequestWithStreamResult
     (endpoint : Endpoint)
     (req : Request)
     (onStream : StreamMessage → IO Unit)
-    (expectedIdentity? : Option DaemonIdentity := none) : IO (Except BrokerClientFailure Response) := do
-  sendRequestWithStreamResultCore endpoint req onStream .unbounded expectedIdentity?
+    (server : ServerExpectation) : IO (Except BrokerClientFailure Response) := do
+  sendRequestWithStreamResultCore endpoint req onStream .unbounded server
 
-/-- Send one request with an absolute timeout for receiving its complete response stream. -/
+/-- Send one request with one absolute timeout across connect, greeting, send, and response. -/
 partial def sendRequestWithStreamTimeoutResult
     (endpoint : Endpoint)
     (req : Request)
     (timeoutMs : Nat)
     (onStream : StreamMessage → IO Unit)
-    (expectedIdentity? : Option DaemonIdentity := none) : IO (Except BrokerClientFailure Response) := do
-  let deadline : ResponseDeadline := {
+    (server : ServerExpectation) : IO (Except BrokerClientFailure Response) := do
+  let deadline : RequestDeadline := {
     timeoutMs
     deadlineNanos := (← IO.monoNanosNow) + timeoutMs * 1000000
   }
-  sendRequestWithStreamResultCore endpoint req onStream (.deadline deadline) expectedIdentity?
+  sendRequestWithStreamResultCore endpoint req onStream (.deadline deadline) server
 
 /-- Send one request with typed client failures and structured progress callbacks. -/
 partial def sendRequestWithCallbacksResult
     (endpoint : Endpoint)
     (req : Request)
     (callbacks : StreamCallbacks := {})
-    (expectedIdentity? : Option DaemonIdentity := none) : IO (Except BrokerClientFailure Response) := do
-  sendRequestWithStreamResult endpoint req (expectedIdentity? := expectedIdentity?) fun stream => do
+    (server : ServerExpectation) : IO (Except BrokerClientFailure Response) := do
+  sendRequestWithStreamResult endpoint req (server := server) fun stream => do
     match stream with
     | .response .. =>
         pure ()
@@ -205,7 +274,7 @@ partial def sendRequestWithCallbacksInterruptiblyResult
     (req : Request)
     (interrupted : IO Bool)
     (callbacks : StreamCallbacks := {})
-    (expectedIdentity? : Option DaemonIdentity := none) : IO (Except BrokerClientFailure Response) := do
+    (server : ServerExpectation) : IO (Except BrokerClientFailure Response) := do
   sendRequestWithStreamResultCore endpoint req (fun stream => do
     match stream with
     | .response .. =>
@@ -213,6 +282,6 @@ partial def sendRequestWithCallbacksInterruptiblyResult
     | .fileProgress _ progress =>
         callbacks.onFileProgress progress
     | .diagnostic _ diagnostic =>
-        callbacks.onDiagnostic diagnostic) (.interruptible interrupted) expectedIdentity?
+        callbacks.onDiagnostic diagnostic) (.interruptible interrupted) server
 
 end Beam.Broker

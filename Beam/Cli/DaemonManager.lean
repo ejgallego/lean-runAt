@@ -14,6 +14,7 @@ import Beam.Daemon.Paths
 import Beam.Daemon.Registry
 import Beam.Daemon.Startup
 import Beam.StderrCapture
+import Beam.System
 
 open Lean
 
@@ -251,7 +252,7 @@ def requestDaemonShutdown
       op := .shutdown
       daemonCapability? := some capability
     }
-    responseTimeoutMs (fun _ => pure ()) (expectedIdentity? := some identity)
+    responseTimeoutMs (fun _ => pure ()) (.wrapper identity)
 
 inductive RegistryUnsafeReason where
   | endpointProbeFailed (failure : BrokerClientFailure)
@@ -270,8 +271,9 @@ inductive RegistryObservation where
   | selectorMismatch (entry : SessionDescriptor)
   | recoveryRequired (blocker : RegistryBlocker)
 
-/-- Descriptor selection without an endpoint probe. Ordinary project calls use this read-only
-boundary and let their capability-bound operation be the definitive endpoint observation. -/
+/-- Descriptor selection without a separate endpoint probe. Ordinary project calls use this
+read-only boundary, verify the generation through the request connection's greeting, and then send
+their capability-bound operation on that same connection. -/
 private inductive RegistrySelection where
   | absent
   | selected (entry : SessionDescriptor)
@@ -301,7 +303,7 @@ private def observeProjectRegistryAt
   | .selected entry =>
       let endpoint := registryEndpoint entry
       match ← daemonGenerationStatus endpoint entry.workspace.workspaceId root
-          entry.identity entry.capability (verifyServerIdentity := true) with
+          entry.identity entry.capability with
       | .exact => pure <| .live entry
       | .probeFailed failure =>
           pure <| .recoveryRequired (.unusable entry (.endpointProbeFailed failure))
@@ -482,45 +484,37 @@ private structure StartedDaemon where
 private partial def waitForDaemonChildExit
     {cfg : IO.Process.StdioConfig}
     (child : IO.Process.Child cfg)
-    (tries : Nat := 20) : IO Unit := do
-  if tries == 0 || (← child.tryWait).isSome then
-    return
-  IO.sleep 100
-  waitForDaemonChildExit child (tries - 1)
+    (tries : Nat := 20) : IO Bool := do
+  match ← child.tryWait with
+  | some _ => pure true
+  | none =>
+      if tries == 0 then
+        pure false
+      else
+        IO.sleep 100
+        waitForDaemonChildExit child (tries - 1)
 
 private def terminateDaemonChild
     {cfg : IO.Process.StdioConfig}
-    (child : IO.Process.Child cfg) : IO Unit := do
+    (child : IO.Process.Child cfg) : IO Bool := do
   try
     if (← child.tryWait).isNone then
       child.kill
     waitForDaemonChildExit child
   catch _ =>
-    pure ()
+    pure false
 
-/-- Cancel an unfinished task and wait until it has relinquished its underlying IO resource. -/
-private def settleTask (task : Task α) : IO Unit := do
-  unless ← IO.hasFinished task do
-    try
-      IO.cancel task
-    finally
-      discard <| IO.wait task
-
-private partial def finishDaemonLogDrain
+private def finishDaemonLogDrain
     (capture : Beam.StderrCapture)
-    (tries : Nat := 20) : IO Unit := do
-  let task := capture.drainTask
-  if ← IO.hasFinished task then
-    discard <| IO.wait task
-  else if tries == 0 then
-    settleTask task
+    (writerReaped : Bool) : IO Beam.StderrCaptureOutcome := do
+  if writerReaped then
+    capture.finishAfterWriterExit
   else
-    IO.sleep 50
-    finishDaemonLogDrain capture (tries - 1)
+    pure .writerUnreaped
 
 private def terminateStartedDaemon (started : StartedDaemon) : IO Unit := do
-  terminateDaemonChild started.child
-  finishDaemonLogDrain started.stderrCapture
+  let writerReaped ← terminateDaemonChild started.child
+  discard <| finishDaemonLogDrain started.stderrCapture writerReaped
 
 private def daemonStderrTailLimit : Nat :=
   16 * 1024
@@ -589,7 +583,7 @@ private def startDaemon
         pure (count + keep < daemonStartupLogLimit)
       Beam.StderrCapture.start child.stderr daemonStderrTailLimit (some sink)
     catch err =>
-      terminateDaemonChild child
+      discard <| terminateDaemonChild child
       throw err
   let started : StartedDaemon := { child, stderrCapture }
   try
@@ -631,22 +625,29 @@ private def waitForDaemonReady
   let deadlineNanos := (← IO.monoNanosNow) + daemonStartupTimeoutMs * 1000000
   try
     let result ← waitForDaemonReadyUntil started identity readyTask deadlineNanos
-    started.stderrCapture.disableSink
-    let sinkFailure? ← started.stderrCapture.sinkFailure?
+    let sinkFailure? ← started.stderrCapture.disableSinkAndAwaitCurrentWrite
     match result, sinkFailure? with
     | .ok _, some err =>
-        terminateDaemonChild started.child
+        discard <| terminateDaemonChild started.child
         pure <| .error s!"Beam daemon startup log capture failed: {err}"
     | .ok _, none => pure result
     | .error detail, sinkFailure? =>
         -- End the writer before joining the readiness reader. This guarantees pipe EOF even on a
         -- platform where cancelling the dedicated task does not interrupt a blocking handle read.
-        terminateDaemonChild started.child
+        discard <| terminateDaemonChild started.child
         pure <| .error <| match sinkFailure? with
           | some err => detail ++ s!"\nBeam daemon startup log capture also failed: {err}"
           | none => detail
   finally
-    settleTask readyTask
+    -- An unexpected readiness-path exception must still close the pipe writer before settling its
+    -- synchronous reader. Normal result branches above have either completed the reader or already
+    -- terminated the child; even after reaping, keep the final wait bounded in case of inheritance.
+    if ← IO.hasFinished readyTask then
+      discard <| IO.wait readyTask
+    else
+      let writerReaped ← terminateDaemonChild started.child
+      if writerReaped then
+        discard <| Beam.waitTaskWithTimeout readyTask 1000
 
 private def newDaemonGenerationId (configHash : String) : IO String := do
   let startedMonoNanos ← IO.monoNanosNow
@@ -960,7 +961,6 @@ private def registeredGenerationStatus
     (entry : SessionDescriptor) : IO DaemonGenerationStatus := do
   let endpoint := registryEndpoint entry
   daemonGenerationStatus endpoint entry.workspace.workspaceId root entry.identity entry.capability
-    (verifyServerIdentity := true)
 
 /--
 Explicitly quarantine one unusable session descriptor without treating persisted PIDs as signal
@@ -1028,6 +1028,7 @@ structure ProjectDaemonOwner where
   private entry : SessionDescriptor
   private child : IO.Process.Child daemonStdio
   private exitCodeRef : IO.Ref (Option UInt32)
+  private stderrCapture : Beam.StderrCapture
 
 def ProjectDaemonOwner.exitCode? (owner : ProjectDaemonOwner) : IO (Option UInt32) := do
   match ← owner.exitCodeRef.get with
@@ -1040,6 +1041,10 @@ def ProjectDaemonOwner.exitCode? (owner : ProjectDaemonOwner) : IO (Option UInt3
 
 def ProjectDaemonOwner.generation (owner : ProjectDaemonOwner) : String :=
   owner.entry.daemonId
+
+/-- The bounded daemon stderr tail retained for abnormal-exit diagnostics. -/
+def ProjectDaemonOwner.stderrTail (owner : ProjectDaemonOwner) : IO String :=
+  owner.stderrCapture.snapshot
 
 /-- Whether this owner generation is still the one published for its project. -/
 def ProjectDaemonOwner.registered (owner : ProjectDaemonOwner) : IO Bool := do
@@ -1126,10 +1131,15 @@ private inductive OwnedDaemonFinish where
   | exitedCleanly
   | forcedReaped
   | exitedAbnormally (exitCode : UInt32)
+  | captureFailed (error : IO.Error)
   | unreaped
 
 private def classifyOwnedDaemonExit (exitCode : UInt32) : OwnedDaemonFinish :=
   if exitCode == 0 then .exitedCleanly else .exitedAbnormally exitCode
+
+private def OwnedDaemonFinish.writerReaped : OwnedDaemonFinish → Bool
+  | .unreaped => false
+  | .exitedCleanly | .forcedReaped | .exitedAbnormally _ | .captureFailed _ => true
 
 private def forceOwnedDaemonChild
     {cfg : IO.Process.StdioConfig}
@@ -1165,8 +1175,10 @@ private def finishOwnedDaemonChild
             forceOwnedDaemonChild child exitCodeRef
       catch _ =>
         forceOwnedDaemonChild owned.started.child exitCodeRef
-  finishDaemonLogDrain owned.started.stderrCapture
-  pure finish
+  match ← finishDaemonLogDrain owned.started.stderrCapture finish.writerReaped with
+  | .drained => pure finish
+  | .sourceFailed err => pure <| .captureFailed err
+  | .writerUnreaped => pure .unreaped
 
 private def markOwnedRegistryDraining
     (root controlDir : System.FilePath)
@@ -1214,7 +1226,13 @@ private def finishOwnedProjectDaemon
   if exitedBeforeOwnerCleanup && !registryWasDraining then
     -- An unexpected daemon exit is not evidence that its complete process tree disappeared. Keep
     -- the exact live generation fenced so observation projects it to recovery-required state.
-    finishDaemonLogDrain owned.started.stderrCapture
+    let outcome ← finishDaemonLogDrain owned.started.stderrCapture true
+    match outcome with
+    | .drained => pure ()
+    | .sourceFailed err =>
+        IO.eprintln s!"Beam daemon stderr source failed after abnormal exit: {err}"
+    | .writerUnreaped =>
+        IO.eprintln "Beam daemon stderr remained open after its leader exited"
   else
     markOwnedRegistryDraining root controlDir owned.entry
     match ← finishOwnedDaemonChild owned exitCodeRef with
@@ -1222,7 +1240,13 @@ private def finishOwnedProjectDaemon
         removeOwnedRegistry root controlDir owned.entry
     | .exitedAbnormally _ =>
         restoreOwnedRegistryRecoveryFence root controlDir owned.entry
+    | .captureFailed err =>
+        IO.eprintln s!"Beam daemon stderr source failed during cleanup: {err}"
+        restoreOwnedRegistryRecoveryFence root controlDir owned.entry
     | .unreaped =>
+        let tail := (← owned.started.stderrCapture.snapshot).trimAscii.toString
+        unless tail.isEmpty do
+          IO.eprintln s!"Beam daemon could not be fully reaped; stderr tail:\n{tail}"
         pure ()
 
 def withProjectDaemonOwner
@@ -1241,11 +1265,12 @@ def withProjectDaemonOwner
     startOwnedProjectDaemon control desired backend
   try
     act {
-        client := owned.client
-        entry := owned.entry
-        child := owned.started.child
-        exitCodeRef
-      }
+      client := owned.client
+      entry := owned.entry
+      child := owned.started.child
+      exitCodeRef := exitCodeRef
+      stderrCapture := owned.started.stderrCapture
+    }
   finally
     finishOwnedProjectDaemon root controlDir owned exitCodeRef
 
