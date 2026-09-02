@@ -138,12 +138,14 @@ What is not a valid checkpoint target:
   as one step, especially after saving an upstream dependency
 - treat `lean-beam sync` as the explicit supported boundary between real file edits and Beam daemon
   session state
-- `lean-beam sync` returns ordered machine-readable JSON on stdout with the current diagnostic
-  counts and readiness result
-  and streams human diagnostics on stderr
+- after a completed broker operation, `lean-beam sync` returns ordered machine-readable JSON on
+  stdout with the current diagnostic counts and readiness result and streams human diagnostics on
+  stderr; automated callers must check the process exit status before parsing stdout
 - if imported targets are stale or the Lean worker cannot finish that diagnostics barrier,
   `lean-beam sync` fails; do not treat a failed sync as safe to follow with `lean-beam save`
-- `lean-beam sync` keeps machine-readable JSON on stdout; interactive progress text goes to stderr
+- for completed broker operations, `lean-beam sync` keeps machine-readable JSON on stdout;
+  interactive progress text goes to stderr, while selector, setup, or transport failures may exit
+  nonzero with no JSON
 - every `lean-beam run-at` request is an isolated read-only probe against one on-disk document
   version
 - `lean-beam run-at-handle` is the same style of isolated probe, but asks Lean to retain follow-up
@@ -188,7 +190,7 @@ What is not a valid checkpoint target:
   `error.message` includes a compact preview of underlying diagnostics and/or command messages, and
   `error.data.sync` contains the blocking sync verdict
 - wrapper `stderr` is the human-facing diagnostic surface
-- `lean-beam --root ROOT request-stream ...` is the supported machine-facing wrapper stream
+- use MCP when a client requires structured live diagnostics or progress
 - streamed diagnostics are request-scoped observations; they may carry `completionBlocking=true`,
   but save-blocking evidence is attached to the final sync/save verdict
 - the field-level progress, diagnostic, and readiness contract lives in
@@ -201,9 +203,10 @@ What is not a valid checkpoint target:
 - the final stdout JSON echoes it as `clientRequestId`
 - streamed stderr progress/diagnostic lines are annotated as `beam[<id>]: ...`
 - a second live request using the same id is rejected with `invalidParams`
-- `beam cancel <id>` cancels an in-flight broker request by that `clientRequestId`
-- when `BEAM_REQUEST_ID` is set, `Ctrl-C` asks the broker to cancel that request before the local
-  CLI exits
+- `lean-beam cancel <id>` cancels an in-flight broker request by that `clientRequestId`
+- `Ctrl-C` interrupts the owning one-request connection, and the daemon cancels that exact admitted
+  request when it observes the disconnect; this does not require `BEAM_REQUEST_ID`, exits nonzero,
+  and does not fabricate a terminal stdout response after the connection is gone
 
 ## File Progress And Readiness
 
@@ -352,7 +355,6 @@ Use:
 ```bash
 lean-beam open-files
 lean-beam stats
-lean-beam reset-stats
 ```
 
 `lean-beam open-files` shows the files currently tracked by the Beam daemon for the current project,

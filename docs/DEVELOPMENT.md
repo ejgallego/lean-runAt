@@ -86,7 +86,7 @@ Preferred maintainer entrypoints:
 
 ## Change Discipline
 
-- prefer the wrapper or broker client over raw LSP when the task fits
+- prefer the wrapper over raw LSP when the task fits
 - if a subtle behavior changes, add or update a regression test first
 - keep destructive cleanup scoped to owned temp or worktree paths
 - if Lean reports stale or rebuild trouble unexpectedly, stop and surface it explicitly
@@ -147,7 +147,9 @@ The broker has no default workspace. Every workspace-bound broker request names 
 carries a continuation handle that names one, and daemon startup receives its initial workspace id
 explicitly through `--workspace-id`. The public CLI still manages one daemon per project, but that
 policy stays in `Beam.Cli`: its request adapter supplies a CLI-owned private identifier. That value
-is an implementation detail, not part of the broker protocol. Broker stats and open-document
+is an implementation detail, not part of the broker protocol. Ordinary requests do not repeat the
+workspace root; the root belongs to workspace initialization, and the selected workspace is the
+single source of routing truth. Broker stats and open-document
 requests without an id remain process-wide; stats report `uptimeMs` and the `workspaces` map. Every
 broker request except `cancel` and `shutdown` is tracked even when it has no client request id;
 anonymous requests use an internal admission token so disconnect cancellation cannot affect a later
@@ -252,7 +254,7 @@ ownership is operation-specific. Update `Op.optionalRequestFields` with every ne
 keep `Request.validateFields` at both the JSON decoder and direct dispatch boundary. Do not let an
 operation silently ignore a field owned by another operation. The broker protocol's `.cancel`
 operation is workspace-scoped and is identified by that workspace plus `cancelRequestId`; the
-supported wrapper machine surface injects its fixed workspace and does not let callers select one.
+CLI wrapper adapter injects its fixed workspace and does not let callers select one.
 
 Broker `Response` and `StreamMessage` values are tagged unions internally. Their explicit JSON
 codecs retain the public `ok` and `kind` discriminants while preventing mismatched payloads from
@@ -271,6 +273,17 @@ save/close-save operation inputs separate: only sync-like inputs may carry final
 control. Likewise, keep redundant wire observations derived internally: diagnostic `total` is the
 severity sum, save `path` and `version` come from its nested sync result, and a decoded close-save
 result is always closed.
+
+### Internal Broker Stream Contract
+
+The daemon transport is a private implementation boundary. One request may emit any number of
+`fileProgress` and `diagnostic` messages followed by exactly one terminal `response`; nothing after
+that response belongs to the request. Every variant uses the same `kind`, `payload`, and optional
+`clientRequestId` envelope, while the semantic response payload never owns transport correlation.
+The terminal response carries the latest progress observation available when it was constructed,
+which may be newer than the last live progress event. Keep these invariants exhaustive in
+`Beam.Broker.StreamMessage` and encode their exact wire behavior in `StreamContractTest`; do not
+promote this stream to an installed client API.
 
 Lean/Lake root validation remains shared with the CLI. MCP descriptors use
 `Beam.Lean.Workspace.resolveRoot`, which requires absolute paths; ordinary `lean-beam` CLI paths use
@@ -312,7 +325,7 @@ internally it coordinates several responsibilities around the LSP process:
 - the CLI owns process identity: project-root detection, bundle selection, registry files,
   endpoint/root/generation validation, explicit session ownership, startup/shutdown, and
   control-directory locks
-- the broker owns request identity: daemon root validation, backend session lifetime, request
+- the broker owns request identity: workspace selection, backend session lifetime, request
   dispatch, cancellation, active-request bookkeeping, transport errors, and the LSP document mirror
 - the LSP server and plugin own Lean/Rocq semantic facts: elaboration, diagnostics, progress,
   goals, runAt execution, direct imports, save readiness, and save artifact generation
@@ -409,22 +422,46 @@ hash, and random capability through piped stdin, and retains the pipe's write en
 the lock or descriptor, Beam creates a missing control leaf with mode `0700`, or validates that an
 existing leaf is a real, non-symlinked directory already using mode `0700`. It never changes an
 existing selection's permissions. The mode-`0600` descriptor is written through an exclusive
-random temporary path and publishes `live` or `draining`. Every wrapper request, including
-cancellation, generation probes, and shutdown, presents the capability. The daemon watches the
+random temporary path and publishes `live` or `draining`; descriptor reads and in-place lifecycle
+updates reject a symbolic-link or non-file descriptor leaf. Every wrapper request, including
+cancellation, generation probes, and shutdown, first verifies the selected generation through the
+daemon's bounded same-connection identity greeting and then presents the capability. The greeting
+prevents a stale descriptor whose port was reused from receiving request contents or fabricating a
+valid wrapper result; it is identity pinning, not a cryptographic proof against an actively hostile
+process that already knows the descriptor. The daemon watches the
 pipe's read end;
 EOF closes admission, marks admitted requests for cancellation, shuts down backend sessions, and
 stops the listener. There is no heartbeat, lease, or time-based retirement fence.
 
 Ordinary wrapper commands never start a daemon or recompute its desired toolchain/bundle
 configuration. Without taking the session mutation lock or creating control files, they select the
-canonical root's frozen workspace binding and require an endpoint that answers for that workspace,
-root, and exact generation. Atomic descriptor publication plus endpoint authentication makes a
-concurrent lifecycle change fail closed. Identity probes have a bounded response deadline. A silent
-or malformed endpoint fails closed. Ordinary lookup is observation-only: absent, legacy, malformed,
-unsupported, draining, unreachable, or otherwise ambiguous descriptor states are never rewritten
-by an attaching command. Persisted PIDs are display-only diagnostics, never probed, signalled, or
-used as automatic stale-reclamation proof. Only the foreground owner may force termination, through
-its retained child handle and process group.
+canonical root's frozen workspace binding, then send their one capability-bound operation. That
+operation uses one connection: the daemon greeting is checked before the request is sent, without
+adding a separate probe connection. Descriptor selection remains observation-only: absent, legacy,
+malformed, unsupported, unsafe-leaf, or
+draining states are never rewritten by an attaching command, and connection or protocol failures
+likewise cannot change lifecycle state. Lifecycle and diagnostic commands use bounded authenticated
+identity probes when they need to classify endpoint health or exact generation. Persisted PIDs are
+display-only diagnostics, never probed, signalled, or used as automatic stale-reclamation proof.
+Only the foreground owner may force termination, through its retained child handle and process
+group.
+
+Owner startup delegates endpoint allocation to the OS. The daemon binds loopback port `0`, obtains
+the assigned port, and emits one bounded, typed, versioned readiness message on its private stdout pipe only
+after its listener and lifetime watchers are installed. The owner validates the readiness generation
+and configuration before publishing the session descriptor. Daemon stderr is drained into the exact
+private startup-log inode opened by the owner until readiness or a 64-KiB bound. The shared stderr
+capture continues draining into a bounded in-memory tail if that file sink fails, records the first
+sink failure, and prevents that failure from stopping subsequent daemon-pipe draining. Sink shutdown
+is synchronized with the current write. Capture finalization never assumes task cancellation
+interrupts a synchronous pipe read: it joins only after writer exit and otherwise returns a bounded
+`pipeStillOpen` outcome.
+`StderrSink` callbacks must complete within a caller-appropriate bound because disabling a sink
+waits for any callback already in progress before reporting its stable failure state.
+Owner cleanup retains process exit and stderr capture as independent outcomes, so a capture failure
+cannot erase an abnormal daemon exit or accidentally authorize registry removal.
+Startup does not invoke a shell,
+reopen the checked pathname, guess a port, probe for readiness, or parse log text as control flow.
 
 The owner watches its exact descriptor generation and daemon child. `lean-beam --root ROOT stop` changes
 that generation from `live` to `draining` under the control lock before sending authenticated
@@ -437,7 +474,9 @@ exact conservative fence instead of clearing it; a controlled process-group kill
 leader completes normal owner cleanup. An unexpected daemon exit preserves its exact live
 descriptor so endpoint observation reports recovery-required state. An unexpected owner exit also
 deliberately leaves the descriptor fenced: startup does not infer complete process-tree exit from
-persisted PIDs. Once
+persisted PIDs. Normal foreground-owner cleanup has a hard deadline because it retains the child
+handle; after abrupt owner death, the daemon closes cooperatively on owner-pipe EOF, but there is no
+independent supervisor imposing that same hard bound. Once
 the operator establishes that the old session is no longer authoritative,
 `lean-beam --root ROOT recover --generation ID` quarantines that exact descriptor without signalling
 any recorded process. Opaque legacy, unsupported, or malformed state requires `recover --force`.
@@ -445,15 +484,21 @@ A paused holder keeps its pipe open and remains valid without expiry. If the pro
 disappears, cleanup uses the already resolved control path without recreating the project.
 
 Human commands may infer a project root only when the Lean and Rocq candidates agree or exactly one
-exists; otherwise they report every candidate and require `--root`. The supported machine stream requires explicit
-`--root` and a nonempty `clientRequestId`; its semantic JSON cannot supply `root`, `workspaceId`,
-capability, dynamic workspace operations, or process-wide control operations such as `shutdown` and
-`resetStats`. The wrapper selects the descriptor binding and injects session metadata. Lifecycle
-shutdown remains the dedicated `lean-beam --root ROOT stop` command so it can publish `draining` first. Raw
-port-oriented `beam-client` requests are maintainer/debug tooling. A wrapper-owned daemon rejects
+exists; otherwise they report every candidate and require `--root`. Automated callers should pass
+an explicit root, invoke typed wrapper commands, check exit status, and parse final stdout JSON only
+when present. Pre-dispatch selector, setup, and transport failures may report only human stderr.
+Lifecycle shutdown
+remains the dedicated `lean-beam --root ROOT stop` command so it can publish `draining` first. Beam
+does not install a raw port-oriented generic broker client. A wrapper-owned daemon rejects
 `initWorkspace`, `listWorkspaces`, and `dropWorkspace`; a separately launched broker retains the
 generic multi-workspace surface and has its own explicit owner. Broker runtime ownership is a typed
 `ServerMode`: wrapper identity and capability cannot be constructed independently.
+
+Direct standalone-broker behavior is an internal maintainer surface. It retains generic
+multi-workspace routing for protocol and runtime tests, while the supported wrapper session remains
+single-workspace and MCP owns its separate in-process multi-workspace runtime. Do not promote the
+standalone transport, unauthenticated launch mode, or workspace-administration operations into the
+public CLI contract.
 
 The default session directory is `<root>/.beam`, discoverable to project-scoped agents.
 An absolute `--session-dir DIR` is an exact, stateless selection that every participant must repeat.
@@ -476,17 +521,23 @@ Keep these invariants covered:
   in ambiguous or unsafe state; they attach to frozen owner configuration rather than recomputing it
 - normal holder teardown retains a generation-specific draining fence until owned cleanup completes
   and cannot remove a replacement; abnormal exit leaves the fence for explicit recovery
-- recovery of a current descriptor requires both its exact generation and one of its recorded
-  workspace roots; a wrong-root caller cannot quarantine another session
+- recovery of a current descriptor requires both its exact generation and its recorded workspace
+  root; a wrong-root caller cannot quarantine another session
 - control preparation changes permissions only on a leaf Beam just created; an existing control
   path must be a non-symlinked mode-`0700` directory and rejection leaves it untouched
 - owner EOF, explicit shutdown, and project-root disappearance all close admission before backend
-  teardown and complete with bounded child cleanup
+  teardown; normal foreground-owner cleanup is bounded through its retained child handle, while
+  abrupt owner loss remains fenced and relies on cooperative daemon cleanup
 - persisted numeric PIDs are never signalled or used for automatic stale reclamation
 - every wrapper request is bound to its random generation capability, and transport frame, initial
-  request, connection, and task counts are bounded
-- request IDs are unique and cancellation is exact within a workspace; per-admission tokens retain
-  exact disconnect and close semantics
+  request, connection, and task counts are bounded; the selected generation's same-connection
+  greeting is verified before capability or semantic contents are sent
+- an interrupted wrapper call observes cancellation during connect, greeting, send, and receive,
+  then relinquishes its own one-request connection without waiting behind a blocked write; the
+  server-side disconnect
+  watcher cancels that exact admission and is joined by that connection handler; explicit request
+  IDs remain available for cross-process
+  `cancel`, and per-admission tokens retain exact disconnect and close semantics
 - the regressions for this path are
   [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh) and
   [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh)
@@ -527,10 +578,11 @@ normal-priority work on low-core runners. The cheap regression guard is
 [scripts/check-task-priority.sh](../scripts/check-task-priority.sh).
 
 Shared registry, startup-log, and incident paths live in
-[Beam/Daemon/Paths.lean](../Beam/Daemon/Paths.lean). Daemon registry management, explicit owner
-lifetime, endpoint selection, and explicit non-signalling recovery live in
+[Beam/Daemon/Paths.lean](../Beam/Daemon/Paths.lean), and the typed parent/daemon readiness message
+lives in [Beam/Daemon/Startup.lean](../Beam/Daemon/Startup.lean). Daemon registry management,
+explicit owner lifetime, OS-assigned endpoint readiness, and explicit non-signalling recovery live in
 [Beam/Cli/DaemonManager.lean](../Beam/Cli/DaemonManager.lean). Broker request plumbing,
-progress messages, cancellation-on-interrupt, and response failure notes live in
+progress messages, connection-owned cancellation-on-interrupt, and response failure notes live in
 [Beam/Cli/Broker.lean](../Beam/Cli/Broker.lean). User-facing stdout/stderr formatting helpers live
 in [Beam/Cli/Output.lean](../Beam/Cli/Output.lean). Doctor, validated/compatible toolchain registry,
 install layout/manifest, and MCP config reporting live in

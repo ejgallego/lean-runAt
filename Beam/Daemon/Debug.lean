@@ -68,9 +68,7 @@ private def tailLines (text : String) (count : Nat := 20) : String :=
   String.intercalate "\n" <| lines.drop (lines.length - keep)
 
 def registryEndpointSummary (entry : SessionDescriptor) : String :=
-  match registryEndpoint? entry with
-  | some endpoint => endpointSummary endpoint
-  | none => "invalid"
+  endpointSummary (registryEndpoint entry)
 
 def startupLogTail?
     (root : System.FilePath)
@@ -100,13 +98,8 @@ def daemonRegistryContext?
     let path ← registryPathFor root explicitControlDir?
     match ← readRegistryAt path with
     | .absent => pure none
-    | .legacy =>
-        pure <| some s!"Beam daemon registry ({path}):\n  status: legacy\n  detail: legacy registry has no schemaVersion"
-    | .unsupported schemaVersion =>
-        let detail := (RegistryRead.unsupported schemaVersion).detail?.getD "unsupported registry"
-        pure <| some s!"Beam daemon registry ({path}):\n  status: unsupported\n  detail: {detail}"
-    | .malformed detail =>
-        pure <| some s!"Beam daemon registry ({path}):\n  status: malformed\n  detail: {detail}"
+    | .invalid problem =>
+        pure <| some s!"Beam daemon registry ({path}):\n  status: invalid\n  detail: {problem.detail}"
     | .current entry =>
         let workspace := entry.workspace
         let workspaceLines := [
@@ -114,7 +107,7 @@ def daemonRegistryContext?
           s!"    root: {workspace.root}"
         ] ++
           (optionLine "  toolchain" workspace.toolchain?).toList ++
-          (optionLine "  bundleId" workspace.bundleId?).toList
+          [s!"    bundleId: {workspace.bundleId}"]
         let lines := ([
           s!"Beam daemon registry ({path}):",
           s!"  schemaVersion: {entry.schemaVersion}",

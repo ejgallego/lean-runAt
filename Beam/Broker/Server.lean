@@ -24,8 +24,11 @@ import Beam.Broker.Lean
 import Beam.Broker.LakeSave
 import Beam.Broker.Readiness
 import Beam.Broker.SyncResult
+import Beam.Daemon.Startup
 import Beam.LSP.Save
 import Beam.Path
+import Beam.StderrCapture
+import Beam.System
 import Std.Sync.Mutex
 
 open Lean
@@ -46,47 +49,10 @@ abbrev brokerStdio : IO.Process.StdioConfig where
 private def backendStderrTailLimit : Nat :=
   16 * 1024
 
-private def backendStderrReadSize : USize :=
-  4096
-
-private def isUtf8ContinuationByte (byte : UInt8) : Bool :=
-  decide (128 ≤ byte.toNat ∧ byte.toNat < 192)
-
-private def utf8BoundaryAtOrAfter (bytes : ByteArray) (offset : Nat) : Nat :=
-  let rec loop (offset : Nat) : Nat → Nat
-    | 0 => offset
-    | fuel + 1 =>
-        if h : offset < bytes.size then
-          if isUtf8ContinuationByte bytes[offset] then
-            loop (offset + 1) fuel
-          else
-            offset
-        else
-          offset
-  loop offset 3
-
-structure BackendStderrCapture where
-  tail : Std.Mutex ByteArray
-  drainTask : Task (Except IO.Error Unit)
-
-private partial def drainBackendStderr
-    (stderr : IO.FS.Handle)
-    (tail : Std.Mutex ByteArray) : IO Unit := do
-  let chunk ← stderr.read backendStderrReadSize
-  unless chunk.isEmpty do
-    tail.atomically do
-      let combined := (← get) ++ chunk
-      if combined.size > backendStderrTailLimit then
-        let start := utf8BoundaryAtOrAfter combined (combined.size - backendStderrTailLimit)
-        set <| combined.extract start combined.size
-      else
-        set combined
-    drainBackendStderr stderr tail
+abbrev BackendStderrCapture := Beam.StderrCapture
 
 def startBackendStderrCapture (stderr : IO.FS.Handle) : IO BackendStderrCapture := do
-  let tail ← Std.Mutex.new ByteArray.empty
-  let drainTask ← IO.asTask (prio := Task.Priority.dedicated) <| drainBackendStderr stderr tail
-  pure { tail, drainTask }
+  Beam.StderrCapture.start stderr backendStderrTailLimit
 
 structure Session where
   workspaceId : WorkspaceId
@@ -189,31 +155,12 @@ private def resolvePath (root : System.FilePath) (path : System.FilePath) : IO S
 def sessionUri (path : System.FilePath) : String :=
   (System.Uri.pathToUri path : String)
 
-private partial def waitForTaskWithTimeout
-    (task : Task α)
-    (timeoutMs : Nat)
-    (pollMs : Nat := 50) : IO (Option α) := do
-  let rec loop (remainingMs : Nat) : IO (Option α) := do
-    if ← IO.hasFinished task then
-      return some (← IO.wait task)
-    if remainingMs == 0 then
-      return none
-    IO.sleep pollMs.toUInt32
-    loop (remainingMs - min pollMs remainingMs)
-  loop timeoutMs
-
 private def backendName : Backend → String
   | .lean => "Lean"
   | .rocq => "Rocq"
 
 private def BackendStderrCapture.snapshot (capture : BackendStderrCapture) : IO String := do
-  let bytes ← capture.tail.atomically get
-  pure <| (String.fromUTF8? bytes).getD "<backend stderr tail is not valid UTF-8>"
-
-private def BackendStderrCapture.awaitDrain
-    (capture : BackendStderrCapture)
-    (timeoutMs : Nat := 500) : IO Unit := do
-  discard <| waitForTaskWithTimeout capture.drainTask timeoutMs
+  Beam.StderrCapture.snapshot capture
 
 private def backendFailureMessage
     (backend : Backend)
@@ -250,11 +197,12 @@ private partial def waitForProcessExitWithTimeout
         if remainingMs == 0 then
           pure false
         else
-          IO.sleep pollMs.toUInt32
-          loop (remainingMs - min pollMs remainingMs)
+          let sleepMs := min (max pollMs 1) remainingMs
+          IO.sleep sleepMs.toUInt32
+          loop (remainingMs - sleepMs)
   loop timeoutMs
 
-private def terminateBackendProcess (proc : IO.Process.Child brokerStdio) : IO Unit := do
+private def terminateBackendProcess (proc : IO.Process.Child brokerStdio) : IO Bool := do
   let running ←
     try
       pure (← proc.tryWait).isNone
@@ -277,9 +225,17 @@ private def terminateBackendProcess (proc : IO.Process.Child brokerStdio) : IO U
         pure ()
       discard <| waitForProcessExitWithTimeout proc sessionShutdownReplyTimeoutMs
   try
-    discard <| proc.tryWait
+    pure (← proc.tryWait).isSome
   catch _ =>
-    pure ()
+    pure false
+
+private def finishBackendStderrCapture
+    (capture : BackendStderrCapture)
+    (leaderReaped : Bool) : IO Beam.StderrCaptureOutcome := do
+  if leaderReaped then
+    capture.finishAfterWriterExit
+  else
+    pure .pipeStillOpen
 
 private def startBackendStderrCaptureOrTerminate
     (backend : Backend)
@@ -287,7 +243,7 @@ private def startBackendStderrCaptureOrTerminate
   try
     startBackendStderrCapture proc.stderr
   catch err =>
-    terminateBackendProcess proc
+    discard <| terminateBackendProcess proc
     throw <| IO.userError <|
       s!"{backendName backend} backend failed during startup before stderr capture: {err}"
 
@@ -296,9 +252,15 @@ private def terminateBackendFailure
     (phase cause : String)
     (proc : IO.Process.Child brokerStdio)
     (capture : BackendStderrCapture) : IO String := do
-  terminateBackendProcess proc
-  capture.awaitDrain
-  backendFailureMessage backend phase cause capture
+  let leaderReaped ← terminateBackendProcess proc
+  let captureOutcome ← finishBackendStderrCapture capture leaderReaped
+  let message ← backendFailureMessage backend phase cause capture
+  pure <| match captureOutcome with
+    | .drained => message
+    | .sourceFailed err =>
+        message ++ s!"\nbackend stderr source also failed while draining: {err}"
+    | .pipeStillOpen =>
+        message ++ "\nbackend stderr pipe remained open; its bounded capture remains active"
 
 private def sessionExited (session : Session) : IO Bool := do
   try
@@ -437,15 +399,6 @@ private def statsPayload (workspaceId? : Option WorkspaceId := none) : M Json :=
         ("uptimeMs", toJson uptimeMs),
         ("workspaces", Json.mkObj workspaceFields)
       ]
-
-private def resetMetrics (startMonoNanos : Nat) : M Unit := do
-  modify fun state =>
-    let workspaces := state.workspaces.map fun _ workspace => {
-      workspace with
-      leanMetrics := {}
-      rocqMetrics := {}
-    }
-    { state with workspaces, startMonoNanos := startMonoNanos }
 
 private def traceEnabled (envName : String) : IO Bool := do
   match ← IO.getEnv envName with
@@ -605,12 +558,12 @@ private def shutdownSession (session : Session) : IO Unit := do
       let (session, pending) ←
         startRequestJsonTrackedDetailed session "shutdown" Json.null
       let task ← IO.asTask (prio := Task.Priority.dedicated) pending.awaitOutcome
-      if (← waitForTaskWithTimeout task sessionShutdownReplyTimeoutMs).isNone then
+      if (← Beam.waitTaskWithTimeout task sessionShutdownReplyTimeoutMs).isNone then
         PendingRequestStore.failAll session.pending <| BrokerFailure.toResponseFailure {
           code := .workerExited
           message := "backend session shutdown timed out"
         }
-        discard <| waitForTaskWithTimeout task sessionShutdownReplyTimeoutMs
+        discard <| Beam.waitTaskWithTimeout task sessionShutdownReplyTimeoutMs
       pure session
     catch _ =>
       pure session
@@ -619,8 +572,19 @@ private def shutdownSession (session : Session) : IO Unit := do
       ({ method := "exit", param := Json.null : Lean.JsonRpc.Notification Json })
   catch _ =>
     pure ()
-  unless ← waitForProcessExitWithTimeout session.proc sessionShutdownReplyTimeoutMs do
-    terminateBackendProcess session.proc
+  let leaderReaped ←
+    if ← waitForProcessExitWithTimeout session.proc sessionShutdownReplyTimeoutMs then
+      pure true
+    else
+      terminateBackendProcess session.proc
+  match ← finishBackendStderrCapture session.stderrCapture leaderReaped with
+  | .drained => pure ()
+  | .sourceFailed err =>
+      throw <| IO.userError s!"backend stderr source failed while draining: {err}"
+  | .pipeStillOpen =>
+      -- A descendant can retain the pipe after the backend leader is reaped. This is an explicit
+      -- bounded resource outcome, not a reason to make an otherwise completed shutdown fail.
+      traceBroker "backend stderr remained open after its leader exited"
 
 def sendRequestJsonTrackedDetailed
     (session : Session)
@@ -711,7 +675,7 @@ private def acquireBackendSession
       throw <| IO.userError <| ←
         terminateBackendFailure backend "during startup" err.toString proc stderrCapture
   try
-    match ← waitForTaskWithTimeout initializeTask backendInitializeTimeoutMs with
+    match ← Beam.waitTaskWithTimeout initializeTask backendInitializeTimeoutMs with
     | some (.ok ()) => pure ()
     | some (.error err) => throw err
     | none =>
@@ -729,7 +693,7 @@ private def acquireBackendSession
     IO.cancel initializeTask
     let message ←
       terminateBackendFailure backend "during startup" err.toString proc stderrCapture
-    discard <| waitForTaskWithTimeout initializeTask sessionShutdownReplyTimeoutMs
+    discard <| Beam.waitTaskWithTimeout initializeTask sessionShutdownReplyTimeoutMs
     throw <| IO.userError message
 
 private def requireWorkspace (workspaceId : WorkspaceId) : M WorkspaceState := do
@@ -1038,6 +1002,10 @@ inductive ServerMode where
 
 def ServerMode.identity? : ServerMode → Option DaemonIdentity
   | .standalone identity? => identity?
+  | .wrapper identity _ => some identity
+
+private def ServerMode.wrapperIdentity? : ServerMode → Option DaemonIdentity
+  | .standalone _ => none
   | .wrapper identity _ => some identity
 
 private def ServerMode.validate : ServerMode → Except String Unit
@@ -1357,7 +1325,7 @@ def ServerRuntime.dropWorkspace
   server.runWorkspaceTransition fun state => dropWorkspaceTransition state workspaceId
 
 private def requestRecordsMetrics : Op → Bool
-  | .cancel | .stats | .resetStats | .shutdown | .openDocs | .listWorkspaces => false
+  | .cancel | .stats | .shutdown | .openDocs | .listWorkspaces => false
   | _ => true
 
 private def recordDispatchMetrics
@@ -1446,7 +1414,13 @@ private def maxDaemonClients : Nat :=
 private def DaemonTransport.create (endpoint : Transport.Endpoint) : IO DaemonTransport := do
   let stop ← IO.mkRef false
   let listener ← Transport.bindAndListen endpoint 16
-  pure { endpoint, listener, stop, clientPermits := ← ClientPermits.create maxDaemonClients }
+  try
+    let endpoint ← Transport.listenerEndpoint listener
+    let clientPermits ← ClientPermits.create maxDaemonClients
+    pure { endpoint, listener, stop, clientPermits }
+  catch err =>
+    Transport.closeListener listener
+    throw err
 
 private def requestStop (transport : DaemonTransport) : IO Unit := do
   transport.stop.set true
@@ -1484,20 +1458,9 @@ private def validateRequestWorkspace
           s!"request workspace '{explicitWorkspaceId}' does not match handle workspace '{handle.workspaceId}'"
   let workspace? ← server.withState do
     pure <| (← get).workspaces.get? workspaceId
-  let some workspace := workspace?
-    | return .error (responseFailureFor .invalidParams s!"unknown Beam workspace '{workspaceId}'")
-  match req.root? with
-  | none => pure (.ok { toRequest := req, workspaceId })
-  | some rootText =>
-      let requestedRoot ←
-        try
-          resolveRoot (System.FilePath.mk rootText)
-        catch e =>
-          return .error (responseFailureFor .invalidParams e.toString)
-      if requestedRoot != workspace.config.root then
-        return .error <| responseFailureFor .invalidParams
-          s!"Beam workspace '{workspaceId}' serves {workspace.config.root}, not {requestedRoot}"
-      pure (.ok { toRequest := req, workspaceId })
+  unless workspace?.isSome do
+    return .error (responseFailureFor .invalidParams s!"unknown Beam workspace '{workspaceId}'")
+  pure (.ok { toRequest := req, workspaceId })
 
 private def mergeFileProgressIfCurrent
     (server : ServerRuntime)
@@ -2501,12 +2464,6 @@ private def handleRequestIO
       let payload ← server.withState do
         pure <| workspaceListPayload (← get)
       pure <| Response.success payload
-  | .resetStats =>
-      let now ← IO.monoNanosNow
-      let resp ← server.withState do
-        resetMetrics now
-        pure <| Response.success (Json.mkObj [("reset", toJson true)])
-      pure resp
   | .openDocs =>
       match req.workspaceId? with
       | none => pure <| Response.success (← server.withState openDocsPayload)
@@ -2586,7 +2543,7 @@ private def handleRequestIO
           | .todo => runHandler <| handleTodoOp server workspaceReq cancelRef? emitProgress?
           | .runWith => runHandler <| handleRunWithOp server workspaceReq cancelRef? emitProgress?
           | .release => runHandler <| handleReleaseOp server workspaceReq cancelRef? emitProgress?
-          | .openDocs | .stats | .resetStats | .shutdown
+          | .openDocs | .stats | .shutdown
           | .cancel | .initWorkspace | .listWorkspaces | .dropWorkspace =>
               unreachable!
 
@@ -2712,16 +2669,20 @@ private def watchSessionOwnerStdin
   unless ← transport.stop.get do
     closeAndRequestStop server transport
 
-private def watchClientDisconnect
+private def watchClientDisconnectUntil
     (client : Transport.Connection)
-    (handle : RequestHandle) : IO Unit := do
+    (handle : RequestHandle)
+    (requestDone : IO Bool) : IO Unit := do
   try
-    -- The daemon transport accepts one request per connection. A second receive therefore blocks
-    -- until the client closes or dies; either outcome should cancel an unfinished admission.
-    discard <| Transport.recvMsg client
+    -- The daemon transport accepts one request per connection. A second message is invalid and a
+    -- disconnect cancels the exact admitted request. Normal request completion interrupts this
+    -- receive so the watcher cannot outlive its connection handler.
+    match ← Transport.recvMsgInterruptibly client requestDone with
+    | .completed _ => discard <| handle.cancel
+    | .interrupted => pure ()
   catch _ =>
-    pure ()
-  discard <| handle.cancel
+    unless ← requestDone do
+      discard <| handle.cancel
 
 private def handleClient
     (server : ServerRuntime)
@@ -2734,6 +2695,10 @@ private def handleClient
       (toJson (StreamMessage.response clientRequestId? resp)).compress
     terminalSentRef.set true
   try
+    if let some identity := server.mode.wrapperIdentity? then
+      -- The greeting pins this connection to the descriptor-selected wrapper generation before
+      -- the peer discloses its capability or semantic request contents.
+      Transport.sendMsg client (toJson (ServerHello.current identity)).compress
     let initialRequestTimeoutMs := 5000
     let deadlineNanos := (← IO.monoNanosNow) + initialRequestTimeoutMs * 1000000
     let some msg ← Transport.recvMsgUntil client deadlineNanos
@@ -2762,9 +2727,19 @@ private def handleClient
         let emitDiagnostic : StreamDiagnostic → IO Unit := fun diagnostic =>
           Transport.sendMsg client
             (toJson (StreamMessage.diagnostic req.clientRequestId? diagnostic)).compress
-        let resp ← server.dispatchRequestWithHandle req (fun handle => do
-          let _ ← IO.asTask (prio := Task.Priority.dedicated) <| watchClientDisconnect client handle
-          pure true) (some emitProgress) (some emitDiagnostic)
+        let requestDone ← IO.mkRef false
+        let watcherRef ← IO.mkRef (none : Option (Task (Except IO.Error Unit)))
+        let resp ←
+          try
+            server.dispatchRequestWithHandle req (fun handle => do
+              let watcher ← IO.asTask (prio := Task.Priority.dedicated) <|
+                watchClientDisconnectUntil client handle requestDone.get
+              watcherRef.set (some watcher)
+              pure true) (some emitProgress) (some emitDiagnostic)
+          finally
+            requestDone.set true
+            if let some watcher ← watcherRef.get then
+              discard <| IO.wait watcher
         -- Request validation alone does not grant shutdown authority. Only stop the listener once
         -- dispatch has authenticated the capability and started runtime closure.
         let stopsTransport ←
@@ -2952,6 +2927,14 @@ private def withDaemonResources
   finally
     resources.close
 
+private def emitWrapperReady
+    (transport : DaemonTransport)
+    (identity : DaemonIdentity) : IO Unit := do
+  let ready := Beam.Daemon.StartupReady.ofEndpoint transport.endpoint identity
+  let stdout ← IO.getStdout
+  stdout.putStrLn ready.encodeLine
+  stdout.flush
+
 def main (args : List String) : IO Unit := do
   let opts ← IO.ofExcept <| parseCliOptions {} args
   let some root := opts.root?
@@ -2990,7 +2973,10 @@ def main (args : List String) : IO Unit := do
     leanPlugin? := leanPlugin?
     rocqCmd? := opts.rocqCmd?
   }
-  withDaemonResources opts config workspaceId mode root fun resources =>
+  withDaemonResources opts config workspaceId mode root fun resources => do
+    match mode with
+    | .wrapper identity _ => emitWrapperReady resources.transport identity
+    | .standalone _ => pure ()
     acceptLoop resources.runtime resources.transport
 
 end Beam.Broker

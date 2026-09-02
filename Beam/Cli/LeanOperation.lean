@@ -12,56 +12,45 @@ namespace Beam.Cli
 
 open Beam.Broker
 
-private def rootText (root : System.FilePath) : String :=
-  root.toString
-
 def leanRunAtRequest
-    (root : System.FilePath)
     (path : String)
     (version : Nat)
     (line character : Nat)
     (text : String)
     (storeHandle : Bool := false) : Request :=
   ({ path, version, line, character, text } : Beam.Lean.RunAtInput).toBrokerRequest
-    (rootText root) (storeHandle := storeHandle)
+    (storeHandle := storeHandle)
 
 def leanRunWithRequest
-    (root : System.FilePath)
     (path : String)
     (handle : Handle)
     (text : String)
     (linear : Bool := false) : Request :=
   ({ path, handle, text } : Beam.Lean.RunWithInput).toBrokerRequest
-    (rootText root) (linear := linear)
+    (linear := linear)
 
-def leanReleaseRequest (root : System.FilePath) (path : String) (handle : Handle) : Request :=
-  ({ path, handle } : Beam.Lean.ReleaseInput).toBrokerRequest (rootText root)
+def leanReleaseRequest (path : String) (handle : Handle) : Request :=
+  ({ path, handle } : Beam.Lean.ReleaseInput).toBrokerRequest
 
 def leanHoverRequest
-    (root : System.FilePath)
     (path : String)
     (version : Nat)
     (line character : Nat) : Request :=
-  ({ path, version, line, character } : Beam.Lean.PositionInput).toHoverBrokerRequest (rootText root)
+  ({ path, version, line, character } : Beam.Lean.PositionInput).toHoverBrokerRequest
 
 def leanSignatureHelpRequest
-    (root : System.FilePath)
     (path : String)
     (version : Nat)
     (line character : Nat) : Request :=
   ({ path, version, line, character } : Beam.Lean.PositionInput).toSignatureHelpBrokerRequest
-    (rootText root)
 
 def leanDefinitionRequest
-    (root : System.FilePath)
     (path : String)
     (version : Nat)
     (line character : Nat) : Request :=
   ({ path, version, line, character } : Beam.Lean.PositionInput).toDefinitionBrokerRequest
-    (rootText root)
 
 def leanReferencesRequest
-    (root : System.FilePath)
     (path : String)
     (version : Nat)
     (line character : Nat)
@@ -72,29 +61,25 @@ def leanReferencesRequest
     line
     character
     includeDeclaration? := some includeDeclaration
-  } : Beam.Lean.ReferencesInput).toBrokerRequest (rootText root)
+  } : Beam.Lean.ReferencesInput).toBrokerRequest
 
 def leanDocumentSymbolsRequest
-    (root : System.FilePath)
     (path : String)
     (version : Nat) : Request :=
-  ({ path, version } : Beam.Lean.DocumentSymbolsInput).toBrokerRequest (rootText root)
+  ({ path, version } : Beam.Lean.DocumentSymbolsInput).toBrokerRequest
 
 def leanWorkspaceSymbolsRequest
-    (root : System.FilePath)
     (query : String) : Request :=
-  ({ query } : Beam.Lean.WorkspaceSymbolsInput).toBrokerRequest (rootText root)
+  ({ query } : Beam.Lean.WorkspaceSymbolsInput).toBrokerRequest
 
 def leanGoalsRequest
-    (root : System.FilePath)
     (path : String)
     (version : Nat)
     (line character : Nat)
     (mode : GoalMode) : Request :=
-  ({ path, version, line, character } : Beam.Lean.PositionInput).toGoalsBrokerRequest (rootText root) mode
+  ({ path, version, line, character } : Beam.Lean.PositionInput).toGoalsBrokerRequest mode
 
 def leanTodoRequest
-    (root : System.FilePath)
     (path : String)
     (version : Nat)
     (startLine startCharacter endLine endCharacter : Nat)
@@ -109,40 +94,32 @@ def leanTodoRequest
     endCharacter
     kinds?
     suggest?
-  } : Beam.Lean.TodoInput).toBrokerRequest (rootText root)
+  } : Beam.Lean.TodoInput).toBrokerRequest
 
-def leanCloseRequest (root : System.FilePath) (path : String) : Request :=
-  ({ path } : Beam.Lean.PathInput).toCloseBrokerRequest (rootText root)
+def leanCloseRequest (path : String) : Request :=
+  ({ path } : Beam.Lean.PathInput).toCloseBrokerRequest
 
-def leanUpdateRequest (root : System.FilePath) (path : String) : Request :=
-  ({ path } : Beam.Lean.PathInput).toUpdateBrokerRequest (rootText root)
+def leanUpdateRequest (path : String) : Request :=
+  ({ path } : Beam.Lean.PathInput).toUpdateBrokerRequest
 
 def leanSyncRequest
-    (root : System.FilePath)
     (path : String)
     (diagnosticScope : DiagnosticScope) : Request :=
   ({ path, diagnosticScope? := some diagnosticScope } : Beam.Lean.SyncInput).toSyncBrokerRequest
-    (rootText root)
 
 def leanRefreshRequest
-    (root : System.FilePath)
     (path : String)
     (diagnosticScope : DiagnosticScope) : Request :=
   ({ path, diagnosticScope? := some diagnosticScope } : Beam.Lean.SyncInput).toRefreshBrokerRequest
-    (rootText root)
 
 def leanSaveRequest
-    (root : System.FilePath)
     (path : String)
     (diagnosticScope : DiagnosticScope) : Request :=
   ({ path, diagnosticScope? := some diagnosticScope } : Beam.Lean.SaveInput).toSaveBrokerRequest
-    (rootText root)
 
 def leanCloseSaveRequest
-    (root : System.FilePath)
     (path : String)
     (diagnosticScope : DiagnosticScope) : Request :=
   ({ path, diagnosticScope? := some diagnosticScope } : Beam.Lean.SaveInput).toCloseSaveBrokerRequest
-    (rootText root)
 
 end Beam.Cli

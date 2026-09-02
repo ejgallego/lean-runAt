@@ -650,7 +650,6 @@ private def handleBeamVersion
 private def collectFeedbackRuntimePayload
     (runtime? : Option Beam.Broker.ServerRuntime)
     (workspaceId : Beam.Broker.WorkspaceId)
-    (root : System.FilePath)
     (warnings : Array String) : IO (Json × Json × Array String) := do
   match runtime? with
   | none =>
@@ -659,13 +658,11 @@ private def collectFeedbackRuntimePayload
       let statsResp ← runtime.dispatchRequest {
         op := .stats
         workspaceId? := some workspaceId
-        root? := some root.toString
       }
       let (stats, warnings) := Beam.Feedback.responsePayloadOrWarning "stats" statsResp warnings
       let openResp ← runtime.dispatchRequest {
         op := .openDocs
         workspaceId? := some workspaceId
-        root? := some root.toString
       }
       let (openDocs, warnings) := Beam.Feedback.responsePayloadOrWarning "open-files" openResp warnings
       pure (stats, openDocs, warnings)
@@ -732,7 +729,7 @@ private def handleBeamFeedback
       let identity ← serverIdentity opts (some root) (some runtime?.isSome)
       let daemon ← Beam.Daemon.daemonDebugContextJson root
       let (stats, openDocs, warnings') ←
-        collectFeedbackRuntimePayload runtime? workspaceId root #[]
+        collectFeedbackRuntimePayload runtime? workspaceId #[]
       pure {
         generatedAt
         activeRoot? := some root.toString
@@ -764,13 +761,12 @@ private def handleBeamFeedback
     pure <| callToolErrorResult <| ToolError.invalidInput e.toString
 
 private def brokerRequestForTool
-    (root : System.FilePath)
     (workspaceId : Beam.Broker.WorkspaceId)
     (params : CallToolParams)
     (clientRequestId : String) : Except String Beam.Broker.Request := do
   match params.name with
   | .leanOperation operation => do
-      let req ← leanOperationToBrokerRequest operation root.toString workspaceId params.arguments
+      let req ← leanOperationToBrokerRequest operation workspaceId params.arguments
       pure { req with clientRequestId? := some clientRequestId }
   | _ =>
       throw s!"{params.name.key} is handled locally and does not map to a Lean broker request"
@@ -842,7 +838,7 @@ def Internal.handleToolCall
     finally
       reporter.finish
   let brokerReq ←
-    match brokerRequestForTool workspace.root workspace.workspaceId params brokerClientRequestId with
+    match brokerRequestForTool workspace.workspaceId params brokerClientRequestId with
     | .ok brokerReq => pure brokerReq
     | .error err =>
         Internal.traceMcp s!"tools/call invalid input id={req.id.label} tool={params.name.key} error={err}"

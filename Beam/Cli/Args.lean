@@ -5,7 +5,7 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Lean
-import Beam.Broker.Client
+import Beam.Broker.Protocol
 import Beam.Path
 import Beam.LSP.Todo
 
@@ -18,7 +18,6 @@ open Beam.Broker
 structure CliOptions where
   explicitRoot? : Option System.FilePath := none
   explicitControlDir? : Option System.FilePath := none
-  requestedPort? : Option UInt16 := none
   args : List String := []
 
 structure ParsedTextArg where
@@ -39,7 +38,7 @@ def hasSubstring (text needle : String) : Bool :=
   | _ => true
 
 def textArgUsage (cmdHead : String) : String :=
-  s!"usage: beam [--root PATH] {cmdHead} (--stdin | --text-file <path> | -- <text...> | <text...>)"
+  s!"usage: lean-beam [--root PATH] {cmdHead} (--stdin | --text-file <path> | -- <text...> | <text...>)"
 
 def textArgReadsStdin (args : List String) : Bool :=
   match args with
@@ -72,7 +71,7 @@ def parseJsonText (label text : String) : IO Json := do
   | .error err => throw <| IO.userError s!"invalid {label}: {err}"
 
 def handleArgUsage (cmdHead : String) : String :=
-  s!"usage: beam [--root PATH] {cmdHead} <handle-json|-|--handle-file <path>>"
+  s!"usage: lean-beam [--root PATH] {cmdHead} <handle-json|-|--handle-file <path>>"
 
 def handleArgReadsStdin (args : List String) : Bool :=
   match args with
@@ -119,26 +118,26 @@ def parseHandleInput (cmdHead : String) (args : List String) : IO (Handle × Lis
 private def parseLeanDiagnosticScopeArgs
     (command : String)
     (args : List String) : IO Beam.Broker.DiagnosticScope :=
-  let usage := s!"usage: beam [--root PATH] {command} <path> [+all-diagnostics]"
+  let usage := s!"usage: lean-beam [--root PATH] {command} <path> [+all-diagnostics]"
   match args with
   | [] => pure Beam.Broker.DiagnosticScope.errors
   | ["+all-diagnostics"] => pure Beam.Broker.DiagnosticScope.all
   | _ => throw <| IO.userError usage
 
 def parseLeanSyncArgs (args : List String) : IO Beam.Broker.DiagnosticScope :=
-  parseLeanDiagnosticScopeArgs "lean-sync" args
+  parseLeanDiagnosticScopeArgs "sync" args
 
 def parseLeanRefreshArgs (args : List String) : IO Beam.Broker.DiagnosticScope :=
-  parseLeanDiagnosticScopeArgs "lean-refresh" args
+  parseLeanDiagnosticScopeArgs "refresh" args
 
 def parseLeanSaveArgs (args : List String) : IO Beam.Broker.DiagnosticScope :=
-  parseLeanDiagnosticScopeArgs "lean-save" args
+  parseLeanDiagnosticScopeArgs "save" args
 
 def parseLeanCloseSaveArgs (args : List String) : IO Beam.Broker.DiagnosticScope :=
-  parseLeanDiagnosticScopeArgs "lean-close-save" args
+  parseLeanDiagnosticScopeArgs "close-save" args
 
 def leanReferencesUsage : String :=
-  "usage: beam [--root PATH] lean-references <path> <version> <line> <character> [--include-declaration|--exclude-declaration]"
+  "usage: lean-beam [--root PATH] references <path> <version> <line> <character> [--include-declaration|--exclude-declaration]"
 
 def parseLeanReferencesArgs (args : List String) : IO Bool := do
   match args with
@@ -148,7 +147,7 @@ def parseLeanReferencesArgs (args : List String) : IO Bool := do
   | _ => throw <| IO.userError leanReferencesUsage
 
 def leanGoalsUsage : String :=
-  "usage: beam [--root PATH] lean-goals before|after <path> <version> <line> <character>"
+  "usage: lean-beam [--root PATH] goals before|after <path> <version> <line> <character>"
 
 def parseLeanGoalsModeArg (mode : String) : IO GoalMode := do
   match mode with
@@ -171,7 +170,7 @@ private def parseTodoSuggestArg (value : String) : IO Beam.LSP.Todo.TodoSuggestM
       throw <| IO.userError s!"invalid todo suggest mode '{value}' (expected one of: {allowed}): {err}"
 
 def leanTodoUsage : String :=
-  "usage: beam [--root PATH] lean-todo <path> <version> <startLine> <startCharacter> <endLine> <endCharacter> [--kind <kind> ...] [--suggest none|basic]"
+  "usage: lean-beam [--root PATH] todo <path> <version> <startLine> <startCharacter> <endLine> <endCharacter> [--kind <kind> ...] [--suggest none|basic]"
 
 def parseLeanTodoArgs (args : List String) :
     IO (Option (Array Beam.LSP.Todo.TodoKind) × Option Beam.LSP.Todo.TodoSuggestMode) := do
@@ -253,17 +252,15 @@ private def resolveSessionDirArg (dir : String) : IO System.FilePath := do
   | err => throw err
 
 partial def parseCliOptions (opts : CliOptions) : List String → IO CliOptions
-  | [] => pure opts
   | "--root" :: root :: rest => do
       let root ← resolveExplicitRootArg root
       parseCliOptions { opts with explicitRoot? := some root } rest
   | "--session-dir" :: dir :: rest => do
       let dir ← resolveSessionDirArg dir
       parseCliOptions { opts with explicitControlDir? := some dir } rest
-  | "--port" :: port :: rest => do
-      let port ← IO.ofExcept <| parsePortText "port" port
-      parseCliOptions { opts with requestedPort? := some port } rest
-  | arg :: rest =>
-      parseCliOptions { opts with args := opts.args ++ [arg] } rest
+  | rest =>
+      -- Global selectors are prefixes. Once the command starts, its complete argument tail is
+      -- opaque here, including a command-level `--` and any Lean text that follows it.
+      pure { opts with args := rest }
 
 end Beam.Cli

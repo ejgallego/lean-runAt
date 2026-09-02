@@ -16,7 +16,6 @@ BEAM_TEST_SUITE="${BEAM_TEST_SUITE:-beam-rocq}"
 run_step "build" lake build \
   beam-cli \
   beam-daemon \
-  beam-client \
   beam-daemon-rocq-smoke-test
 
 eval "$(opam env)"

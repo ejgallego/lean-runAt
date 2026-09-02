@@ -104,7 +104,6 @@ review context.
 The repo includes:
 
 - `lake exe beam-daemon`
-- `lake exe beam-client`
 - `lake exe beam-daemon-smoke-test`
 - `lake exe beam-daemon-rocq-smoke-test`
 - [scripts/lean-beam](scripts/lean-beam)
@@ -131,7 +130,7 @@ When working locally:
 - for risky local install / wrapper validation, prefer `bash scripts/validate-defensive.sh` so slow
   suites run in a cloned `/tmp` sandbox with fake homes and guarded path operations
 - use `bash tests/test-beam.sh` when you want the aggregate default Beam suite
-- prefer the broker client or wrapper over raw LSP when the task fits
+- prefer the wrapper over raw LSP when the task fits
 - use Rocq only through `coq-lsp`
 - if a file is open in the broker, do not edit it out of band
 - if Lean reports stale or rebuild trouble unexpectedly, stop and surface it loudly

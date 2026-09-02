@@ -5,7 +5,7 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Lean
-import Beam.Broker.Protocol
+import Beam.Broker.Client
 
 open Lean
 
@@ -20,5 +20,15 @@ def responsePayloadOrWarning
   | .errorResult failure =>
       let error := failure.error
       (Json.null, warnings.push s!"{label} failed: {error.code}: {error.message}")
+
+/-- Preserve best-effort feedback collection when a bounded broker request cannot complete. -/
+def clientResponsePayloadOrWarning
+    (label : String)
+    (response : Except Beam.Broker.BrokerClientFailure Beam.Broker.Response)
+    (warnings : Array String) : Json × Array String :=
+  match response with
+  | .ok response => responsePayloadOrWarning label response warnings
+  | .error failure =>
+      (Json.null, warnings.push s!"{label} unavailable: {failure.detail}")
 
 end Beam.Feedback

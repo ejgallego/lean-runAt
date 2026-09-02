@@ -111,12 +111,10 @@ private def writeInvalidStressSyncFiles (root : System.FilePath) (count : Nat) :
   pure paths
 
 private def syncRequest
-    (root : System.FilePath)
     (path : String)
     (clientRequestId : String) : Beam.Broker.Request := {
   op := .syncFile
   clientRequestId? := some clientRequestId
-  root? := some root.toString
   path? := some path
 }
 
@@ -133,12 +131,11 @@ private structure SyncOutcome where
 
 private def runSyncOutcome
     (endpoint : Beam.Broker.Endpoint)
-    (root : System.FilePath)
     (path : String)
     (clientRequestId : String) : IO SyncOutcome := do
   let started ← IO.monoNanosNow
   try
-    let resp ← runClient endpoint (syncRequest root path clientRequestId)
+    let resp ← runClient endpoint (syncRequest path clientRequestId)
     let elapsedMs := ((← IO.monoNanosNow) - started) / 1000000
     if resp.ok then
       match resp.result? with
@@ -195,7 +192,7 @@ private def runStressRound
     let relPath := Beam.pathRelativeToRootOrSelf root path
     let requestId := s!"stress-r{round}-sync-{i}"
     let task ← IO.asTask (prio := Task.Priority.dedicated) <|
-      runSyncOutcome endpoint root relPath requestId
+      runSyncOutcome endpoint relPath requestId
     tasks := tasks.push task
   let mut outcomes := #[]
   for task in tasks do
@@ -304,10 +301,10 @@ private def runSameFileSupersessionProbe
   let path ← writeSameFileSupersessionSlow root
   let relPath := Beam.pathRelativeToRootOrSelf root path
   let oldTask ← IO.asTask (prio := Task.Priority.dedicated) <|
-    runSyncOutcome endpoint root relPath "same-file-old"
+    runSyncOutcome endpoint relPath "same-file-old"
   waitUntilTraceContains traceRef "sync_file await barrier clientRequestId=same-file-old"
   writeSameFileSupersessionFast path
-  let newOutcome ← runSyncOutcome endpoint root relPath "same-file-new"
+  let newOutcome ← runSyncOutcome endpoint relPath "same-file-new"
   let oldOutcome ← awaitTask "same-file old sync" oldTask
   unless newOutcome.ok do
     throw <| IO.userError s!"newer same-file sync should succeed, got {newOutcome.detail}"
@@ -351,16 +348,16 @@ def main : IO Unit := do
       pure ()
   try
     waitForBrokerReadyForRoot endpoint root
-    discard <| expectOk (← runClient endpoint { op := .ensure, root? := some root.toString })
+    discard <| expectOk (← runClient endpoint { op := .ensure })
     let fastPath := "tests/scenario/docs/CommandA.lean"
-    requireSyncOk "warm fast sync" <| ← runClient endpoint (syncRequest root fastPath "probe-warm")
+    requireSyncOk "warm fast sync" <| ← runClient endpoint (syncRequest fastPath "probe-warm")
 
     let slowPath ← writeConcurrencySlowSyncFile root
     let slowTask ← IO.asTask (prio := Task.Priority.dedicated) <|
-      runClient endpoint (syncRequest root slowPath.toString "probe-slow")
+      runClient endpoint (syncRequest slowPath.toString "probe-slow")
     waitUntilTraceContains traceRef "sync_file await barrier clientRequestId=probe-slow"
 
-    let fastResp ← runClient endpoint (syncRequest root fastPath "probe-fast")
+    let fastResp ← runClient endpoint (syncRequest fastPath "probe-fast")
     requireSyncOk "fast sync during slow sync" fastResp
     let slowResp ← awaitTask "slow sync" slowTask
     requireSyncOk "slow sync" slowResp

@@ -29,6 +29,7 @@ private def projectDaemonClientForTest
     (endpoint : Beam.Broker.Transport.Endpoint)
     (controlDir : System.FilePath) : Beam.Cli.ProjectDaemonClient := {
   endpoint
+  identity := { daemonId := "test-generation", configHash := "test-config" }
   capability := "test-capability"
   workspaceId := Beam.Cli.projectDaemonWorkspaceId
   controlDir
@@ -54,8 +55,22 @@ private def expectIoErrorContains (label needle : String) (act : IO α) : IO Uni
 private def requireSubstring (label needle haystack : String) : IO Unit := do
   require s!"{label}: expected '{needle}' in '{haystack}'" (Beam.Cli.hasSubstring haystack needle)
 
+private def createSymlink
+    (label : String) (target link : System.FilePath) : IO Unit := do
+  let out ← IO.Process.output {
+    cmd := "ln"
+    args := #["-s", target.toString, link.toString]
+  }
+  if out.exitCode != 0 then
+    throw <| IO.userError s!"failed to create {label} symlink\n{out.stderr}"
+
 private def brokerTransportFailure (detail : String) : Beam.Broker.BrokerClientFailure :=
   .transport .receive (IO.userError detail)
+
+private def ensureTestControlDir (root : System.FilePath) : IO System.FilePath := do
+  let control ← Beam.Daemon.controlDir root
+  Beam.ensurePrivateDir "test Beam session directory" control
+  pure control
 
 private def requireJsonNat (label field : String) (expected : Nat) (json : Json) : IO Unit := do
   let actual ← IO.ofExcept <| json.getObjValAs? Nat field
@@ -86,6 +101,10 @@ private def readSingleDaemonFailureIncidentJson (root : System.FilePath) : IO Js
 private def closeAcceptedConnection (listener : Beam.Broker.Transport.Listener) : IO Unit := do
   let conn ← Beam.Broker.Transport.accept listener
   try
+    Beam.Broker.Transport.sendMsg conn <| toJson (Beam.Broker.ServerHello.current {
+      daemonId := "test-generation"
+      configHash := "test-config"
+    }) |>.compress
     -- Read the complete request before closing so the client failure is deterministically on the
     -- receive boundary. The operating system may still describe that close as EOF or ECONNRESET.
     discard <| Beam.Broker.Transport.recvMsg conn
@@ -103,54 +122,26 @@ private def holdAcceptedConnection
   finally
     Beam.Broker.Transport.closeConnection conn
 
-private partial def withClosingBrokerEndpoint
-    (act : Beam.Broker.Transport.Endpoint → IO α)
-    (tries : Nat := 20) : IO α := do
-  let stamp ← IO.monoNanosNow
-  let portNat := 30000 + ((stamp + tries) % 20000)
-  let endpoint := Beam.Broker.Transport.Endpoint.tcp portNat.toUInt16
-  let listenerResult ←
-    try
-      pure <| Except.ok (← Beam.Broker.Transport.bindAndListen endpoint 1)
-    catch err =>
-      pure <| Except.error err
-  match listenerResult with
-  | .error err =>
-      if tries == 0 then
-        throw err
-      else
-        withClosingBrokerEndpoint act (tries - 1)
-  | .ok listener =>
-    let acceptTask ← IO.asTask (prio := Task.Priority.dedicated) <| closeAcceptedConnection listener
-    let result ←
-      try
-        pure <| Except.ok (← act endpoint)
-      catch err =>
-        pure <| Except.error err
-    discard <| IO.wait acceptTask
-    match result with
-    | .ok value => pure value
-    | .error err => throw err
-
-private partial def withBrokerListener
+private def withBrokerListener
     (act : Beam.Broker.Transport.Listener → Beam.Broker.Transport.Endpoint → IO α)
-    (tries : Nat := 20) : IO α := do
-  let stamp ← IO.monoNanosNow
-  let portNat := 30000 + ((stamp + tries) % 20000)
-  let endpoint := Beam.Broker.Transport.Endpoint.tcp portNat.toUInt16
-  let listenerResult ←
+    (backlog : UInt32 := 2) : IO α := do
+  let listener ← Beam.Broker.Transport.bindAndListen (.tcp 0) backlog
+  try
+    let endpoint ← Beam.Broker.Transport.listenerEndpoint listener
+    act listener endpoint
+  finally
+    Beam.Broker.Transport.closeListener listener
+
+private def withClosingBrokerEndpoint
+    (act : Beam.Broker.Transport.Endpoint → IO α) : IO α := do
+  withBrokerListener (backlog := 1) fun listener endpoint => do
+    let acceptTask ← IO.asTask (prio := Task.Priority.dedicated) <| closeAcceptedConnection listener
     try
-      pure <| Except.ok (← Beam.Broker.Transport.bindAndListen endpoint 2)
-    catch err =>
-      pure <| Except.error err
-  match listenerResult with
-  | .error err =>
-    if tries == 0 then
-      throw err
-    else
-      withBrokerListener act (tries - 1)
-  | .ok listener =>
-      act listener endpoint
+      act endpoint
+    finally
+      -- Cancel a still-pending accept before joining it when `act` fails before connecting.
+      Beam.Broker.Transport.closeListener listener
+      discard <| IO.wait acceptTask
 
 private def checkSilentEndpointProbeTimeout : IO Unit := do
   withBrokerListener fun listener endpoint => do
@@ -165,10 +156,10 @@ private def checkSilentEndpointProbeTimeout : IO Unit := do
       match ← Beam.Daemon.daemonGenerationStatus endpoint
           Beam.Cli.projectDaemonWorkspaceId (System.FilePath.mk "/tmp") identity
           "test-capability" with
-      | .unrecognized (.responseTimeout timeoutMs) =>
-          require "silent endpoint should preserve its typed response timeout"
+      | .probeFailed (.requestTimeout timeoutMs) =>
+          require "silent endpoint should preserve its typed request timeout"
             (timeoutMs == 2000)
-      | .unrecognized failure =>
+      | .probeFailed failure =>
           throw <| IO.userError s!"silent endpoint reported {repr failure}"
       | status =>
           throw <| IO.userError s!"silent endpoint was classified as {repr status}"
@@ -184,9 +175,11 @@ private def checkSilentShutdownTimeout : IO Unit := do
     let serverTask ← IO.asTask (prio := Task.Priority.dedicated) <|
       holdAcceptedConnection listener release
     try
-      match ← Beam.Cli.requestDaemonShutdown endpoint "test-capability" 50 with
-      | .error (.responseTimeout timeoutMs) =>
-          require "silent shutdown should preserve its typed response timeout" (timeoutMs == 50)
+      match ← Beam.Cli.requestDaemonShutdown endpoint
+          { daemonId := "silent-endpoint", configHash := "silent-endpoint" }
+          "test-capability" 50 with
+      | .error (.requestTimeout timeoutMs) =>
+          require "silent shutdown should preserve its typed request timeout" (timeoutMs == 50)
       | .error failure =>
           throw <| IO.userError s!"silent shutdown reported {repr failure}"
       | .ok response =>
@@ -197,35 +190,26 @@ private def checkSilentShutdownTimeout : IO Unit := do
       | .ok () => pure ()
       | .error err => throw err
 
-private def serveCancelablePlainRequest
+private def serveDisconnectCancelledPlainRequest
     (listener : Beam.Broker.Transport.Listener)
     (requestObserved : IO.Promise Unit) : IO Unit := do
   let requestConn ← Beam.Broker.Transport.accept listener
   try
+    Beam.Broker.Transport.sendMsg requestConn <| toJson (Beam.Broker.ServerHello.current {
+      daemonId := "test-generation"
+      configHash := "test-config"
+    }) |>.compress
     let requestText ← Beam.Broker.Transport.recvMsg requestConn
     let requestJson ← IO.ofExcept <| Json.parse requestText
-    let request : Beam.Broker.Request ← IO.ofExcept <| fromJson? requestJson
-    let some requestId := request.clientRequestId?
-      | throw <| IO.userError "plain wrapper request omitted its synthesized clientRequestId"
+    let _request : Beam.Broker.Request ← IO.ofExcept <| fromJson? requestJson
     requestObserved.resolve ()
-    let cancelConn ← Beam.Broker.Transport.accept listener
-    try
-      let cancelText ← Beam.Broker.Transport.recvMsg cancelConn
-      let cancelJson ← IO.ofExcept <| Json.parse cancelText
-      let cancelRequest : Beam.Broker.Request ← IO.ofExcept <| fromJson? cancelJson
-      unless cancelRequest.op == .cancel && cancelRequest.cancelRequestId? == some requestId do
-        throw <| IO.userError "plain wrapper cancellation did not target the admitted request"
-      let cancelResponse := Beam.Broker.Response.success <|
-        Json.mkObj [("cancelled", toJson true)]
-      Beam.Broker.Transport.sendMsg cancelConn
-        (toJson (Beam.Broker.StreamMessage.response
-          cancelRequest.clientRequestId? cancelResponse)).compress
-    finally
-      Beam.Broker.Transport.closeConnection cancelConn
-    let response := Beam.Broker.errorResponseFor
-      .requestCancelled "cancelled by session close"
-    Beam.Broker.Transport.sendMsg requestConn
-      (toJson (Beam.Broker.StreamMessage.response (some requestId) response)).compress
+    let disconnected ←
+      try
+        discard <| Beam.Broker.Transport.recvMsg requestConn
+        pure false
+      catch _ => pure true
+    unless disconnected do
+      throw <| IO.userError "interrupted wrapper request left its connection open"
   finally
     Beam.Broker.Transport.closeConnection requestConn
 
@@ -233,22 +217,211 @@ private def checkPlainBrokerTaskCancellation : IO Unit := do
   withBrokerListener fun listener endpoint => do
     let requestObserved ← IO.Promise.new
     let serverTask ← IO.asTask (prio := Task.Priority.dedicated) <|
-      serveCancelablePlainRequest listener requestObserved
+      serveDisconnectCancelledPlainRequest listener requestObserved
     let requestTask ← IO.asTask (prio := Task.Priority.dedicated) <|
       Beam.Cli.requestBroker (System.FilePath.mk "/tmp")
         (projectDaemonClientForTest endpoint (System.FilePath.mk "/tmp")) { op := .stats }
     let some _ ← IO.wait requestObserved.result?
       | throw <| IO.userError "plain wrapper request observation promise dropped"
     IO.cancel requestTask
-    let response ←
-      match ← IO.wait requestTask with
-      | .ok response => pure response
-      | .error err => throw err
-    require "a cancelled plain wrapper request should receive broker requestCancelled"
-      (response.error?.any fun err => err.code == "requestCancelled")
+    match ← IO.wait requestTask with
+    | .ok response =>
+        throw <| IO.userError s!"interrupted plain wrapper request returned {toJson response}"
+    | .error err =>
+        requireSubstring "interrupted plain wrapper request" "Beam request interrupted" err.toString
     match ← IO.wait serverTask with
     | .ok () => pure ()
     | .error err => throw err
+
+private def serveGreetingWithoutReading
+    (listener : Beam.Broker.Transport.Listener)
+    (identity : Beam.Broker.DaemonIdentity)
+    (greeted release : IO.Promise Unit) : IO Unit := do
+  let conn ← Beam.Broker.Transport.accept listener
+  try
+    Beam.Broker.Transport.sendMsg conn <|
+      toJson (Beam.Broker.ServerHello.current identity) |>.compress
+    greeted.resolve ()
+    let some _ ← IO.wait release.result?
+      | throw <| IO.userError "blocked-send release promise dropped"
+    pure ()
+  finally
+    Beam.Broker.Transport.closeConnection conn
+
+private def checkBrokerSendInterruption : IO Unit := do
+  withBrokerListener fun listener endpoint => do
+    let identity : Beam.Broker.DaemonIdentity := {
+      daemonId := "test-generation"
+      configHash := "test-config"
+    }
+    let greeted ← IO.Promise.new
+    let release ← IO.Promise.new
+    let interrupted ← IO.mkRef false
+    let serverTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      serveGreetingWithoutReading listener identity greeted release
+    let largeText := String.ofList (List.replicate (8 * 1024 * 1024) 'x')
+    let clientTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      Beam.Broker.sendRequestWithCallbacksInterruptiblyResult endpoint {
+        op := .runAt
+        workspaceId? := some Beam.Cli.projectDaemonWorkspaceId
+        clientRequestId? := some "blocked-send"
+        daemonCapability? := some "test-capability"
+        path? := some "Secret.lean"
+        version? := some 1
+        line? := some 0
+        character? := some 0
+        text? := some largeText
+      } interrupted.get (server := .wrapper identity)
+    let some _ ← IO.wait greeted.result?
+      | throw <| IO.userError "blocked-send greeting promise dropped"
+    IO.sleep 100
+    interrupted.set true
+    let result? ← Beam.waitTaskWithTimeout clientTask 2000
+    release.resolve ()
+    let some result := result?
+      | throw <| IO.userError "interrupt did not release a blocked Beam request send"
+    match result with
+    | .ok (.error .interrupted) => pure ()
+    | .ok (.error failure) =>
+        throw <| IO.userError s!"blocked send reported {repr failure} instead of interruption"
+    | .ok (.ok response) =>
+        throw <| IO.userError s!"blocked send unexpectedly returned {toJson response}"
+    | .error err => throw err
+    match ← IO.wait serverTask with
+    | .ok () => pure ()
+    | .error err => throw err
+
+private def serveWrongDaemonGreeting
+    (listener : Beam.Broker.Transport.Listener) : IO Bool := do
+  let conn ← Beam.Broker.Transport.accept listener
+  try
+    Beam.Broker.Transport.sendMsg conn <| toJson (Beam.Broker.ServerHello.current {
+      daemonId := "wrong-generation"
+      configHash := "wrong-config"
+    }) |>.compress
+    let deadline := (← IO.monoNanosNow) + 500 * 1000000
+    let requestSeen ←
+      try
+        pure (← Beam.Broker.Transport.recvMsgUntil conn deadline).isSome
+      catch _ =>
+        pure false
+    pure requestSeen
+  finally
+    Beam.Broker.Transport.closeConnection conn
+
+private def checkWrongGreetingProtectsRequest : IO Unit := do
+  withBrokerListener fun listener endpoint => do
+    let serverTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      serveWrongDaemonGreeting listener
+    let msg ← expectIoErrorMessage "wrong daemon greeting" <|
+      Beam.Cli.requestBroker (System.FilePath.mk "/tmp")
+        (projectDaemonClientForTest endpoint (System.FilePath.mk "/tmp")) {
+          op := .runAt
+          path? := some "Secret.lean"
+          version? := some 1
+          line? := some 0
+          character? := some 0
+          text? := some "secret speculative text"
+        }
+    requireSubstring "wrong daemon greeting" "identity does not match" msg
+    match ← IO.wait serverTask with
+    | .ok requestSeen =>
+        require "a wrong daemon generation must not receive the capability-bound request"
+          (!requestSeen)
+    | .error err => throw err
+
+private def checkStderrCaptureSurvivesSinkFailure : IO Unit := do
+  let path := System.FilePath.mk s!"/tmp/beam-stderr-capture-{← IO.monoNanosNow}.txt"
+  let contents := String.ofList (List.replicate 20000 'x')
+  try
+    IO.FS.writeFile path contents
+    IO.FS.withFile path .read fun source => do
+      let sink : Beam.StderrSink := fun _ =>
+        throw <| IO.userError "intentional stderr sink failure"
+      let capture ← Beam.StderrCapture.start source 1024 (some sink)
+      match ← capture.finishAfterWriterExit with
+      | .drained => pure ()
+      | .sourceFailed err => throw err
+      | .pipeStillOpen => throw <| IO.userError "stderr capture did not finish"
+      let some failure ← capture.disableSinkAndAwaitCurrentWrite
+        | throw <| IO.userError "stderr capture did not retain its sink failure"
+      requireSubstring "stderr sink failure" "intentional stderr sink failure" failure.toString
+      let tail ← capture.snapshot
+      require "stderr capture should continue draining into its bounded tail after sink failure"
+        (tail.length == 1024)
+  finally
+    if ← path.pathExists then
+      IO.FS.removeFile path
+
+private abbrev stderrDescendantStdio : IO.Process.StdioConfig where
+  stdin := .null
+  stdout := .null
+  stderr := .piped
+
+private def checkStderrSinkDisableIsSynchronized : IO Unit := do
+  let path := System.FilePath.mk s!"/tmp/beam-stderr-sink-sync-{← IO.monoNanosNow}.txt"
+  let entered ← IO.mkRef false
+  let release ← IO.mkRef false
+  try
+    IO.FS.writeFile path "stderr evidence"
+    IO.FS.withFile path .read fun source => do
+      let sink : Beam.StderrSink := fun _ => do
+        entered.set true
+        while !(← release.get) do
+          IO.sleep 10
+        pure true
+      let capture ← Beam.StderrCapture.start source 1024 (some sink)
+      let rec awaitSinkEntry : Nat → IO Bool
+        | 0 => pure false
+        | fuel + 1 => do
+            if ← entered.get then
+              pure true
+            else
+              IO.sleep 10
+              awaitSinkEntry fuel
+      require "stderr sink did not start its write" (← awaitSinkEntry 100)
+      let disableTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+        capture.disableSinkAndAwaitCurrentWrite
+      IO.sleep 50
+      require "disabling a stderr sink must await its current write"
+        (!(← IO.hasFinished disableTask))
+      release.set true
+      match ← IO.wait disableTask with
+      | .ok none => pure ()
+      | .ok (some err) => throw err
+      | .error err => throw err
+      match ← capture.finishAfterWriterExit with
+      | .drained => pure ()
+      | .sourceFailed err => throw err
+      | .pipeStillOpen => throw <| IO.userError "synchronized stderr capture did not finish"
+  finally
+    release.set true
+    if ← path.pathExists then
+      IO.FS.removeFile path
+
+private def checkStderrCaptureDoesNotJoinInheritedPipe : IO Unit := do
+  let proc ← IO.Process.spawn {
+    toStdioConfig := stderrDescendantStdio
+    cmd := "/bin/sh"
+    args := #["-c", "sleep 1 &"]
+    setsid := true
+  }
+  let capture ← Beam.StderrCapture.start proc.stderr 1024
+  discard <| proc.wait
+  let started ← IO.monoNanosNow
+  match ← capture.finishAfterWriterExit 50 with
+  | .pipeStillOpen => pure ()
+  | .drained | .sourceFailed _ =>
+      throw <| IO.userError "an inherited stderr pipe should remain unreaped before its writer exits"
+  let elapsedMs := ((← IO.monoNanosNow) - started) / 1000000
+  require "stderr finalization must remain bounded while a descendant owns the pipe"
+    (elapsedMs < 500)
+  IO.sleep 1100
+  match ← capture.finishAfterWriterExit with
+  | .drained => pure ()
+  | .sourceFailed err => throw err
+  | .pipeStillOpen =>
+      throw <| IO.userError "stderr capture did not drain after the descendant exited"
 
 private def requireRequestJson
     (label : String)
@@ -266,24 +439,40 @@ private def sampleBrokerHandle : Beam.Broker.Handle := {
   raw := Json.mkObj [("value", toJson "raw-handle")]
 }
 
-private def checkProjectDaemonWorkspaceRouting : IO Unit := do
+private def checkProjectDaemonRequestSealing : IO Unit := do
   let selectedClient : Beam.Cli.ProjectDaemonClient := {
     endpoint := .tcp 42424
+    identity := { daemonId := "selected-generation", configHash := "selected-config" }
     capability := "test-capability"
     workspaceId := "selected-workspace"
     controlDir := System.FilePath.mk "/tmp/beam-selected-control"
   }
-  let selectedCancel := Beam.Cli.inSelectedDaemonWorkspace selectedClient {
+  let selectedCancel := selectedClient.sealRequest {
     op := .cancel
     cancelRequestId? := some "request"
   }
   require "selected descriptor workspace should scope cancellation"
     (selectedCancel.workspaceId? == some "selected-workspace")
+  require "selected descriptor capability should authorize cancellation"
+    (selectedCancel.daemonCapability? == some "test-capability")
+  let overwrittenCancel := selectedClient.sealRequest {
+    op := .cancel
+    workspaceId? := some "caller-selected-workspace"
+    daemonCapability? := some "caller-selected-capability"
+    cancelRequestId? := some "request"
+  }
+  require "selected descriptor workspace should replace caller-supplied routing"
+    (overwrittenCancel.workspaceId? == some "selected-workspace")
+  require "selected descriptor capability should replace caller-supplied authority"
+    (overwrittenCancel.daemonCapability? == some "test-capability")
+  let selectedStats := selectedClient.sealRequest { op := .stats }
+  require "selected descriptor workspace should scope optional workspace operations"
+    (selectedStats.workspaceId? == some "selected-workspace")
 
 private def checkClientResponsePresentation : IO Unit := do
   let semantic := Beam.Broker.Response.success Json.null
   let presented :=
-    Beam.Broker.responseOutputJson semantic (some "visible-request")
+    Beam.Cli.responseOutputJson semantic (some "visible-request")
   requireJsonString "presented response" "clientRequestId" "visible-request" presented
   match fromJson? (α := Beam.Broker.Response) presented with
   | .ok response =>
@@ -384,26 +573,6 @@ private def checkSyncWaitSpecs : IO Unit := do
     "saveReady=false (documentErrors, blockingErrorCount=1)"
     ((Beam.Cli.syncWaitSpec "Demo.lean").completeMsg notReadyResp)
 
-private def checkCancelAcknowledgementDecoding : IO Unit := do
-  let acknowledged := Beam.Broker.Response.success <|
-    Json.mkObj [("cancelled", toJson true)]
-  require "cancel acknowledgement should decode true"
-    (Beam.Cli.decodeCancelAcknowledged? acknowledged == some true)
-
-  let notAcknowledged := Beam.Broker.Response.success <|
-    Json.mkObj [("cancelled", toJson false)]
-  require "cancel acknowledgement should decode false"
-    (Beam.Cli.decodeCancelAcknowledged? notAcknowledged == some false)
-
-  let missing := Beam.Broker.Response.success <|
-    Json.mkObj [("other", toJson true)]
-  require "missing cancel acknowledgement should decode none"
-    (Beam.Cli.decodeCancelAcknowledged? missing).isNone
-
-  let failed := Beam.Broker.errorResponseFor .invalidParams "bad cancel"
-  require "failed cancel response should decode none"
-    (Beam.Cli.decodeCancelAcknowledged? failed).isNone
-
 private def checkCliRootParsing : IO Unit := do
   let missingRoot := System.FilePath.mk s!"/tmp/beam-cli-missing-root-{← IO.monoNanosNow}"
   expectIoErrorContains
@@ -429,6 +598,19 @@ private def checkCliRootParsing : IO Unit := do
     require "explicit session directory should remain an exact selection"
       (opts.explicitControlDir? == some expectedControl)
     require "global selectors should not leak into command arguments" (opts.args == ["stats"])
+    let literalSelectors ← Beam.Cli.parseCliOptions {} [
+      "run-at", "Demo.lean", "1", "0", "0", "--",
+      "--root", "/tmp/literal-root", "--session-dir", "/tmp/literal-session"
+    ]
+    require "command-level -- should make literal --root text opaque to global parsing"
+      (literalSelectors.explicitRoot?.isNone)
+    require "command-level -- should make literal --session-dir text opaque to global parsing"
+      (literalSelectors.explicitControlDir?.isNone)
+    require "global parsing should preserve the complete command tail after its first argument"
+      (literalSelectors.args == [
+        "run-at", "Demo.lean", "1", "0", "0", "--",
+        "--root", "/tmp/literal-root", "--session-dir", "/tmp/literal-session"
+      ])
   finally
     if ← root.pathExists then
       IO.FS.removeDirAll root
@@ -459,8 +641,6 @@ private def checkProjectRootAmbiguity : IO Unit := do
       IO.FS.removeDirAll root
 
 private def checkLeanOperationRequests : IO Unit := do
-  let root := System.FilePath.mk "/repo"
-  let rootText := root.toString
   let path := "Demo.lean"
 
   let runAtInput : Beam.Lean.RunAtInput := {
@@ -471,13 +651,13 @@ private def checkLeanOperationRequests : IO Unit := do
     text := "exact h"
   }
   requireRequestJson "runAt request should share the Lean operation adapter"
-    (Beam.Cli.leanRunAtRequest root path 12 4 2 "exact h")
-    (runAtInput.toBrokerRequest rootText)
+    (Beam.Cli.leanRunAtRequest path 12 4 2 "exact h")
+    runAtInput.toBrokerRequest
   requireRequestJson "runAt handle request should share the Lean operation adapter"
-    (Beam.Cli.leanRunAtRequest root path 12 4 2 "exact h" (storeHandle := true))
-    (runAtInput.toBrokerRequest rootText (storeHandle := true))
+    (Beam.Cli.leanRunAtRequest path 12 4 2 "exact h" (storeHandle := true))
+    (runAtInput.toBrokerRequest (storeHandle := true))
   expectIoErrorContains "runAt missing text should fail at the CLI boundary"
-    "usage: beam" (Beam.Cli.parseTextArg "lean-run-at Demo.lean 12 4 2" [])
+    "usage: lean-beam" (Beam.Cli.parseTextArg "run-at Demo.lean 12 4 2" [])
 
   let positionInput : Beam.Lean.PositionInput := {
     path
@@ -486,14 +666,14 @@ private def checkLeanOperationRequests : IO Unit := do
     character := 3
   }
   requireRequestJson "hover request should share the Lean operation adapter"
-    (Beam.Cli.leanHoverRequest root path 13 7 3)
-    (positionInput.toHoverBrokerRequest rootText)
+    (Beam.Cli.leanHoverRequest path 13 7 3)
+    positionInput.toHoverBrokerRequest
   requireRequestJson "signature-help request should share the Lean operation adapter"
-    (Beam.Cli.leanSignatureHelpRequest root path 13 7 3)
-    (positionInput.toSignatureHelpBrokerRequest rootText)
+    (Beam.Cli.leanSignatureHelpRequest path 13 7 3)
+    positionInput.toSignatureHelpBrokerRequest
   requireRequestJson "definition request should share the Lean operation adapter"
-    (Beam.Cli.leanDefinitionRequest root path 13 7 3)
-    (positionInput.toDefinitionBrokerRequest rootText)
+    (Beam.Cli.leanDefinitionRequest path 13 7 3)
+    positionInput.toDefinitionBrokerRequest
   let referencesInput : Beam.Lean.ReferencesInput := {
     path
     version := 13
@@ -502,24 +682,24 @@ private def checkLeanOperationRequests : IO Unit := do
     includeDeclaration? := some false
   }
   requireRequestJson "references request should share the Lean operation adapter"
-    (Beam.Cli.leanReferencesRequest root path 13 7 3 false)
-    (referencesInput.toBrokerRequest rootText)
+    (Beam.Cli.leanReferencesRequest path 13 7 3 false)
+    referencesInput.toBrokerRequest
   let documentSymbolsInput : Beam.Lean.DocumentSymbolsInput := {
     path
     version := 13
   }
   requireRequestJson "document-symbols request should share the Lean operation adapter"
-    (Beam.Cli.leanDocumentSymbolsRequest root path 13)
-    (documentSymbolsInput.toBrokerRequest rootText)
+    (Beam.Cli.leanDocumentSymbolsRequest path 13)
+    documentSymbolsInput.toBrokerRequest
   let workspaceSymbolsInput : Beam.Lean.WorkspaceSymbolsInput := {
     query := "Demo"
   }
   requireRequestJson "workspace-symbols request should share the Lean operation adapter"
-    (Beam.Cli.leanWorkspaceSymbolsRequest root "Demo")
-    (workspaceSymbolsInput.toBrokerRequest rootText)
+    (Beam.Cli.leanWorkspaceSymbolsRequest "Demo")
+    workspaceSymbolsInput.toBrokerRequest
   requireRequestJson "goals request should share the Lean operation adapter"
-    (Beam.Cli.leanGoalsRequest root path 13 7 3 .before)
-    (positionInput.toGoalsBrokerRequest rootText .before)
+    (Beam.Cli.leanGoalsRequest path 13 7 3 .before)
+    (positionInput.toGoalsBrokerRequest .before)
 
   let runWithInput : Beam.Lean.RunWithInput := {
     path
@@ -527,42 +707,42 @@ private def checkLeanOperationRequests : IO Unit := do
     text := "simp"
   }
   requireRequestJson "runWith request should share the Lean operation adapter"
-    (Beam.Cli.leanRunWithRequest root path sampleBrokerHandle "simp")
-    (runWithInput.toBrokerRequest rootText)
+    (Beam.Cli.leanRunWithRequest path sampleBrokerHandle "simp")
+    runWithInput.toBrokerRequest
   requireRequestJson "runWith linear request should share the Lean operation adapter"
-    (Beam.Cli.leanRunWithRequest root path sampleBrokerHandle "simp" (linear := true))
-    (runWithInput.toBrokerRequest rootText (linear := true))
+    (Beam.Cli.leanRunWithRequest path sampleBrokerHandle "simp" (linear := true))
+    (runWithInput.toBrokerRequest (linear := true))
   expectIoErrorContains "runWith missing text should fail at the CLI boundary"
-    "usage: beam" (Beam.Cli.parseTextArg "lean-run-with Demo.lean HANDLE" [])
+    "usage: lean-beam" (Beam.Cli.parseTextArg "run-with Demo.lean HANDLE" [])
 
   requireRequestJson "release request should share the Lean operation adapter"
-    (Beam.Cli.leanReleaseRequest root path sampleBrokerHandle)
-    (({ path, handle := sampleBrokerHandle } : Beam.Lean.ReleaseInput).toBrokerRequest rootText)
+    (Beam.Cli.leanReleaseRequest path sampleBrokerHandle)
+    (({ path, handle := sampleBrokerHandle } : Beam.Lean.ReleaseInput).toBrokerRequest)
 
   let pathInput : Beam.Lean.PathInput := { path }
   requireRequestJson "update request should share the Lean operation adapter"
-    (Beam.Cli.leanUpdateRequest root path)
-    (pathInput.toUpdateBrokerRequest rootText)
+    (Beam.Cli.leanUpdateRequest path)
+    pathInput.toUpdateBrokerRequest
   requireRequestJson "close request should share the Lean operation adapter"
-    (Beam.Cli.leanCloseRequest root path)
-    (pathInput.toCloseBrokerRequest rootText)
+    (Beam.Cli.leanCloseRequest path)
+    pathInput.toCloseBrokerRequest
 
   let syncInput : Beam.Lean.SyncInput := { path, diagnosticScope? := some .all }
   let saveInput : Beam.Lean.SaveInput := { path, diagnosticScope? := some .all }
   requireRequestJson "sync request should share the Lean operation adapter"
-    (Beam.Cli.leanSyncRequest root path .all)
-    (syncInput.toSyncBrokerRequest rootText)
+    (Beam.Cli.leanSyncRequest path .all)
+    syncInput.toSyncBrokerRequest
   requireRequestJson "refresh request should share the Lean operation adapter"
-    (Beam.Cli.leanRefreshRequest root path .all)
-    (syncInput.toRefreshBrokerRequest rootText)
+    (Beam.Cli.leanRefreshRequest path .all)
+    syncInput.toRefreshBrokerRequest
   requireRequestJson "save request should share the Lean operation adapter"
-    (Beam.Cli.leanSaveRequest root path .all)
-    (saveInput.toSaveBrokerRequest rootText)
+    (Beam.Cli.leanSaveRequest path .all)
+    saveInput.toSaveBrokerRequest
   requireRequestJson "close-save request should share the Lean operation adapter"
-    (Beam.Cli.leanCloseSaveRequest root path .all)
-    (saveInput.toCloseSaveBrokerRequest rootText)
+    (Beam.Cli.leanCloseSaveRequest path .all)
+    saveInput.toCloseSaveBrokerRequest
 
-  let closeSave := Beam.Cli.leanCloseSaveRequest root path .all
+  let closeSave := Beam.Cli.leanCloseSaveRequest path .all
   require "close-save should use close broker op" (closeSave.op == .close)
   require "close-save should request artifact save" (closeSave.saveArtifacts? == some true)
   require "close-save should preserve diagnostic scope" (closeSave.diagnosticScope? == some .all)
@@ -587,29 +767,12 @@ private def checkDiagnosticScopeArgs : IO Unit := do
         pure <| err.toString.contains "+all-diagnostics"
     require s!"{label} diagnostic scope should reject obsolete +full" obsoleteRejected
 
-private def checkStartupRetryPolicy : IO Unit := do
-  require "automatic occupied endpoint should retry"
-    (Beam.Daemon.shouldRetryAutomaticStartup true 1 true false)
-  require "automatic startup bind collision should retry"
-    (Beam.Daemon.shouldRetryAutomaticStartup true 1 false true)
-  require "automatic endpoint should not retry after attempts are exhausted"
-    (!Beam.Daemon.shouldRetryAutomaticStartup true 0 true true)
-  require "automatic endpoint should not retry when endpoint is not occupied after failure"
-    (!Beam.Daemon.shouldRetryAutomaticStartup true 1 false false)
-  require "explicit endpoint should not retry"
-    (!Beam.Daemon.shouldRetryAutomaticStartup false 1 true true)
-  require "Linux bind failure wording should be recognized"
-    (Beam.Daemon.startupLogSuggestsEndpointInUse "resource busy (error code: 4294967198, address already in use)")
-  require "macOS bind failure wording should be recognized"
-    (Beam.Daemon.startupLogSuggestsEndpointInUse "Address already in use")
-
 private def checkDaemonFailureContext : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-daemon-failure-context-{← IO.monoNanosNow}"
   try
     IO.FS.createDirAll root
+    discard <| ensureTestControlDir root
     let registryPath ← Beam.Daemon.registryPath root
-    if let some parent := registryPath.parent then
-      IO.FS.createDirAll parent
     let entry : Beam.Daemon.SessionDescriptor := {
       schemaVersion := Beam.Daemon.registrySchemaVersion
       lifecycle := .live
@@ -617,14 +780,17 @@ private def checkDaemonFailureContext : IO Unit := do
       capability := "test-capability"
       pid := 999999999
       ownerPid := 999999999
-      port? := some 42424
+      port := 42424
       workspace := {
         workspaceId := Beam.Cli.projectDaemonWorkspaceId
         root := root.toString
+        leanCmd? := some "lean --server"
+        plugin? := some "/tmp/beam-plugin"
         toolchain? := some "leanprover/lean4:test"
-        bundleId? := some "bundle-test"
+        bundleId := "bundle-test"
       }
       configHash := "config-test"
+      daemonBin := "/tmp/beam-daemon-test"
       startedAt := "2026-07-02T00:00:00Z"
     }
     IO.FS.writeFile registryPath ((toJson entry).pretty ++ "\n")
@@ -683,8 +849,9 @@ private def checkDaemonFailureUnreadableStartupLog : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-daemon-unreadable-startup-log-{← IO.monoNanosNow}"
   try
     IO.FS.createDirAll root
+    discard <| ensureTestControlDir root
     let startupLog ← Beam.Daemon.daemonStartupLogPath root
-    IO.FS.createDirAll startupLog
+    IO.FS.createDir startupLog
     let msg ← Beam.Cli.daemonFailureMessage root <|
       brokerTransportFailure "Beam daemon connection closed"
     requireSubstring "unreadable startup log should preserve original daemon failure"
@@ -718,6 +885,7 @@ private def checkTypedDaemonFailureClassification : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-daemon-typed-failure-{← IO.monoNanosNow}"
   try
     IO.FS.createDirAll root
+    discard <| ensureTestControlDir root
     let callbackDetail := "synthetic stream callback failure"
     let callbackMsg ← Beam.Cli.daemonFailureMessage root <|
       .streamCallback (IO.userError callbackDetail)
@@ -749,10 +917,9 @@ private def checkTypedDaemonFailureClassification : IO Unit := do
 
 private def writeTestRegistryEntry
     (root : System.FilePath)
-    (port? : Option Nat := none) : IO Unit := do
+    (port : UInt16 := 42424) : IO Unit := do
   let registryPath ← Beam.Daemon.registryPath root
-  if let some parent := registryPath.parent then
-    IO.FS.createDirAll parent
+  discard <| ensureTestControlDir root
   let entry : Beam.Daemon.SessionDescriptor := {
     schemaVersion := Beam.Daemon.registrySchemaVersion
     lifecycle := .live
@@ -760,14 +927,17 @@ private def writeTestRegistryEntry
     capability := "test-capability"
     pid := 999999999
     ownerPid := 999999999
-    port?
+    port
     workspace := {
       workspaceId := Beam.Cli.projectDaemonWorkspaceId
       root := root.toString
+      leanCmd? := some "lean --server"
+      plugin? := some "/tmp/beam-plugin"
       toolchain? := some "leanprover/lean4:test"
-      bundleId? := some "bundle-test"
+      bundleId := "bundle-test"
     }
     configHash := "config-test"
+    daemonBin := "/tmp/beam-daemon-test"
     startedAt := "2026-07-05T00:00:00Z"
   }
   IO.FS.writeFile registryPath ((toJson entry).pretty ++ "\n")
@@ -776,9 +946,8 @@ private def checkTypedRegistryReads : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-typed-registry-test-{← IO.monoNanosNow}"
   try
     IO.FS.createDirAll root
+    discard <| ensureTestControlDir root
     let registryPath ← Beam.Daemon.registryPath root
-    if let some parent := registryPath.parent then
-      IO.FS.createDirAll parent
 
     match ← Beam.Daemon.readRegistry root with
     | .absent => pure ()
@@ -786,36 +955,36 @@ private def checkTypedRegistryReads : IO Unit := do
 
     IO.FS.writeFile registryPath "{\"daemonId\":\"legacy\"}\n"
     match ← Beam.Daemon.readRegistry root with
-    | .legacy => pure ()
-    | state => throw <| IO.userError s!"legacy registry was classified as {state.status}"
+    | .invalid .missingSchema => pure ()
+    | state => throw <| IO.userError s!"schema-less descriptor was classified as {state.status}"
 
     IO.FS.writeFile registryPath "{\"schemaVersion\":999}\n"
     match ← Beam.Daemon.readRegistry root with
-    | .unsupported 999 => pure ()
+    | .invalid (.unsupportedSchema 999) => pure ()
     | state => throw <| IO.userError s!"unsupported registry was classified as {state.status}"
 
     IO.FS.writeFile registryPath "{\"schemaVersion\":2}\n"
     match ← Beam.Daemon.readRegistry root with
-    | .unsupported 2 => pure ()
+    | .invalid (.unsupportedSchema 2) => pure ()
     | state => throw <| IO.userError s!"superseded multi-workspace registry was classified as {state.status}"
 
     IO.FS.writeFile registryPath "{\"schemaVersion\":\"one\"}\n"
     match ← Beam.Daemon.readRegistry root with
-    | .malformed detail =>
+    | .invalid (.malformed detail) =>
         require "mistyped registry schemaVersion should be malformed"
           (detail.contains "invalid registry schemaVersion")
     | state => throw <| IO.userError s!"mistyped registry version was classified as {state.status}"
 
     IO.FS.writeFile registryPath "{"
     match ← Beam.Daemon.readRegistry root with
-    | .malformed detail =>
+    | .invalid (.malformed detail) =>
         require "malformed registry should preserve parse context" (detail.contains "invalid registry JSON")
     | state => throw <| IO.userError s!"malformed registry was classified as {state.status}"
 
     IO.FS.writeFile registryPath
       ("{\"schemaVersion\":" ++ toString Beam.Daemon.registrySchemaVersion ++ "}\n")
     match ← Beam.Daemon.readRegistry root with
-    | .malformed detail =>
+    | .invalid (.malformed detail) =>
         require "incomplete current registry should preserve schema context"
           (detail.contains "invalid registry schema")
     | state => throw <| IO.userError s!"incomplete registry was classified as {state.status}"
@@ -829,10 +998,78 @@ private def checkTypedRegistryReads : IO Unit := do
 
     let validText ← IO.FS.readFile registryPath
     let validJson ← IO.ofExcept <| Json.parse validText
+    let eraseObjectField (json : Json) (field : String) : Json :=
+      match json with
+      | .obj fields => .obj (fields.erase field)
+      | other => other
+    let expectMalformedRegistry (label needle : String) (json : Json) : IO Unit := do
+      IO.FS.writeFile registryPath json.compress
+      match ← Beam.Daemon.readRegistry root with
+      | .invalid (.malformed detail) =>
+          require label (detail.contains needle)
+      | state => throw <| IO.userError s!"{label}: descriptor was classified as {state.status}"
+
+    expectMalformedRegistry "missing daemon binary should fail the typed boundary"
+      "invalid registry schema" (eraseObjectField validJson "daemonBin")
+
+    let workspaceJson ← IO.ofExcept <| validJson.getObjVal? "workspace"
+    expectMalformedRegistry "missing bundle id should fail the typed boundary"
+      "invalid registry schema" <|
+        validJson.setObjVal! "workspace" (eraseObjectField workspaceJson "bundleId")
+    expectMalformedRegistry "partial Lean backend should fail descriptor validation"
+      "must configure the Lean command and plugin together" <|
+        validJson.setObjVal! "workspace" (eraseObjectField workspaceJson "plugin")
+    expectMalformedRegistry "backend-free workspace should fail descriptor validation"
+      "must configure at least one backend" <|
+        validJson.setObjVal! "workspace" <|
+          eraseObjectField (eraseObjectField workspaceJson "leanCmd") "plugin"
+    expectMalformedRegistry "Lean toolchain without Lean backend should fail descriptor validation"
+      "cannot name a Lean toolchain without a Lean backend" <|
+        validJson.setObjVal! "workspace" <|
+          (eraseObjectField (eraseObjectField workspaceJson "leanCmd") "plugin").setObjVal!
+            "rocqCmd" (toJson "coq-lsp")
+    expectMalformedRegistry "empty bundle id should fail descriptor validation"
+      "bundle id must not be empty" <|
+        validJson.setObjVal! "workspace" <| workspaceJson.setObjVal! "bundleId" (toJson "")
+    expectMalformedRegistry "empty daemon binary should fail descriptor validation"
+      "daemon binary must not be empty" <| validJson.setObjVal! "daemonBin" (toJson "")
+    expectMalformedRegistry "empty Lean command should fail descriptor validation"
+      "Lean command must not be empty" <|
+        validJson.setObjVal! "workspace" <| workspaceJson.setObjVal! "leanCmd" (toJson "")
+    expectMalformedRegistry "empty Lean plugin should fail descriptor validation"
+      "Lean plugin must not be empty" <|
+        validJson.setObjVal! "workspace" <| workspaceJson.setObjVal! "plugin" (toJson "")
+    expectMalformedRegistry "empty Rocq command should fail descriptor validation"
+      "Rocq command must not be empty" <|
+        validJson.setObjVal! "workspace" <| workspaceJson.setObjVal! "rocqCmd" (toJson "")
+    expectMalformedRegistry "empty Lean toolchain should fail descriptor validation"
+      "Lean toolchain must not be empty" <|
+        validJson.setObjVal! "workspace" <| workspaceJson.setObjVal! "toolchain" (toJson "")
+
+    let missingPortJson :=
+      eraseObjectField validJson "port"
+    IO.FS.writeFile registryPath missingPortJson.compress
+    match ← Beam.Daemon.readRegistry root with
+    | .invalid (.malformed detail) =>
+        require "missing current endpoint should fail the typed boundary"
+          (detail.contains "invalid registry schema")
+    | state => throw <| IO.userError s!"endpoint-less registry was classified as {state.status}"
+
+    IO.FS.writeFile registryPath <|
+      (validJson.setObjVal! "port" (toJson 65536)).compress
+    match ← Beam.Daemon.readRegistry root with
+    | .invalid (.malformed detail) =>
+        require "out-of-range current endpoint should fail the typed boundary"
+          (detail.contains "invalid registry schema")
+    | state => throw <| IO.userError s!"out-of-range endpoint was classified as {state.status}"
+
+    expectMalformedRegistry "port zero should fail descriptor validation"
+      "port must be in range 1-65535" <| validJson.setObjVal! "port" (toJson 0)
+
     IO.FS.writeFile registryPath <|
       (validJson.setObjVal! "workspace" (Json.mkObj [])).compress
     match ← Beam.Daemon.readRegistry root with
-    | .malformed detail =>
+    | .invalid (.malformed detail) =>
         require "incomplete workspace descriptors should fail the typed boundary"
           (detail.contains "invalid registry schema")
     | state => throw <| IO.userError s!"empty workspace descriptor was classified as {state.status}"
@@ -842,6 +1079,24 @@ private def checkTypedRegistryReads : IO Unit := do
     let debugRegistry ← IO.ofExcept <| debug.getObjVal? "registry"
     requireJsonString "daemon debug context must redact its capability"
       "capability" "<redacted>" debugRegistry
+
+    let symlinkTarget := root / "registry-symlink-target.json"
+    let targetText := validText
+    IO.FS.writeFile symlinkTarget targetText
+    IO.FS.removeFile registryPath
+    createSymlink "registry fixture" symlinkTarget registryPath
+    match ← Beam.Daemon.readRegistry root with
+    | .invalid (.unsafeLeaf detail) =>
+        requireSubstring "symlinked registry detail" "symbolic links are not accepted" detail
+    | state => throw <| IO.userError s!"symlinked registry was classified as {state.status}"
+    expectIoErrorContains "stop should reject a symlinked registry"
+      "symbolic links are not accepted"
+      (Beam.Cli.shutdownRegisteredProjectDaemon root)
+    expectIoErrorContains "recovery should reject a symlinked registry"
+      "symbolic links are not accepted"
+      (Beam.Cli.recoverProjectDaemon root none true)
+    require "registry operations must not mutate a symlink target"
+      ((← IO.FS.readFile symlinkTarget) == targetText)
   finally
     try
       if ← root.pathExists then
@@ -854,10 +1109,10 @@ private def checkBrokerConnectionClosedIncident : IO Unit := do
   try
     IO.FS.createDirAll root
     withClosingBrokerEndpoint fun endpoint => do
-      let port? :=
+      let port :=
         match endpoint with
-        | .tcp port => some port.toNat
-      writeTestRegistryEntry root port?
+        | .tcp port => port
+      writeTestRegistryEntry root port
       let controlDir ← Beam.Daemon.controlDir root
       let msg ← expectIoErrorMessage "broker connection close should surface daemon failure" <|
         Beam.Cli.callBrokerQuiet root (projectDaemonClientForTest endpoint controlDir) { op := .stats }
@@ -890,8 +1145,9 @@ private def checkDaemonFailureIncidentRetention : IO Unit := do
   let root := System.FilePath.mk s!"/tmp/beam-daemon-incident-retention-{← IO.monoNanosNow}"
   try
     IO.FS.createDirAll root
+    discard <| ensureTestControlDir root
     let incidentDir ← Beam.Daemon.daemonFailureIncidentDir root
-    IO.FS.createDirAll incidentDir
+    Beam.ensurePrivateDir "test Beam daemon incident directory" incidentDir
     for i in [0:55] do
       IO.FS.writeFile (incidentDir / s!"000000000000000000{i}.json") "{}\n"
     let msg ← Beam.Cli.daemonFailureMessage root <|
@@ -927,6 +1183,7 @@ private def checkDoctorDaemonFailureIncidentLines : IO Unit := do
     require "doctor should report no daemon incidents when directory is absent"
       (absentLines == ["daemon incidents: none"])
 
+    discard <| ensureTestControlDir root
     discard <| Beam.Cli.daemonFailureMessage root <|
       brokerTransportFailure "Beam daemon connection closed"
     let lines ← Beam.Cli.daemonFailureIncidentDoctorLines root
@@ -945,6 +1202,25 @@ private def checkDoctorDaemonFailureIncidentLines : IO Unit := do
         IO.FS.removeDirAll control
     catch _ =>
       pure ()
+    try
+      if ← root.pathExists then
+        IO.FS.removeDirAll root
+    catch _ =>
+      pure ()
+
+private def checkDaemonFailureIncidentDoesNotRecreateRoot : IO Unit := do
+  let root := System.FilePath.mk s!"/tmp/beam-daemon-incident-deleted-root-{← IO.monoNanosNow}"
+  try
+    IO.FS.createDirAll root
+    let control ← ensureTestControlDir root
+    IO.FS.removeDirAll root
+    let msg ← Beam.Cli.daemonFailureMessage root
+      (brokerTransportFailure "Beam daemon connection closed") (some control)
+    require "incident logging should preserve the original transport detail"
+      (msg.contains "Beam daemon connection closed")
+    require "incident logging must not recreate a deleted project root"
+      (!(← root.pathExists))
+  finally
     try
       if ← root.pathExists then
         IO.FS.removeDirAll root
@@ -1013,15 +1289,6 @@ private def checkLeanModuleNamePathHelpers : IO Unit := do
     (Beam.leanModuleNameForPath? root (root / "Foo" / "Bar.v") == none)
   require "outside rooted Lean path should not become module name"
     (Beam.leanModuleNameForPath? root (p "/tmp/other-root/Foo.lean") == none)
-
-private def createSymlink
-    (label : String) (target link : System.FilePath) : IO Unit := do
-  let out ← IO.Process.output {
-    cmd := "ln"
-    args := #["-s", target.toString, link.toString]
-  }
-  if out.exitCode != 0 then
-    throw <| IO.userError s!"failed to create {label} symlink\n{out.stderr}"
 
 private def checkPathCanonicalization : IO Unit := do
   let stamp ← IO.monoNanosNow
@@ -1099,8 +1366,8 @@ private def checkLockLifecycle : IO Unit := do
       pure ()
 
 private def writeFakeBundleArtifacts (workspace : System.FilePath) : IO Unit := do
-  let paths := Beam.Cli.bundlePathsFor workspace
-  for path in #[paths.daemon, paths.client, paths.plugin] do
+  let paths := Beam.Cli.leanBundlePathsFor workspace
+  for path in #[paths.daemon, paths.plugin] do
     if let some parent := path.parent then
       IO.FS.createDirAll parent
     IO.FS.writeFile path "fake artifact\n"
@@ -1252,11 +1519,9 @@ private def checkRuntimeBundleHelpers : IO Unit := do
       Beam.Cli.toolchainFingerprintHash sampleFingerprintB)
 
   let workspace := System.FilePath.mk "/tmp/beam-runtime-bundle-workspace"
-  let paths := Beam.Cli.bundlePathsFor workspace
+  let paths := Beam.Cli.leanBundlePathsFor workspace
   require "bundle daemon path should point at workspace build output"
     (paths.daemon == workspace / ".lake" / "build" / "bin" / "beam-daemon")
-  require "bundle client path should point at workspace build output"
-    (paths.client == workspace / ".lake" / "build" / "bin" / "beam-client")
   require "bundle plugin path should live under workspace build lib"
     (paths.plugin.toString.startsWith (workspace / ".lake" / "build" / "lib").toString)
   require "state directory should remain the public .beam path"
@@ -1342,23 +1607,23 @@ private def checkRuntimeBundleMetadataAcceptance : IO Unit := do
     IO.FS.removeFile metadataPath
     writeBundleMetadataFile bundleDir toolchain sourceHash sampleFingerprint workspace
 
-    let client := (Beam.Cli.bundlePathsFor workspace).client
-    IO.FS.removeFile client
-    IO.FS.createDir client
+    let daemon := (Beam.Cli.leanBundlePathsFor workspace).daemon
+    IO.FS.removeFile daemon
+    IO.FS.createDir daemon
     require "bundle should reject a required artifact path that is a directory"
       (!(← Beam.Cli.bundleReady bundleDir toolchain sourceHash sampleFingerprint))
     require "bundle with a directory artifact should not expose a source hash"
       ((← Beam.Cli.completeBundleSourceHash? bundleDir).isNone)
-    IO.FS.removeDir client
+    IO.FS.removeDir daemon
 
-    let symlinkTarget := root / "client-symlink-target"
+    let symlinkTarget := root / "daemon-symlink-target"
     IO.FS.writeFile symlinkTarget "fake artifact\n"
-    createSymlink "bundle artifact fixture" symlinkTarget client
+    createSymlink "bundle artifact fixture" symlinkTarget daemon
     require "bundle should reject a symlinked required artifact"
       (!(← Beam.Cli.bundleReady bundleDir toolchain sourceHash sampleFingerprint))
     require "bundle with a symlinked artifact should not expose a source hash"
       ((← Beam.Cli.completeBundleSourceHash? bundleDir).isNone)
-    IO.FS.removeFile client
+    IO.FS.removeFile daemon
 
     require "bundle should reject matching metadata without required artifacts"
       (!(← Beam.Cli.bundleReady bundleDir toolchain sourceHash sampleFingerprint))
@@ -1372,26 +1637,30 @@ private def checkRuntimeBundleMetadataAcceptance : IO Unit := do
       pure ()
 
 def main : IO Unit := do
-  checkProjectDaemonWorkspaceRouting
+  checkProjectDaemonRequestSealing
   checkClientResponsePresentation
   checkCliRecoveryHints
   checkSyncWaitSpecs
-  checkCancelAcknowledgementDecoding
   checkCliRootParsing
   checkProjectRootAmbiguity
   checkLeanOperationRequests
   checkDiagnosticScopeArgs
-  checkStartupRetryPolicy
   checkDaemonFailureContext
   checkDaemonFailureUnreadableStartupLog
   checkTypedDaemonFailureClassification
   checkSilentEndpointProbeTimeout
   checkSilentShutdownTimeout
   checkPlainBrokerTaskCancellation
+  checkBrokerSendInterruption
+  checkWrongGreetingProtectsRequest
+  checkStderrCaptureSurvivesSinkFailure
+  checkStderrSinkDisableIsSynchronized
+  checkStderrCaptureDoesNotJoinInheritedPipe
   checkBrokerConnectionClosedIncident
   checkTypedRegistryReads
   checkDaemonFailureIncidentRetention
   checkDoctorDaemonFailureIncidentLines
+  checkDaemonFailureIncidentDoesNotRecreateRoot
   checkPathRelativeToRoot
   checkLeanModuleNamePathHelpers
   checkPathCanonicalization

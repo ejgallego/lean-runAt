@@ -9,6 +9,7 @@ import Beam.Broker.Protocol
 import Beam.Broker.Readiness
 import Beam.Broker.RequestArgs
 import Beam.Broker.Server
+import Beam.Daemon.Startup
 import Beam.JsonPretty
 import BeamTest.Broker.JsonAssert
 import Lean
@@ -19,6 +20,71 @@ open Beam.Broker
 open BeamTest.Broker.JsonAssert
 
 namespace BeamTest.Broker.ProtocolTest
+
+private def checkDaemonReadinessProtocol : IO Unit := do
+  let identity : DaemonIdentity := {
+    daemonId := "ready-generation"
+    configHash := "ready-config"
+  }
+  let endpoint : Transport.Endpoint := .tcp 43123
+  let ready := Beam.Daemon.StartupReady.ofEndpoint endpoint identity
+  match Beam.Daemon.StartupReady.decodeLine identity ready.encodeLine with
+  | .ok decoded =>
+      unless decoded == endpoint do
+        throw <| IO.userError s!"daemon readiness endpoint mismatch: {reprStr decoded}"
+  | .error err =>
+      throw <| IO.userError s!"valid daemon readiness failed to decode: {err}"
+
+  let wrongIdentity : DaemonIdentity := {
+    daemonId := "other-generation"
+    configHash := identity.configHash
+  }
+  match Beam.Daemon.StartupReady.decodeLine wrongIdentity ready.encodeLine with
+  | .ok _ => throw <| IO.userError "daemon readiness accepted the wrong generation identity"
+  | .error err =>
+      unless err.contains "identity does not match" do
+        throw <| IO.userError s!"unexpected daemon readiness identity error: {err}"
+
+  let unsupported := { ready with schemaVersion := Beam.Daemon.startupReadySchemaVersion + 1 }
+  match Beam.Daemon.StartupReady.decodeLine identity unsupported.encodeLine with
+  | .ok _ => throw <| IO.userError "daemon readiness accepted an unsupported schema"
+  | .error err =>
+      unless err.contains "unsupported Beam daemon readiness schema" do
+        throw <| IO.userError s!"unexpected daemon readiness schema error: {err}"
+
+  let invalidPort := { ready with port := 0 }
+  match Beam.Daemon.StartupReady.decodeLine identity invalidPort.encodeLine with
+  | .ok _ => throw <| IO.userError "daemon readiness accepted port zero"
+  | .error err =>
+      unless err.contains "outside 1-65535" do
+        throw <| IO.userError s!"unexpected daemon readiness port error: {err}"
+
+  let missingVersion := Json.mkObj [
+    ("port", toJson 43123),
+    ("identity", toJson identity)
+  ]
+  match fromJson? (α := Beam.Daemon.StartupReady) missingVersion with
+  | .ok _ => throw <| IO.userError "daemon readiness accepted a missing schema version"
+  | .error _ => pure ()
+
+private def checkServerHelloProtocol : IO Unit := do
+  let identity : DaemonIdentity := {
+    daemonId := "hello-generation"
+    configHash := "hello-config"
+  }
+  let hello := ServerHello.current identity
+  match ServerHello.decode identity (toJson hello).compress with
+  | .ok () => pure ()
+  | .error err => throw <| IO.userError s!"valid daemon greeting failed to decode: {err}"
+  let wrongIdentity : DaemonIdentity := {
+    daemonId := "other-generation"
+    configHash := identity.configHash
+  }
+  match ServerHello.decode wrongIdentity (toJson hello).compress with
+  | .ok () => throw <| IO.userError "daemon greeting accepted the wrong generation identity"
+  | .error err =>
+      unless err.contains "identity does not match" do
+        throw <| IO.userError s!"unexpected daemon greeting identity error: {err}"
 
 private def decodeResponse (label : String) (json : Json) : IO Response := do
   match fromJson? json with
@@ -648,7 +714,7 @@ private def checkRequestArgsBoundary : IO Unit := do
     codeActionResolveRocqUnsupported.codeActionResolveArgs
 
 private def checkWorkspaceRoutingFields : IO Unit := do
-  let processWideOps := #[Op.listWorkspaces, .resetStats, .shutdown]
+  let processWideOps := #[Op.listWorkspaces, .shutdown]
   let optionallyScopedOps := #[Op.openDocs, .stats]
 
   for op in Op.all do
@@ -721,8 +787,8 @@ private def checkWorkspaceRoutingFields : IO Unit := do
   match rootOnlyStats.validateFields with
   | .ok _ => throw <| IO.userError "stats accepted a root without a workspace id"
   | .error err =>
-      require "scoped stats requires an explicit workspace id"
-        (err.contains "workspaceId" && err.contains "root")
+      require "stats rejects caller-selected workspace roots"
+        (err.contains "unrelated" && err.contains "root")
 
   for (label, json, field) in #[
       ("unknown broker field", Json.mkObj [
@@ -778,54 +844,6 @@ private def checkWorkspaceRoutingFields : IO Unit := do
   | .error err =>
       require "unsupported workspace mode error should name accepted values"
         (err.contains "'set', 'verify', or 'reset'")
-
-private def checkProjectRequestBoundary : IO Unit := do
-  let semanticJson := Json.mkObj [
-    ("op", toJson Op.runAt),
-    ("backend", toJson Backend.lean),
-    ("clientRequestId", toJson "project-request"),
-    ("path", toJson "Demo.lean"),
-    ("version", toJson (1 : Nat)),
-    ("line", toJson (0 : Nat)),
-    ("character", toJson (0 : Nat)),
-    ("text", toJson "exact rfl")
-  ]
-  let projectRequest ← expectOk "semantic project request" <|
-    fromJson? (α := ProjectRequest) semanticJson
-  let attached := projectRequest.attach "workspace-a" "/workspace/a" "session-capability"
-  require "project request attachment injects the selected workspace"
-    (attached.workspaceId? == some "workspace-a")
-  require "project request attachment injects the owner-side root"
-    (attached.root? == some "/workspace/a")
-  require "project request attachment injects session authority"
-    (attached.daemonCapability? == some "session-capability")
-  match fromJson? (α := ProjectRequest) <| Json.mkObj [("op", toJson Op.stats)] with
-  | .ok _ => throw <| IO.userError "project request unexpectedly accepted a missing request id"
-  | .error err =>
-      require "project request id rejection should explain the machine identity requirement"
-        (err.contains "non-empty clientRequestId")
-  let cancelRequest ← expectOk "semantic cancellation request" <|
-    fromJson? (α := ProjectRequest) <| Json.mkObj [
-      ("op", toJson Op.cancel),
-      ("clientRequestId", toJson "cancel-command"),
-      ("cancelRequestId", toJson "project-request")
-    ]
-  let attachedCancel := cancelRequest.attach "workspace-a" "/workspace/a" "session-capability"
-  require "project cancellation is workspace-scoped"
-    (attachedCancel.workspaceId? == some "workspace-a")
-  require "project cancellation does not invent an unsupported root field"
-    attachedCancel.root?.isNone
-  for field in ["workspaceId", "root", "daemonCapability", "leanCmd"] do
-    match fromJson? (α := ProjectRequest) (semanticJson.setObjVal! field (toJson "forbidden")) with
-    | .ok _ => throw <| IO.userError s!"project request unexpectedly accepted session field '{field}'"
-    | .error _ => pure ()
-  for op in [Op.ensure, .initWorkspace, .listWorkspaces, .dropWorkspace, .resetStats, .shutdown] do
-    match fromJson? (α := ProjectRequest) <| Json.mkObj [
-      ("op", toJson op),
-      ("clientRequestId", toJson "control-request")
-    ] with
-    | .ok _ => throw <| IO.userError s!"project request unexpectedly accepted control op '{op.key}'"
-    | .error _ => pure ()
 
 private def checkWorkspaceLifecycleProtocol : IO Unit := do
   let root := System.FilePath.mk "/workspace"
@@ -1120,7 +1138,13 @@ private def checkSessionCloseAdmission : IO Unit := do
     ((← ActiveRequestRegistry.count runtime.activeRequests) == 0)
 
 private def checkWrapperDaemonAuthorization : IO Unit := do
-  let root := System.FilePath.mk "/tmp/beam-wrapper-daemon-authorization"
+  let base := System.FilePath.mk s!"/tmp/beam-wrapper-daemon-authorization-{← IO.monoNanosNow}"
+  let rootPath := base / "workspace"
+  let otherRootPath := base / "other-workspace"
+  IO.FS.createDirAll rootPath
+  IO.FS.createDirAll otherRootPath
+  let root ← Beam.resolveExistingPath rootPath
+  let otherRoot ← Beam.resolveExistingPath otherRootPath
   let capability := "generation-secret"
   let runtime ← Beam.Broker.ServerRuntime.create
     ({ root } : Beam.Broker.BrokerConfig) "fixture"
@@ -1144,6 +1168,24 @@ private def checkWrapperDaemonAuthorization : IO Unit := do
     }
     require "wrapper daemon should admit the exact generation capability" stats.ok
 
+    let callerSelectedRoot ← runtime.dispatchRequest {
+      op := .ensure
+      workspaceId? := some "fixture"
+      root? := some otherRoot.toString
+      daemonCapability? := some capability
+    }
+    require "authenticated wrapper request should reject caller-selected roots"
+      (callerSelectedRoot.error?.any fun err =>
+        err.code == "invalidParams" && err.message.contains "unrelated" &&
+          err.message.contains "root")
+
+    let statsAfterRejectedRoot ← runtime.dispatchRequest {
+      op := .stats
+      daemonCapability? := some capability
+    }
+    require "rejected root selection should preserve the authenticated generation"
+      statsAfterRejectedRoot.ok
+
     for op in [Op.initWorkspace, .listWorkspaces, .dropWorkspace] do
       let response ← runtime.dispatchRequest {
         op
@@ -1154,9 +1196,14 @@ private def checkWrapperDaemonAuthorization : IO Unit := do
         (response.error?.any fun err =>
           err.code == "invalidParams" && err.message.contains "wrapper-owned daemon mode")
   finally
-    runtime.close
+    try
+      runtime.close
+    finally
+      IO.FS.removeDirAll base
 
 def main : IO Unit := do
+  checkDaemonReadinessProtocol
+  checkServerHelloProtocol
   checkResponseJsonShape
   checkStreamMessageDecode
   checkResponseJsonDecode
@@ -1169,7 +1216,6 @@ def main : IO Unit := do
   checkStaleDirectDepHints
   checkRequestArgsBoundary
   checkWorkspaceRoutingFields
-  checkProjectRequestBoundary
   checkWorkspaceLifecycleProtocol
   checkLifecycleTeardownConcurrency
   checkSessionCloseAdmission

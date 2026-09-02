@@ -44,7 +44,6 @@ private structure LeanBundleDoctorInfo where
   bundleId : String
   ready : Bool
   daemon : String
-  client : String
   plugin : String
 
 private def rejectedLeanBundleDoctorInfo : LeanBundleDoctorInfo := {
@@ -57,7 +56,6 @@ private def rejectedLeanBundleDoctorInfo : LeanBundleDoctorInfo := {
   bundleId := rejectedToolchainDiagnosticText
   ready := false
   daemon := rejectedToolchainDiagnosticText
-  client := rejectedToolchainDiagnosticText
   plugin := rejectedToolchainDiagnosticText
 }
 
@@ -87,7 +85,6 @@ private def acceptedLeanBundleDoctorInfo
     bundleId
     ready
     daemon := paths.daemon.toString
-    client := paths.client.toString
     plugin := paths.plugin.toString
   }
 
@@ -134,16 +131,14 @@ private def printLeanDoctorInfo (home root : System.FilePath) : IO Unit := do
   IO.println s!"bundle id: {bundleInfo.bundleId}"
   IO.println s!"bundle ready: {boolText bundleInfo.ready}"
   IO.println s!"bundle daemon: {bundleInfo.daemon}"
-  IO.println s!"bundle client: {bundleInfo.client}"
   IO.println s!"plugin: {bundleInfo.plugin}"
 
 private def printRocqDoctorInfo (home root : System.FilePath) : IO Unit := do
-  let paths ← defaultBundlePaths home
-  let helpersReady := (← paths.daemon.pathExists) && (← paths.client.pathExists)
+  let daemon ← defaultDaemonPath home
+  let daemonReady := ← daemon.pathExists
   IO.println s!"coq-lsp: {(← maybeRocqCmd root).getD ""}"
-  IO.println s!"daemon helpers ready: {boolText helpersReady}"
-  IO.println s!"daemon binary: {paths.daemon}"
-  IO.println s!"client binary: {paths.client}"
+  IO.println s!"daemon ready: {boolText daemonReady}"
+  IO.println s!"daemon binary: {daemon}"
 
 def daemonFailureIncidentDoctorLines
     (root : System.FilePath)
@@ -175,27 +170,20 @@ def doctor (home : System.FilePath) (opts : CliOptions) (backend : Backend) : IO
   | .live entry =>
       IO.println "daemon status: live"
       IO.println s!"daemon pid: {entry.pid}"
-      if let some endpoint := Beam.Daemon.registryEndpoint? entry then
-        IO.println s!"daemon endpoint: {Beam.Daemon.endpointSummary endpoint}"
-      else
-        IO.println "daemon endpoint: invalid"
+      IO.println s!"daemon endpoint: {Beam.Daemon.endpointSummary (Beam.Daemon.registryEndpoint entry)}"
       IO.println s!"daemon config hash: {entry.configHash}"
   | .draining entry =>
       IO.println "daemon status: draining"
       IO.println s!"daemon generation: {entry.daemonId}"
   | .absent => IO.println "daemon status: absent"
-  | .legacy => IO.println "daemon status: legacy registry"
-  | .unsupported schemaVersion =>
-      IO.println "daemon status: unsupported registry"
-      IO.println s!"registry schema version: {schemaVersion}"
-  | .malformed detail =>
-      IO.println "daemon status: malformed registry"
-      IO.println s!"registry error: {detail}"
   | .selectorMismatch entry =>
       IO.println "daemon status: session selector mismatch"
       IO.println <| sessionSelectorMismatchMessage root
         (← Beam.Daemon.controlDirFor root opts.explicitControlDir?) entry
-  | .unusable _ reason =>
+  | .recoveryRequired (.invalid problem) =>
+      IO.println "daemon status: recovery required"
+      IO.println s!"session descriptor error: {problem.detail}"
+  | .recoveryRequired (.unusable _ reason) =>
       IO.println "daemon status: unsafe"
       IO.println s!"daemon safety error: {reason.message}"
   printDaemonFailureIncidentDoctorInfo root opts.explicitControlDir?
@@ -224,7 +212,7 @@ def printInstallManifest (payloadHash : String) (sourceCommitArg : String)
     (createdWithToolchains : List String) : IO Unit := do
   if createdWithToolchains.isEmpty then
     throw <| IO.userError
-      "usage: beam install-manifest <payload-hash> <source-commit|-> <creation-toolchain...>"
+      "usage: beam-cli install-manifest <payload-hash> <source-commit|-> <creation-toolchain...>"
   printJsonLine (installManifestJson payloadHash (sourceCommitArg? sourceCommitArg)
     createdWithToolchains)
 

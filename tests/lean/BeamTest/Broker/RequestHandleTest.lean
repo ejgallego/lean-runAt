@@ -58,7 +58,6 @@ def checkCancellationAndLifetime : IO Unit := do
   let req : Beam.Broker.Request := {
     op := .runAt
     workspaceId? := some workspaceId
-    root? := some root.toString
     path? := some "Cancelled.lean"
     version? := some 1
     line? := some 0

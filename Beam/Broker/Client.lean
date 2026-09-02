@@ -5,7 +5,6 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Lean
-import Beam.JsonPretty
 import Beam.Broker.Protocol
 import Beam.Broker.Transport
 
@@ -14,10 +13,18 @@ open Lean
 namespace Beam.Broker
 
 structure StreamCallbacks where
-  onFileProgress : Option String → SyncFileProgress → IO Unit := fun _ _ => pure ()
-  onDiagnostic : Option String → StreamDiagnostic → IO Unit := fun _ _ => pure ()
+  onFileProgress : SyncFileProgress → IO Unit := fun _ => pure ()
+  onDiagnostic : StreamDiagnostic → IO Unit := fun _ => pure ()
 
 abbrev Endpoint := Transport.Endpoint
+
+/-- Which server protocol must be observed before a request may be disclosed. -/
+inductive ServerExpectation where
+  /-- Internal standalone brokers do not emit a wrapper-generation greeting. -/
+  | standalone
+  /-- Wrapper brokers must prove the descriptor-selected generation on this connection. -/
+  | wrapper (identity : DaemonIdentity)
+  deriving Repr, BEq
 
 /-- The transport operation that produced a typed broker client failure. -/
 inductive BrokerTransportOperation where
@@ -36,15 +43,17 @@ inductive BrokerClientFailure where
   | transport (operation : BrokerTransportOperation) (error : IO.Error)
   | invalidResponse (detail : String)
   | streamCallback (error : IO.Error)
-  | responseTimeout (timeoutMs : Nat)
+  | requestTimeout (timeoutMs : Nat)
+  | interrupted
 
 def BrokerClientFailure.detail : BrokerClientFailure → String
   | .transport operation error =>
       s!"Beam daemon {operation.label} failed: {error}"
   | .streamCallback error => error.toString
   | .invalidResponse detail => detail
-  | .responseTimeout timeoutMs =>
-      s!"Beam daemon response timed out after {timeoutMs} ms"
+  | .requestTimeout timeoutMs =>
+      s!"Beam daemon request timed out after {timeoutMs} ms"
+  | .interrupted => "Beam request interrupted"
 
 instance : Repr BrokerClientFailure where
   reprPrec failure _ := Std.Format.text <|
@@ -52,29 +61,8 @@ instance : Repr BrokerClientFailure where
     | .transport operation error => s!"BrokerClientFailure.transport {repr operation} {error}"
     | .invalidResponse detail => s!"BrokerClientFailure.invalidResponse {detail}"
     | .streamCallback error => s!"BrokerClientFailure.streamCallback {error}"
-    | .responseTimeout timeoutMs => s!"BrokerClientFailure.responseTimeout {timeoutMs}"
-
-private def BrokerClientFailure.toIOError : BrokerClientFailure → IO.Error
-  | failure@(.transport ..) => IO.userError failure.detail
-  | .streamCallback error => error
-  | .invalidResponse detail => IO.userError detail
-  | .responseTimeout timeoutMs =>
-      IO.userError s!"Beam daemon response timed out after {timeoutMs} ms"
-
-def parsePortText (name value : String) : Except String UInt16 := do
-  let some n := value.toNat?
-    | throw s!"invalid {name} '{value}'"
-  if n < UInt16.size then
-    pure n.toUInt16
-  else
-    throw s!"{name} '{value}' is outside the supported range 0-65535"
-
-def parseEndpointOption (args : List String) : Except String (Endpoint × List String) := do
-  match args with
-  | "--port" :: port :: rest =>
-      pure (.tcp (← parsePortText "port" port), rest)
-  | _ =>
-      pure (.tcp 8765, args)
+    | .requestTimeout timeoutMs => s!"BrokerClientFailure.requestTimeout {timeoutMs}"
+    | .interrupted => "BrokerClientFailure.interrupted"
 
 private def decodeStreamMessage (msg : String) : Except String StreamMessage := do
   match Json.parse msg with
@@ -92,67 +80,106 @@ private def captureClientFailure
   catch e =>
     pure <| .error (failure e)
 
-private def diagnosticSeverityLabel : Option Lsp.DiagnosticSeverity → String
-  | some .error => "error"
-  | some .warning => "warning"
-  | some .information => "info"
-  | some .hint => "hint"
-  | none => "diagnostic"
-
-private def condenseDiagnosticMessage (message : String) : String :=
-  String.intercalate " / " <|
-    ((message.split (· == '\n')).toList.map (fun line => line.trimAscii.toString)).filter
-      (fun line => !line.isEmpty)
-
-def formatStreamDiagnostic (diagnostic : StreamDiagnostic) : String :=
-  let pos := diagnostic.range.start
-  let line := pos.line + 1
-  let character := pos.character + 1
-  let severity := diagnosticSeverityLabel diagnostic.severity?
-  let message := condenseDiagnosticMessage diagnostic.message
-  let blocking :=
-    if diagnostic.completionBlocking then
-      " completionBlocking=true"
-    else
-      ""
-  s!"beam: diagnostic {severity}{blocking} {diagnostic.path}:{line}:{character}: {message}"
-
-private structure ResponseDeadline where
+private structure RequestDeadline where
   timeoutMs : Nat
   deadlineNanos : Nat
+
+private inductive RequestWait where
+  | deadline (deadline : RequestDeadline)
+  | interruptible (interrupted : IO Bool)
+
+private def serverHelloTimeoutMs : Nat :=
+  2000
+
+/-- Verify the selected wrapper generation before disclosing capability-bound request contents. -/
+private def verifyServerHello
+    (client : Transport.Connection)
+    (expectedIdentity : DaemonIdentity)
+    (wait : RequestWait) : IO (Except BrokerClientFailure Unit) := do
+  let greeting ←
+    match wait with
+    | .deadline deadline =>
+        match ← captureClientFailure (.transport .receive) <|
+            Transport.recvMsgUntil client deadline.deadlineNanos with
+        | .ok (some greeting) => pure greeting
+        | .ok none => return .error (.requestTimeout deadline.timeoutMs)
+        | .error failure => return .error failure
+    | .interruptible interrupted =>
+        let deadlineNanos := (← IO.monoNanosNow) + serverHelloTimeoutMs * 1000000
+        match ← captureClientFailure (.transport .receive) <|
+            Transport.recvMsgInterruptiblyUntil client deadlineNanos interrupted with
+        | .ok (.completed greeting) => pure greeting
+        | .ok .timedOut => return .error (.requestTimeout serverHelloTimeoutMs)
+        | .ok .interrupted => return .error .interrupted
+        | .error failure => return .error failure
+  match ServerHello.decode expectedIdentity greeting with
+  | .ok () => pure <| .ok ()
+  | .error detail => pure <| .error (.invalidResponse detail)
 
 /-- Send one request while preserving transport, response, callback, and timeout failures. -/
 private partial def sendRequestWithStreamResultCore
     (endpoint : Endpoint)
     (req : Request)
     (onStream : StreamMessage → IO Unit)
-    (responseTimeoutMs? : Option Nat) : IO (Except BrokerClientFailure Response) := do
+    (wait : RequestWait)
+    (server : ServerExpectation) :
+    IO (Except BrokerClientFailure Response) := do
+  let requestText := (toJson req).compress
   let client ←
-    match ← captureClientFailure (.transport .connect) (Transport.connect endpoint) with
-    | .ok client => pure client
-    | .error failure => return .error failure
+    match wait with
+    | .deadline deadline =>
+      match ← captureClientFailure (.transport .connect) <|
+          Transport.connectUntil endpoint deadline.deadlineNanos with
+      | .ok (.completed client) => pure client
+      | .ok .timedOut => return .error (.requestTimeout deadline.timeoutMs)
+      | .error failure => return .error failure
+    | .interruptible interrupted =>
+      match ← captureClientFailure (.transport .connect) <|
+          Transport.connectInterruptibly endpoint interrupted with
+      | .ok (.completed client) => pure client
+      | .ok .interrupted => return .error .interrupted
+      | .error failure => return .error failure
+  let abandoned ← IO.mkRef false
   try
-    match ← captureClientFailure (.transport .send) <|
-        Transport.sendMsg client (toJson req).compress with
+    if let .wrapper expectedIdentity := server then
+      match ← verifyServerHello client expectedIdentity wait with
+      | .ok () => pure ()
+      | .error failure => return .error failure
+    let sendResult ←
+      match wait with
+      | .deadline deadline =>
+          match ← captureClientFailure (.transport .send) <|
+              Transport.sendMsgUntil client requestText deadline.deadlineNanos with
+          | .ok (.completed ()) => pure <| Except.ok ()
+          | .ok .timedOut =>
+              abandoned.set true
+              pure <| Except.error (.requestTimeout deadline.timeoutMs)
+          | .error failure => pure <| Except.error failure
+      | .interruptible interrupted =>
+          match ← captureClientFailure (.transport .send) <|
+              Transport.sendMsgInterruptibly client requestText interrupted with
+          | .ok (.completed ()) => pure <| Except.ok ()
+          | .ok .interrupted =>
+              abandoned.set true
+              pure <| Except.error .interrupted
+          | .error failure => pure <| Except.error failure
+    match sendResult with
     | .ok () => pure ()
     | .error failure => return .error failure
-    let deadline? : Option ResponseDeadline ← responseTimeoutMs?.mapM fun timeoutMs => do
-      pure {
-        timeoutMs
-        deadlineNanos := (← IO.monoNanosNow) + timeoutMs * 1000000
-      }
-    let rec loop : IO (Except BrokerClientFailure Response) := do
+    let rec receiveResponse : IO (Except BrokerClientFailure Response) := do
       let msg ←
-        match deadline? with
-        | none =>
-            match ← captureClientFailure (.transport .receive) (Transport.recvMsg client) with
-            | .ok msg => pure msg
+        match wait with
+        | .interruptible interrupted =>
+            match ← captureClientFailure (.transport .receive) <|
+                Transport.recvMsgInterruptibly client interrupted with
+            | .ok (.completed msg) => pure msg
+            | .ok .interrupted => return .error .interrupted
             | .error failure => return .error failure
-        | some deadline =>
+        | .deadline deadline =>
             match ← captureClientFailure (.transport .receive) <|
                 Transport.recvMsgUntil client deadline.deadlineNanos with
             | .ok (some msg) => pure msg
-            | .ok none => return .error (.responseTimeout deadline.timeoutMs)
+            | .ok none => return .error (.requestTimeout deadline.timeoutMs)
             | .error failure => return .error failure
       let stream ←
         match decodeStreamMessage msg with
@@ -168,81 +195,57 @@ private partial def sendRequestWithStreamResultCore
       | .response _ response =>
           pure <| .ok response
       | .fileProgress .. | .diagnostic .. =>
-          loop
-    loop
+          receiveResponse
+    receiveResponse
   finally
-    Transport.closeConnection client
+    if ← abandoned.get then
+      pure ()
+    else
+      Transport.closeConnection client
 
-/-- Send one request while preserving transport, response, and callback failures as typed data. -/
-partial def sendRequestWithStreamResult
-    (endpoint : Endpoint)
-    (req : Request)
-    (onStream : StreamMessage → IO Unit) : IO (Except BrokerClientFailure Response) := do
-  sendRequestWithStreamResultCore endpoint req onStream none
-
-/-- Send one request with an absolute timeout for receiving its complete response stream. -/
+/-- Send one request with one absolute timeout across connect, greeting, send, and response. -/
 partial def sendRequestWithStreamTimeoutResult
     (endpoint : Endpoint)
     (req : Request)
     (timeoutMs : Nat)
-    (onStream : StreamMessage → IO Unit) : IO (Except BrokerClientFailure Response) := do
-  sendRequestWithStreamResultCore endpoint req onStream (some timeoutMs)
+    (onStream : StreamMessage → IO Unit)
+    (server : ServerExpectation) : IO (Except BrokerClientFailure Response) := do
+  let deadline : RequestDeadline := {
+    timeoutMs
+    deadlineNanos := (← IO.monoNanosNow) + timeoutMs * 1000000
+  }
+  sendRequestWithStreamResultCore endpoint req onStream (.deadline deadline) server
 
-partial def sendRequestWithStream
+/-- Send one request with one absolute timeout and structured progress callbacks. -/
+partial def sendRequestWithCallbacksTimeoutResult
     (endpoint : Endpoint)
     (req : Request)
-    (onStream : StreamMessage → IO Unit) : IO Response := do
-  match ← sendRequestWithStreamResult endpoint req onStream with
-  | .ok response => pure response
-  | .error failure => throw failure.toIOError
-
-/-- Send one request with typed client failures and structured progress callbacks. -/
-partial def sendRequestWithCallbacksResult
-    (endpoint : Endpoint)
-    (req : Request)
-    (callbacks : StreamCallbacks := {}) : IO (Except BrokerClientFailure Response) := do
-  sendRequestWithStreamResult endpoint req fun stream => do
+    (timeoutMs : Nat)
+    (callbacks : StreamCallbacks := {})
+    (server : ServerExpectation) : IO (Except BrokerClientFailure Response) := do
+  sendRequestWithStreamTimeoutResult endpoint req timeoutMs (server := server) fun stream => do
     match stream with
     | .response .. =>
         pure ()
-    | .fileProgress clientRequestId? progress =>
-        callbacks.onFileProgress clientRequestId? progress
-    | .diagnostic clientRequestId? diagnostic =>
-        callbacks.onDiagnostic clientRequestId? diagnostic
+    | .fileProgress _ progress =>
+        callbacks.onFileProgress progress
+    | .diagnostic _ diagnostic =>
+        callbacks.onDiagnostic diagnostic
 
-partial def sendRequestWithCallbacks
+/-- Send one request whose owning client may interrupt the exact in-flight connection. -/
+partial def sendRequestWithCallbacksInterruptiblyResult
     (endpoint : Endpoint)
     (req : Request)
-    (callbacks : StreamCallbacks := {}) : IO Response := do
-  match ← sendRequestWithCallbacksResult endpoint req callbacks with
-  | .ok response => pure response
-  | .error failure => throw failure.toIOError
-def sendRequest (endpoint : Endpoint) (req : Request) : IO Response :=
-  sendRequestWithCallbacks endpoint req
-
-def readRequestFromStdin : IO Request := do
-  let input ← (← IO.getStdin).readToEnd
-  match Json.parse input with
-  | .error err => throw <| IO.userError s!"invalid request json: {err}"
-  | .ok json =>
-      match fromJson? json with
-      | .ok req => pure req
-      | .error err => throw <| IO.userError s!"invalid request payload: {err}"
-
-/-- Render a CLI response, optionally adding caller-visible correlation at the presentation edge. -/
-def responseOutputJson (resp : Response) (clientRequestId? : Option String := none) : Json :=
-  match clientRequestId? with
-  | some clientRequestId =>
-      (toJson resp).setObjVal! "clientRequestId" (toJson clientRequestId)
-  | none =>
-      toJson resp
-
-def printResponse (resp : Response) (clientRequestId? : Option String := none) : IO Unit := do
-  IO.println <| Beam.orderedJsonPretty (responseOutputJson resp clientRequestId?)
-
-def failOnError (resp : Response) : IO Unit := do
-  match resp with
-  | .successResult .. => pure ()
-  | .errorResult failure => throw <| IO.userError failure.error.message
+    (interrupted : IO Bool)
+    (callbacks : StreamCallbacks := {})
+    (server : ServerExpectation) : IO (Except BrokerClientFailure Response) := do
+  sendRequestWithStreamResultCore endpoint req (fun stream => do
+    match stream with
+    | .response .. =>
+        pure ()
+    | .fileProgress _ progress =>
+        callbacks.onFileProgress progress
+    | .diagnostic _ diagnostic =>
+        callbacks.onDiagnostic diagnostic) (.interruptible interrupted) server
 
 end Beam.Broker

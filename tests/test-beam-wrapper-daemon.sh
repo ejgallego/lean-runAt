@@ -50,12 +50,12 @@ start_slow_request() {
   local request_id="$3"
   local version
   version="$(beam_wrapper_update_version "$label SlowPoll" \
-    "$beam_script" --root "$root" lean-update tests/scenario/docs/SlowPoll.lean)"
+    "$beam_script" --root "$root" update tests/scenario/docs/SlowPoll.lean)"
   BEAM_PROGRESS=1 BEAM_REQUEST_ID="$request_id" "$beam_script" --root "$root" \
-    lean-run-at tests/scenario/docs/SlowPoll.lean "$version" 25 2 poll_sleep_cmd \
+    run-at tests/scenario/docs/SlowPoll.lean "$version" 25 2 poll_sleep_cmd \
     >"$root/$label.out" 2>"$root/$label.err" &
   active_request_pid="$!"
-  if ! wait_for_file_text "$root/$label.err" "running lean-run-at" \
+  if ! wait_for_file_text "$root/$label.err" "running run-at" \
       "$label request progress" 150 0.1; then
     cat "$root/$label.out" >&2
     cat "$root/$label.err" >&2
@@ -92,16 +92,54 @@ expect_slow_request_cancelled() {
 
 stop_hold_process() {
   local require_clean_exit="${1:-false}"
+  local registry_path="${2:-}"
+  local stderr_path="${3:-}"
   if [ -z "$hold_pid" ]; then
     return
   fi
   kill -INT "$hold_pid" > /dev/null 2>&1 || true
-  if ! wait_for_exit "$hold_pid" "serve owner" 200 0.05; then
+  if [ "$require_clean_exit" = "true" ] && [ -n "$registry_path" ]; then
+    local acknowledged="false"
+    local lifecycle=""
+    for _ in $(seq 1 100); do
+      if ! kill -0 "$hold_pid" > /dev/null 2>&1 || [ ! -e "$registry_path" ]; then
+        acknowledged="true"
+        break
+      fi
+      if lifecycle="$(read_json_field "$registry_path" lifecycle 2>/dev/null)" && \
+          [ "$lifecycle" = "draining" ]; then
+        acknowledged="true"
+        break
+      fi
+      sleep 0.05
+    done
+    if [ "$acknowledged" != "true" ]; then
+      echo "expected serve owner to acknowledge SIGINT by entering session teardown" >&2
+      if [ -n "$stderr_path" ] && [ -f "$stderr_path" ]; then
+        cat "$stderr_path" >&2
+      fi
+      if [ -f "$registry_path" ]; then
+        cat "$registry_path" >&2
+      fi
+      kill "$hold_pid" > /dev/null 2>&1 || true
+      wait "$hold_pid" 2>/dev/null || true
+      hold_pid=""
+      return 1
+    fi
+  fi
+  # Owner cleanup allows ten seconds for graceful drain and two seconds for forced reaping.
+  if ! wait_for_exit "$hold_pid" "serve owner" 300 0.05; then
     kill "$hold_pid" > /dev/null 2>&1 || true
     wait "$hold_pid" 2>/dev/null || true
     hold_pid=""
     if [ "$require_clean_exit" = "true" ]; then
-      echo "expected serve owner to exit promptly after SIGINT" >&2
+      echo "expected serve owner to complete its bounded cleanup after SIGINT" >&2
+      if [ -n "$stderr_path" ] && [ -f "$stderr_path" ]; then
+        cat "$stderr_path" >&2
+      fi
+      if [ -n "$registry_path" ] && [ -f "$registry_path" ]; then
+        cat "$registry_path" >&2
+      fi
       return 1
     fi
     return
@@ -270,6 +308,35 @@ fi
 rm -f -- "$tmp1/.beam"
 rmdir "$symlink_control_target"
 
+# A private session directory may already contain diagnostics from an earlier run. Refuse a
+# symlinked startup-log leaf without truncating its target or publishing a session descriptor.
+mkdir -p "$tmp1/.beam"
+chmod 700 "$tmp1/.beam"
+startup_log_target="$tmp2/startup-log-target"
+printf '%s\n' "startup-log-sentinel" > "$startup_log_target"
+ln -s "$startup_log_target" "$tmp1/.beam/beam-daemon-startup.log"
+if "$beam_script" --root "$tmp1" serve \
+    > "$tmp1/symlink-startup-log.out" 2> "$tmp1/symlink-startup-log.err"; then
+  echo "expected a symlinked daemon startup log to be rejected" >&2
+  exit 1
+fi
+if ! grep -Fq "startup log" "$tmp1/symlink-startup-log.err" || \
+    ! grep -Fq "symbolic links are not accepted" "$tmp1/symlink-startup-log.err"; then
+  echo "expected symlinked startup-log rejection to explain the no-follow boundary" >&2
+  cat "$tmp1/symlink-startup-log.err" >&2
+  exit 1
+fi
+if [ "$(cat "$startup_log_target")" != "startup-log-sentinel" ]; then
+  echo "symlinked startup-log rejection changed the target file" >&2
+  exit 1
+fi
+if [ -e "$tmp1/.beam/beam-daemon.json" ]; then
+  echo "symlinked startup-log rejection published a session descriptor" >&2
+  exit 1
+fi
+remove_tmp_tree_within "$tmp1/.beam" "$tmp1"
+rm -f -- "$startup_log_target"
+
 start_owner() {
   local root="$1"
   local label="$2"
@@ -343,55 +410,6 @@ assert_json_field_equals "running session status workspace" "$status_json" resul
 assert_json_field_equals \
   "running session status directory" "$status_json" result.sessionDir "$resolved_tmp1/.beam"
 
-machine_stats_json="$("$beam_script" --root "$tmp1" request-stream \
-  '{"op":"stats","clientRequestId":"machine-stats"}')"
-assert_json_field_equals "root-aware machine stream kind" "$machine_stats_json" kind response
-assert_json_field_equals \
-  "root-aware machine stream request id" "$machine_stats_json" clientRequestId machine-stats
-assert_json_field_equals \
-  "root-aware machine stream response" "$machine_stats_json" payload.ok true
-if "$beam_script" request-stream '{"op":"stats","clientRequestId":"missing-root"}' \
-    > "$tmp1/machine-missing-root.out" 2> "$tmp1/machine-missing-root.err"; then
-  echo "expected the machine stream interface to require --root" >&2
-  exit 1
-fi
-if ! grep -Fq "requires an explicit --root PATH" "$tmp1/machine-missing-root.err"; then
-  echo "expected missing-root machine diagnostics to explain the explicit selector" >&2
-  cat "$tmp1/machine-missing-root.err" >&2
-  exit 1
-fi
-if "$beam_script" --root "$tmp1" request-stream \
-    '{"op":"stats","clientRequestId":"caller-route","workspaceId":"beam-cli-project"}' \
-    > "$tmp1/machine-route.out" 2> "$tmp1/machine-route.err"; then
-  echo "expected machine requests to reject caller-selected session routing" >&2
-  exit 1
-fi
-if ! grep -Fq "session-owned fields: workspaceId" "$tmp1/machine-route.err"; then
-  echo "expected machine routing rejection to name the forbidden field" >&2
-  cat "$tmp1/machine-route.err" >&2
-  exit 1
-fi
-if "$beam_script" --root "$tmp1" request-stream \
-    '{"op":"shutdown","clientRequestId":"machine-shutdown"}' \
-    > "$tmp1/machine-shutdown.out" 2> "$tmp1/machine-shutdown.err"; then
-  echo "expected semantic machine requests not to expose process-wide shutdown" >&2
-  exit 1
-fi
-if ! grep -Fq "not available through a project session" "$tmp1/machine-shutdown.err"; then
-  echo "expected machine shutdown rejection to explain the project-session boundary" >&2
-  cat "$tmp1/machine-shutdown.err" >&2
-  exit 1
-fi
-machine_after_shutdown_json="$("$beam_script" --root "$tmp1" request-stream \
-  '{"op":"stats","clientRequestId":"machine-after-shutdown"}')"
-assert_json_field_equals \
-  "rejected machine shutdown leaves daemon live" "$machine_after_shutdown_json" payload.ok true
-if ! kill -0 "$daemon1_pid" 2>/dev/null || \
-    [ "$(read_json_field "$registry" daemonId)" != "$daemon1_id" ]; then
-  echo "expected rejected machine shutdown to preserve the selected generation" >&2
-  exit 1
-fi
-
 python3 - "$registry" "$tmp1" <<'PY'
 import json
 import os
@@ -400,7 +418,7 @@ import sys
 registry, root = sys.argv[1:]
 with open(registry, encoding="utf-8") as stream:
     entry = json.load(stream)
-if entry.get("schemaVersion") != 3:
+if entry.get("schemaVersion") != 4:
     raise SystemExit(f"unexpected session schema: {entry.get('schemaVersion')}")
 workspace = entry.get("workspace")
 if not isinstance(workspace, dict):
@@ -419,6 +437,11 @@ if [ "$control_dir_mode" != "700" ]; then
 fi
 if [ "$registry_mode" != "600" ]; then
   echo "expected the capability-bearing registry to use mode 600, got $registry_mode" >&2
+  exit 1
+fi
+startup_log_mode="$(file_mode "$tmp1/.beam/beam-daemon-startup.log")"
+if [ "$startup_log_mode" != "600" ]; then
+  echo "expected the daemon startup log to use mode 600, got $startup_log_mode" >&2
   exit 1
 fi
 
@@ -446,7 +469,7 @@ if "$beam_script" --root "$tmp2" --session-dir "$tmp1/.beam" \
   echo "expected recovery through a non-member root to fail closed" >&2
   exit 1
 fi
-if ! grep -Fq "is not a workspace in session $daemon1_id" \
+if ! grep -Fq "is not the workspace in session $daemon1_id" \
     "$tmp2/cross-root-recovery.err" || \
     ! grep -Fq "$tmp1" "$tmp2/cross-root-recovery.err"; then
   echo "expected cross-root recovery rejection to name the session and its recorded root" >&2
@@ -537,6 +560,9 @@ def receive_frame(sock):
     return json.loads(payload)
 
 with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+    hello = receive_frame(sock)
+    if hello.get("schemaVersion") != 1:
+        raise RuntimeError(f"unexpected daemon greeting: {hello}")
     request = json.dumps({
         "op": "shutdown",
         "daemonCapability": "not-the-owner-capability",
@@ -551,12 +577,14 @@ with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
         raise RuntimeError(f"unexpected unauthorized-shutdown response: {response}")
 
 with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+    receive_frame(sock)
     sock.sendall(b"16777217\n")
     response = receive_frame(sock)
     if "exceeds 16777216 bytes" not in response.get("payload", {}).get("error", {}).get("message", ""):
         raise RuntimeError(f"unexpected oversized-frame response: {response}")
 
 with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+    receive_frame(sock)
     time.sleep(5.5)
     response = receive_frame(sock)
     if "initial request timed out" not in response.get("payload", {}).get("error", {}).get("message", ""):
@@ -582,24 +610,6 @@ fi
 if ! grep -Fq "already owned" "$second_owner_err"; then
   echo "expected duplicate-owner failure to identify the active owner" >&2
   cat "$second_owner_err" >&2
-  exit 1
-fi
-
-collision_out="$tmp2/collision.out"
-collision_err="$tmp2/collision.err"
-if "$beam_script" --root "$tmp2" --port "$port1" serve > "$collision_out" 2> "$collision_err"; then
-  echo "expected an owner not to claim another project's endpoint" >&2
-  cat "$collision_out" >&2
-  exit 1
-fi
-if ! grep -Fq "invalid Beam daemon capability" "$collision_err"; then
-  echo "expected endpoint collision not to disclose an authenticated daemon's project" >&2
-  cat "$collision_err" >&2
-  exit 1
-fi
-if [ -e "$tmp2/.beam/beam-daemon.json" ]; then
-  echo "expected endpoint collision not to publish a registry" >&2
-  cat "$tmp2/.beam/beam-daemon.json" >&2
   exit 1
 fi
 
@@ -638,6 +648,24 @@ if ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; 
   echo "cross-root registry rejection must not stop the daemon or owner serving the other root" >&2
   exit 1
 fi
+stale_recovery_before="$(cat "$stale_registry")"
+if "$beam_script" --root "$tmp2" recover --generation "$daemon1_id" \
+    > "$tmp2/authenticated-mismatch-recovery.out" \
+    2> "$tmp2/authenticated-mismatch-recovery.err"; then
+  echo "expected recovery to refuse an authenticated endpoint serving another root" >&2
+  exit 1
+fi
+if ! grep -Fq "authenticated endpoint that serves another root" \
+    "$tmp2/authenticated-mismatch-recovery.err"; then
+  echo "expected authenticated endpoint mismatch recovery to explain the preserved authority" >&2
+  cat "$tmp2/authenticated-mismatch-recovery.err" >&2
+  exit 1
+fi
+if [ "$(cat "$stale_registry")" != "$stale_recovery_before" ] || \
+    ! kill -0 "$owner1_pid" 2>/dev/null || ! kill -0 "$daemon1_pid" 2>/dev/null; then
+  echo "authenticated endpoint mismatch recovery must preserve the descriptor and live session" >&2
+  exit 1
+fi
 rm -f -- "$stale_registry"
 
 LEGACY_REGISTRY="$stale_registry" LEGACY_ROOT="$tmp2" python3 - <<'PY'
@@ -662,17 +690,17 @@ legacy_owner_out="$tmp2/legacy-owner.out"
 legacy_owner_err="$tmp2/legacy-owner.err"
 if "$beam_script" --root "$tmp2" serve \
     > "$legacy_owner_out" 2> "$legacy_owner_err"; then
-  echo "expected owner startup to reject a schema-less legacy registry" >&2
+  echo "expected owner startup to reject a schema-less session descriptor" >&2
   cat "$legacy_owner_out" >&2
   exit 1
 fi
-if ! grep -Fq "legacy registry has no schemaVersion" "$legacy_owner_err"; then
-  echo "expected legacy-registry rejection to explain the unsupported schema" >&2
+if ! grep -Fq "session descriptor has no schemaVersion" "$legacy_owner_err"; then
+  echo "expected schema-less descriptor rejection to explain the missing schema" >&2
   cat "$legacy_owner_err" >&2
   exit 1
 fi
 if [ "$(cat "$stale_registry")" != "$legacy_before" ]; then
-  echo "legacy-registry rejection must preserve the recovery evidence" >&2
+  echo "schema-less descriptor rejection must preserve the recovery evidence" >&2
   cat "$stale_registry" >&2
   exit 1
 fi
@@ -690,98 +718,6 @@ if [ ! -f "$legacy_quarantine" ]; then
   printf '%s\n' "$legacy_recover_json" >&2
   exit 1
 fi
-
-busy_port_file="$(mktemp "$tmp2/non-beam-port-XXXXXX")"
-python3 - "$busy_port_file" <<'PY' &
-import socketserver
-import sys
-
-class Handler(socketserver.BaseRequestHandler):
-    def handle(self):
-        self.request.recv(4096)
-
-with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
-    with open(sys.argv[1], "w", encoding="utf-8") as stream:
-        print(server.server_address[1], file=stream, flush=True)
-    server.serve_forever()
-PY
-busy_pid="$!"
-if ! wait_for_nonempty_file "$busy_port_file" "non-Beam occupied port"; then
-  exit 1
-fi
-busy_port="$(cat "$busy_port_file")"
-busy_out="$tmp2/non-beam-port.out"
-busy_err="$tmp2/non-beam-port.err"
-if "$beam_script" --root "$tmp2" --port "$busy_port" serve > "$busy_out" 2> "$busy_err"; then
-  echo "expected owner startup to reject a port occupied by a non-Beam service" >&2
-  cat "$busy_out" >&2
-  exit 1
-fi
-if ! grep -Fq "already in use" "$busy_err"; then
-  echo "expected non-Beam port collision to report the occupied endpoint" >&2
-  cat "$busy_err" >&2
-  exit 1
-fi
-if [ -e "$tmp2/.beam/beam-daemon.json" ]; then
-  echo "expected non-Beam port collision not to publish a registry" >&2
-  cat "$tmp2/.beam/beam-daemon.json" >&2
-  exit 1
-fi
-kill "$busy_pid" > /dev/null 2>&1 || true
-wait "$busy_pid" 2>/dev/null || true
-busy_pid=""
-rm -f -- "$busy_port_file"
-busy_port_file=""
-
-busy_port_file="$(mktemp "$tmp2/silent-non-beam-port-XXXXXX")"
-python3 - "$busy_port_file" <<'PY' &
-import socketserver
-import sys
-import time
-
-class Handler(socketserver.BaseRequestHandler):
-    def handle(self):
-        time.sleep(10)
-
-with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
-    with open(sys.argv[1], "w", encoding="utf-8") as stream:
-        print(server.server_address[1], file=stream, flush=True)
-    server.serve_forever()
-PY
-busy_pid="$!"
-if ! wait_for_nonempty_file "$busy_port_file" "silent non-Beam occupied port"; then
-  exit 1
-fi
-busy_port="$(cat "$busy_port_file")"
-busy_out="$tmp2/silent-non-beam-port.out"
-busy_err="$tmp2/silent-non-beam-port.err"
-silent_probe_started="$SECONDS"
-if "$beam_script" --root "$tmp2" --port "$busy_port" serve > "$busy_out" 2> "$busy_err"; then
-  echo "expected owner startup to reject a silent non-Beam service" >&2
-  cat "$busy_out" >&2
-  exit 1
-fi
-silent_probe_elapsed="$((SECONDS - silent_probe_started))"
-if [ "$silent_probe_elapsed" -ge 8 ]; then
-  echo "expected silent non-Beam probe to honor its response deadline, took ${silent_probe_elapsed}s" >&2
-  cat "$busy_err" >&2
-  exit 1
-fi
-if ! grep -Fq "response timed out" "$busy_err"; then
-  echo "expected silent non-Beam collision to report the bounded probe timeout" >&2
-  cat "$busy_err" >&2
-  exit 1
-fi
-if [ -e "$tmp2/.beam/beam-daemon.json" ]; then
-  echo "expected silent non-Beam collision not to publish a registry" >&2
-  cat "$tmp2/.beam/beam-daemon.json" >&2
-  exit 1
-fi
-kill "$busy_pid" > /dev/null 2>&1 || true
-wait "$busy_pid" 2>/dev/null || true
-busy_pid=""
-rm -f -- "$busy_port_file"
-busy_port_file=""
 
 # Once stop commits its draining fence, a delivery failure must remain a successful, typed
 # transition result rather than obscuring the state change. This fixture answers the identity
@@ -824,6 +760,10 @@ with Server(("127.0.0.1", 0), socketserver.BaseRequestHandler) as server:
         print(server.server_address[1], file=stream, flush=True)
     conn, _ = server.get_request()
     with conn:
+        send_frame(conn, {
+            "schemaVersion": 1,
+            "identity": {"daemonId": daemon_id, "configHash": config_hash},
+        })
         request = receive_frame(conn)
         if request.get("op") != "stats":
             raise RuntimeError(f"expected stats probe, got {request!r}")
@@ -842,6 +782,10 @@ with Server(("127.0.0.1", 0), socketserver.BaseRequestHandler) as server:
         })
     conn, _ = server.get_request()
     with conn:
+        send_frame(conn, {
+            "schemaVersion": 1,
+            "identity": {"daemonId": daemon_id, "configHash": config_hash},
+        })
         receive_frame(conn)
         # Deliberately close without a response after the caller has committed `draining`.
 PY
@@ -856,7 +800,7 @@ import json
 import os
 
 entry = {
-    "schemaVersion": 3,
+    "schemaVersion": 4,
     "lifecycle": "live",
     "daemonId": "delivery-failure-generation",
     "capability": "delivery-failure-capability",
@@ -866,8 +810,11 @@ entry = {
     "workspace": {
         "workspaceId": "beam-cli-project",
         "root": os.environ["DELIVERY_ROOT"],
+        "rocqCmd": "coq-lsp",
+        "bundleId": "delivery-fixture",
     },
     "configHash": "delivery-failure-config",
+    "daemonBin": "/fixture/beam-daemon",
     "startedAt": "2026-08-30T00:00:00Z",
 }
 with open(os.environ["DELIVERY_REGISTRY"], "w", encoding="utf-8") as stream:
@@ -1230,8 +1177,8 @@ assert_json_field_equals \
   "owner-loss session status" "$owner_loss_status" result.state recoveryRequired
 assert_json_field_equals \
   "owner-loss session status generation" "$owner_loss_status" result.generation "$owner_loss_generation"
-if ! grep -Fq "recover --generation '$owner_loss_generation'" "$owner_loss_err"; then
-  echo "expected owner-loss diagnostics to name exact-generation recovery" >&2
+if ! grep -Fq "Beam daemon connect failed" "$owner_loss_err"; then
+  echo "expected the ordinary call itself to report the unavailable endpoint" >&2
   cat "$owner_loss_err" >&2
   exit 1
 fi
@@ -1359,7 +1306,7 @@ if [ ! -f "$explicit_control/beam-daemon-startup.log" ]; then
   echo "expected explicit control-directory startup diagnostics beside the descriptor" >&2
   exit 1
 fi
-stop_hold_process true
+stop_hold_process true "$explicit_registry" "$tmp2/explicit-control-owner.err"
 if [ -e "$explicit_registry" ]; then
   echo "expected normal explicit-control teardown to remove its descriptor" >&2
   exit 1

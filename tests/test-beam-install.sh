@@ -112,7 +112,7 @@ assert_runtime_layout() {
   assert_file "$runtime_root/custom-lean-toolchains"
   assert_file "$runtime_root/libexec/beam-cli"
   assert_file "$runtime_root/libexec/beam-daemon"
-  assert_file "$runtime_root/libexec/beam-client"
+  assert_not_exists "$runtime_root/libexec/beam-client"
   assert_file "$runtime_root/libexec/lean-beam-mcp"
   assert_file "$runtime_root/libexec/$beam_lsp_plugin_shared_lib"
   assert_not_exists "$runtime_root/.lake/build"
@@ -272,7 +272,7 @@ assert_bundle_layout() {
     assert_file "$workspace/Beam/LSP/Save.lean"
     assert_file "$workspace/Beam/LSP/DiagnosticsBarrier.lean"
     assert_file "$workspace/.lake/build/bin/beam-daemon"
-    assert_file "$workspace/.lake/build/bin/beam-client"
+    assert_not_exists "$workspace/.lake/build/bin/beam-client"
     assert_file "$workspace/.lake/build/lib/$beam_lsp_plugin_shared_lib"
   done
 }
@@ -307,7 +307,12 @@ assert_install_rejects_marker() {
   remove_tmp_file "$marker_err"
 }
 
-rsync -a --exclude='.git' --exclude='.beam/' ./ "$source_checkout"/
+rsync -a \
+  --exclude='.git/' \
+  --exclude='.lake/' \
+  --exclude='.beam/' \
+  --exclude='.codex-worktrees/' \
+  ./ "$source_checkout"/
 path_no_elan="$(path_without_elan)"
 if PATH="$path_no_elan" command -v elan >/dev/null 2>&1; then
   echo "failed to construct a PATH without elan for the negative install test" >&2
@@ -959,7 +964,7 @@ fi
 blocked_bundle_workspace="$(dirname "$blocked_bundle_metadata")/workspace"
 printf 'sentinel\n' >"$blocked_bundle_workspace/user-file.txt"
 remove_tmp_file "$blocked_bundle_workspace/.lean-beam-bundle-workspace"
-remove_tmp_file "$blocked_bundle_workspace/.lake/build/bin/beam-client"
+remove_tmp_file "$blocked_bundle_workspace/.lake/build/lib/$beam_lsp_plugin_shared_lib"
 blocked_bundle_err="$(mktemp "$tmp_root/bundle-unmarked-workspace-XXXXXX")"
 if BEAM_HOME="$installed_runtime_root" BEAM_INSTALL_BUNDLE_DIR="$blocked_bundle_root" \
   "$installed_runtime_root/libexec/beam-cli" bundle-install "$toolchain" > /dev/null 2>"$blocked_bundle_err"; then

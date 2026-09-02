@@ -4,6 +4,6 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Author: Emilio J. Gallego Arias
 -/
 
-import BeamTest.Broker.RequestStreamContractTest
+import BeamTest.Broker.StreamContractTest
 
-def main := BeamTest.Broker.RequestStreamContractTest.main
+def main := BeamTest.Broker.StreamContractTest.main

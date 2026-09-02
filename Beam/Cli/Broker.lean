@@ -14,17 +14,6 @@ namespace Beam.Cli
 
 open Beam.Broker
 
-private def inWorkspace (workspaceId : WorkspaceId) (req : Request) : Request :=
-  match req.op.workspaceScope with
-  | .none => req
-  | .optional | .required =>
-      if req.workspaceId?.isSome then req
-      else { req with workspaceId? := some workspaceId }
-
-/-- Address a wrapper request to the workspace selected from its session descriptor. -/
-def inSelectedDaemonWorkspace (client : ProjectDaemonClient) (req : Request) : Request :=
-  inWorkspace client.workspaceId req
-
 private def withBrokerErrorContext
     {α}
     (root : System.FilePath)
@@ -88,115 +77,48 @@ private def progressEnabled : IO Bool := do
   | none =>
       (← IO.getStderr).isTty
 
-private structure WrapperBrokerRequest where
-  request : Request
-  clientRequestId : String
-  visibleClientRequestId? : Option String
-
-private def mkWrapperClientRequestId (req : Request) : IO String := do
-  let pid ← IO.Process.getPID
-  let stamp ← IO.monoNanosNow
-  pure s!"beam-wrapper-{req.op.key}-{pid}-{stamp}"
-
-private def withWrapperClientRequestId (req : Request) : IO WrapperBrokerRequest := do
-  let req ← withEnvClientRequestId req
-  match req.clientRequestId? with
-  | some clientRequestId =>
-      pure {
-        request := req
-        clientRequestId
-        visibleClientRequestId? := some clientRequestId
-      }
-  | none =>
-      let clientRequestId ← mkWrapperClientRequestId req
-      pure {
-        request := { req with clientRequestId? := some clientRequestId }
-        clientRequestId
-        visibleClientRequestId? := none
-      }
-
 private def prepareWrapperBrokerRequest
     (client : ProjectDaemonClient)
-    (req : Request) : IO WrapperBrokerRequest := do
-  let wrapper ← withWrapperClientRequestId <| inSelectedDaemonWorkspace client req
-  pure { wrapper with request := client.authorize wrapper.request }
-
-def decodeCancelAcknowledged? (resp : Response) : Option Bool := do
-  let result ← resp.result?
-  result.getObjValAs? Bool "cancelled" |>.toOption
-
-private def sendBrokerCancellation
-    (client : ProjectDaemonClient)
-    (clientRequestId : String) : IO (Option Bool) := do
-  let cancelReq : Request := {
-    op := .cancel
-    workspaceId? := some client.workspaceId
-    cancelRequestId? := some clientRequestId
-  }
-  try
-    let req ← withEnvClientRequestId cancelReq
-    let resp ← sendRequest client.endpoint (client.authorize req)
-    pure <| decodeCancelAcknowledged? resp
-  catch _ =>
-    pure none
-
-private def awaitBrokerResponse
-    (task : Task (Except IO.Error (Except BrokerClientFailure Response)))
-    (client : ProjectDaemonClient)
-    (clientRequestId : String)
-    (visibleClientRequestId? : Option String)
-    (progressSpec? : Option BrokerWaitSpec)
-    (interruptWatcher : InterruptWatcher) : IO (Except BrokerClientFailure Response) := do
-  let mut interruptObserved := false
-  let mut cancelAcknowledged := false
-  let emit := fun msg => IO.eprintln <| annotateRunatMessage visibleClientRequestId? msg
-  if let some spec := progressSpec? then
-    emit spec.startMsg
-  let mut waitedMs := 0
-  while !(← IO.hasFinished task) do
-    let signalInterrupted ← interruptWatcher.interrupted
-    if signalInterrupted || (← IO.checkCanceled) then
-      if !interruptObserved then
-        interruptObserved := true
-        emit "beam: requesting broker cancellation"
-      if !cancelAcknowledged then
-        -- SIGINT can arrive after the wrapper starts the request task but before the broker
-        -- has registered the client request id as active. Retry until the broker acknowledges
-        -- cancellation or the original request finishes.
-        match ← sendBrokerCancellation client clientRequestId with
-        | some true => cancelAcknowledged := true
-        | some false | none => pure ()
-    IO.sleep 500
-    if !(← IO.hasFinished task) then
-      waitedMs := waitedMs + 500
-      if waitedMs % 1000 == 0 then
-        if let some spec := progressSpec? then
-          emit <| spec.stillWaitingMsg (waitedMs / 1000)
-  let result ←
-    match (← IO.wait task) with
-    | .ok result => pure result
-    | .error err => throw err
-  match result with
-  | .ok response =>
-      if let some spec := progressSpec? then
-        emit <| spec.completeMsg response
-      pure <| .ok response
-  | .error failure =>
-      pure <| .error failure
+    (req : Request) : IO Request := do
+  withEnvClientRequestId <| client.sealRequest req
 
 private def awaitBrokerResponseWithInterrupts
-    (client : ProjectDaemonClient)
-    (clientRequestId : String)
+    (endpoint : Transport.Endpoint)
+    (expectedIdentity : DaemonIdentity)
+    (req : Request)
     (visibleClientRequestId? : Option String)
     (progressSpec? : Option BrokerWaitSpec)
-    (action : IO (Except BrokerClientFailure Response)) :
+    (callbacks : StreamCallbacks := {}) :
     IO (Except BrokerClientFailure Response) := do
-  -- Wrapper calls synthesize a broker clientRequestId when the user did not provide one. That id
-  -- gives SIGINT cancellation a stable broker key but is kept out of the CLI's public output.
   withInterruptWatcher fun interruptWatcher => do
-    let task ← IO.asTask (prio := Task.Priority.dedicated) action
-    awaitBrokerResponse task client clientRequestId visibleClientRequestId? progressSpec?
-      interruptWatcher
+    let emit := fun msg => IO.eprintln <| annotateRequestMessage visibleClientRequestId? msg
+    if let some spec := progressSpec? then
+      emit spec.startMsg
+    let startedNanos ← IO.monoNanosNow
+    let lastReportedSeconds ← IO.mkRef 0
+    let interruptReported ← IO.mkRef false
+    let interrupted : IO Bool := do
+      let interrupted ← interruptWatcher.interrupted
+      let interrupted := interrupted || (← IO.checkCanceled)
+      if interrupted then
+        unless ← interruptReported.get do
+          interruptReported.set true
+          emit "beam: interrupting broker request"
+      else if let some spec := progressSpec? then
+        let seconds := ((← IO.monoNanosNow) - startedNanos) / 1000000000
+        let previous ← lastReportedSeconds.get
+        if seconds > previous then
+          lastReportedSeconds.set seconds
+          emit <| spec.stillWaitingMsg seconds
+      pure interrupted
+    let result ← sendRequestWithCallbacksInterruptiblyResult endpoint req interrupted callbacks
+      (.wrapper expectedIdentity)
+    match result with
+    | .ok response =>
+        if let some spec := progressSpec? then
+          emit <| spec.completeMsg response
+        pure <| .ok response
+    | .error failure => pure <| .error failure
 
 private structure WrapperBrokerResponse where
   response : Response
@@ -207,12 +129,11 @@ private def requestBrokerResponse
     (client : ProjectDaemonClient)
     (req : Request) : IO WrapperBrokerResponse := do
   let wrapperReq ← prepareWrapperBrokerRequest client req
-  let req := wrapperReq.request
+  let visibleClientRequestId? := wrapperReq.clientRequestId?
   let response ← withBrokerErrorContext root client do
-    awaitBrokerResponseWithInterrupts client wrapperReq.clientRequestId
-      wrapperReq.visibleClientRequestId? none <|
-      sendRequestWithCallbacksResult client.endpoint req
-  pure { response, visibleClientRequestId? := wrapperReq.visibleClientRequestId? }
+    awaitBrokerResponseWithInterrupts client.endpoint client.identity wrapperReq
+      visibleClientRequestId? none
+  pure { response, visibleClientRequestId? }
 
 /-- Send one wrapper request without printing or interpreting its response. -/
 def requestBroker
@@ -265,7 +186,7 @@ private def syncLikeWaitSpec
     failureBoundary := "before a complete diagnostics barrier was available"
   }
 
-def syncWaitSpec (path : String) (action : String := "lean-sync") : BrokerWaitSpec :=
+def syncWaitSpec (path : String) (action : String := "sync") : BrokerWaitSpec :=
   syncLikeWaitSpec
     (action := action)
     (path := path)
@@ -274,7 +195,7 @@ def syncWaitSpec (path : String) (action : String := "lean-sync") : BrokerWaitSp
     (stillWaitingLabel := "syncing")
     (completeLabel := "sync")
 
-def refreshWaitSpec (path : String) (action : String := "lean-refresh") : BrokerWaitSpec :=
+def refreshWaitSpec (path : String) (action : String := "refresh") : BrokerWaitSpec :=
   syncLikeWaitSpec
     (action := action)
     (path := path)
@@ -313,31 +234,31 @@ private def leanPositionNavigationWaitSpec
     failureBoundary := s!"before {noun} data was available"
   }
 
-def leanHoverWaitSpec (path : String) (line character : Nat) (action : String := "lean-hover") :
+def leanHoverWaitSpec (path : String) (line character : Nat) (action : String := "hover") :
     BrokerWaitSpec :=
   leanPositionNavigationWaitSpec path line character action "hover" "hover"
 
 def leanDefinitionWaitSpec
     (path : String)
     (line character : Nat)
-    (action : String := "lean-definition") : BrokerWaitSpec :=
+    (action : String := "definition") : BrokerWaitSpec :=
   leanPositionNavigationWaitSpec path line character action "definition" "definition"
 
 def leanSignatureHelpWaitSpec
     (path : String)
     (line character : Nat)
-    (action : String := "lean-signature-help") : BrokerWaitSpec :=
+    (action : String := "signature-help") : BrokerWaitSpec :=
   leanPositionNavigationWaitSpec path line character action "signature-help" "signature help"
 
 def leanReferencesWaitSpec
     (path : String)
     (line character : Nat)
-    (action : String := "lean-references") : BrokerWaitSpec :=
+    (action : String := "references") : BrokerWaitSpec :=
   leanPositionNavigationWaitSpec path line character action "references" "reference"
 
 def leanDocumentSymbolsWaitSpec
     (path : String)
-    (action : String := "lean-document-symbols") : BrokerWaitSpec :=
+    (action : String := "document-symbols") : BrokerWaitSpec :=
   {
     action := action
     startMsg := s!"beam: querying {action} for {path} and waiting for a ready Lean snapshot"
@@ -351,7 +272,7 @@ def leanDocumentSymbolsWaitSpec
 
 def leanWorkspaceSymbolsWaitSpec
     (query : String)
-    (action : String := "lean-workspace-symbols") : BrokerWaitSpec :=
+    (action : String := "workspace-symbols") : BrokerWaitSpec :=
   {
     action := action
     startMsg := s!"beam: querying {action} for {query}"
@@ -371,7 +292,7 @@ def leanGoalsWaitSpec
   let action :=
     action?.getD <|
       match mode with
-      | .before | .after => "lean-goals"
+      | .before | .after => "goals"
   {
     action := action
     startMsg := s!"beam: running {action} on {pos} and waiting for a ready Lean snapshot"
@@ -386,7 +307,7 @@ def leanGoalsWaitSpec
 def leanTodoWaitSpec
     (path : String)
     (startLine startCharacter endLine endCharacter : Nat)
-    (action : String := "lean-todo") : BrokerWaitSpec :=
+    (action : String := "todo") : BrokerWaitSpec :=
   let pos := s!"{path}:{startLine}:{startCharacter}-{endLine}:{endCharacter}"
   {
     action := action
@@ -403,7 +324,7 @@ def leanRunWithWaitSpec
     (path : String)
     (linear : Bool := false)
     (action? : Option String := none) : BrokerWaitSpec :=
-  let action := action?.getD <| if linear then "lean-run-with-linear" else "lean-run-with"
+  let action := action?.getD <| if linear then "run-with-linear" else "run-with"
   {
     action := action
     startMsg := s!"beam: running {action} on {path} and waiting for a ready Lean snapshot"
@@ -420,7 +341,7 @@ def leanSaveWaitSpec
     (path : String)
     (closeAfter : Bool := false)
     (action? : Option String := none) : BrokerWaitSpec :=
-  let action := action?.getD <| if closeAfter then "lean-close-save" else "lean-save"
+  let action := action?.getD <| if closeAfter then "close-save" else "save"
   let verb := if closeAfter then "closing and saving" else "saving"
   {
     action := action
@@ -437,34 +358,33 @@ def callBrokerWithProgress
     (req : Request)
     (spec : BrokerWaitSpec) : IO Unit := do
   let wrapperReq ← prepareWrapperBrokerRequest client req
-  let req := wrapperReq.request
-  let visibleClientRequestId? := wrapperReq.visibleClientRequestId?
+  let req := wrapperReq
+  let visibleClientRequestId? := req.clientRequestId?
   let showProgress ← progressEnabled
   let callbacks : StreamCallbacks := {
-    onFileProgress := fun _ progress => do
+    onFileProgress := fun progress => do
       if showProgress then
-        IO.eprintln <| annotateRunatMessage visibleClientRequestId? (spec.progressMsg progress)
-    onDiagnostic := fun _ diagnostic =>
-      IO.eprintln <| annotateRunatMessage visibleClientRequestId? (formatStreamDiagnostic diagnostic)
+        IO.eprintln <| annotateRequestMessage visibleClientRequestId? (spec.progressMsg progress)
+    onDiagnostic := fun diagnostic =>
+      IO.eprintln <| annotateRequestMessage visibleClientRequestId? (formatStreamDiagnostic diagnostic)
   }
   let progressSpec? := if showProgress then some spec else none
   let resp ← withBrokerErrorContext root client do
-    awaitBrokerResponseWithInterrupts client wrapperReq.clientRequestId
-      visibleClientRequestId? progressSpec? <|
-      sendRequestWithCallbacksResult client.endpoint req callbacks
+    awaitBrokerResponseWithInterrupts client.endpoint client.identity req
+      visibleClientRequestId? progressSpec? callbacks
   match responseErrorSummary? spec.action spec.failureBoundary resp with
   | some note =>
-      IO.eprintln <| annotateRunatMessage visibleClientRequestId? note
+      IO.eprintln <| annotateRequestMessage visibleClientRequestId? note
   | none =>
       pure ()
   match responseRecoveryHint? resp with
   | some note =>
-      IO.eprintln <| annotateRunatMessage visibleClientRequestId? note
+      IO.eprintln <| annotateRequestMessage visibleClientRequestId? note
   | none =>
       pure ()
   match spec.responseNote? resp with
   | some note =>
-      IO.eprintln <| annotateRunatMessage visibleClientRequestId? note
+      IO.eprintln <| annotateRequestMessage visibleClientRequestId? note
   | none =>
       pure ()
   maybeEmitLiteralBackslashNewlineHint visibleClientRequestId? req resp

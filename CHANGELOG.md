@@ -36,6 +36,16 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 - Local builds now write to Lake's toolchain-scoped artifact cache and restore cached outputs into
   `.lake/build`, preserving the paths used by Beam's wrapper, installer, and tests. CI restores that
   cache for Lean jobs and lets one job per OS publish each commit's updated cache.
+- The pre-stable `lean-beam request-stream` and raw `beam-client` executable have been removed.
+  Automated wrapper callers use typed commands, check exit status, and parse final stdout JSON when
+  present; selector, setup, or transport failures can report human stderr without JSON. Clients
+  that need structured live events and failures use MCP. The wrapper-to-daemon stream remains an
+  internal, library-tested transport. The `lean-beam` shell now only locates its matching runtime;
+  `beam-cli` directly implements the one public command vocabulary instead of accepting a second
+  `lean-*` command language. Ordinary broker calls select an initialized workspace without
+  redundantly repeating its root, and the unused `reset-stats` operation has been removed.
+  Session descriptor schema 4 no longer records or hashes a client executable or a caller-selected
+  port; Beam selects the internal loopback endpoint.
 - Wrapper lifecycle commands now use the explicit `serve`, `status`, and `stop` vocabulary;
   `stop` and `recover` require `--root`, alternate selectors use `--session-dir`, and wrapper
   descriptors contain exactly one frozen workspace. Successful lifecycle commands use typed
@@ -48,7 +58,7 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
   reports `changed: false`
   ([#243](https://github.com/leanprover/lean-beam/pull/243), @ejgallego).
 - Wrapper daemons now have explicit session ownership: only the foreground owner command starts a
-  generation, ordinary wrapper commands attach to it, `--port` is owner-only, and holder exit
+  generation, ordinary wrapper commands attach to it, and holder exit
   cancels admitted requests before closing the daemon through an inherited pipe without heartbeat
   leases or time-based retirement
   ([#241](https://github.com/leanprover/lean-beam/pull/241), @ejgallego).
@@ -103,7 +113,7 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 - Feedback input now rejects unknown JSON fields so misspelled privacy controls cannot silently
   produce a non-confidential report
   ([#220](https://github.com/leanprover/lean-beam/pull/220), @ejgallego).
-- `lean-save` and `lean-close-save` now reuse the accepted server snapshot for structured Lake
+- `save` and `close-save` now reuse the accepted server snapshot for structured Lake
   `leanOptions`, dynamic libraries, and plugins. Modules with batch-only `moreLeanArgs` still fail
   with `saveUnsupportedSetup`, now with guidance to use `leanOptions` or `lake build`. Running Lean
   sessions must be restarted after Lake workspace configuration changes before the next operation
@@ -116,14 +126,14 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 - Install and prune control-file reads now reject non-regular or symlinked paths, and a failed lock
   owner-PID write removes the lock directory acquired by that process.
 - `lean-beam serve` now exits cleanly and promptly after `SIGINT`.
-- `lean-save` and `lean-close-save` now stage and commit complete artifact sets, preserving prior
+- `save` and `close-save` now stage and commit complete artifact sets, preserving prior
   outputs on reported failure or cancellation and preventing same-worker saves from mixing files
   ([#217](https://github.com/leanprover/lean-beam/pull/217), @ejgallego).
-- `lean-save` and `lean-close-save` now invalidate prior Lake trace metadata before publishing
+- `save` and `close-save` now invalidate prior Lake trace metadata before publishing
   artifacts and replace the new trace atomically, preventing prior metadata from describing newly
   published artifacts after a trace-write failure
   ([#218](https://github.com/leanprover/lean-beam/pull/218), @ejgallego).
-- Module-mode `lean-save` and `lean-close-save` now checkpoint the complete Lake artifact family,
+- Module-mode `save` and `close-save` now checkpoint the complete Lake artifact family,
   preventing replay from reusing stale `.olean.server`, `.olean.private`, or `.ir` files
   ([#214](https://github.com/leanprover/lean-beam/pull/214), @ejgallego).
 - Save-readiness decoding now rejects incomplete response envelopes instead of inferring that a

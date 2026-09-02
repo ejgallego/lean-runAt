@@ -22,9 +22,6 @@ abbrev nullBrokerStdio : IO.Process.StdioConfig where
 def daemonExe : IO System.FilePath := do
   pure <| (← IO.appPath).parent.getD (System.FilePath.mk ".") / "beam-daemon"
 
-def clientExe : IO System.FilePath := do
-  pure <| (← IO.appPath).parent.getD (System.FilePath.mk ".") / "beam-client"
-
 private def testPortBase : Nat :=
   49152
 
@@ -215,14 +212,14 @@ private def statsRoot? (resp : Beam.Broker.Response) : Option String := do
 
 private def brokerRoot? (endpoint : Beam.Broker.Endpoint) : IO (Option String) := do
   try
-    let resp ← Beam.Broker.sendRequest endpoint {
+    let result ← Beam.Broker.sendRequestWithCallbacksTimeoutResult endpoint {
       op := .stats
       workspaceId? := some testWorkspaceId
-    }
-    if resp.ok then
-      pure (statsRoot? resp)
-    else
-      pure none
+    } testBrokerRequestTimeoutMs (server := .standalone)
+    match result with
+    | .ok resp =>
+        if resp.ok then pure (statsRoot? resp) else pure none
+    | .error _ => pure none
   catch _ =>
     pure none
 

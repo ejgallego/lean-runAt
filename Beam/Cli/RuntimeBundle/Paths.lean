@@ -12,47 +12,24 @@ open Lean
 
 namespace Beam.Cli
 
-structure BundlePaths where
+structure LeanBundlePaths where
   daemon : System.FilePath
-  client : System.FilePath
   plugin : System.FilePath
   deriving Repr
 
-def defaultBundlePaths (home : System.FilePath) : IO BundlePaths := do
+def defaultDaemonPath (home : System.FilePath) : IO System.FilePath := do
   let installedDaemon := home / "libexec" / "beam-daemon"
-  let installedClient := home / "libexec" / "beam-client"
-  let installedPlugin := Beam.LSP.Lib.pluginSharedLibPath (home / "libexec")
-  let checkoutDaemon := home / ".lake" / "build" / "bin" / "beam-daemon"
-  let checkoutClient := home / ".lake" / "build" / "bin" / "beam-client"
-  let checkoutPlugin := Beam.LSP.Lib.pluginSharedLibPath (home / ".lake" / "build" / "lib")
-  let installedReady :=
-    (← installedDaemon.pathExists) &&
-    (← installedClient.pathExists) &&
-    (← installedPlugin.pathExists)
-  pure <|
-    if installedReady then
-      {
-        daemon := installedDaemon
-        client := installedClient
-        plugin := installedPlugin
-      }
-    else
-      {
-        daemon := checkoutDaemon
-        client := checkoutClient
-        plugin := checkoutPlugin
-      }
+  if ← installedDaemon.pathExists then
+    pure installedDaemon
+  else
+    pure <| home / ".lake" / "build" / "bin" / "beam-daemon"
 
 def ensurePathExists (kind : String) (path : System.FilePath) : IO Unit := do
   unless ← path.pathExists do
     throw <| IO.userError s!"missing {kind} at {path}"
 
-def ensureBundleExists (paths : BundlePaths) : IO Unit := do
-  ensurePathExists "CLI client" paths.client
+def ensureLeanBundleExists (paths : LeanBundlePaths) : IO Unit := do
   ensurePathExists "Beam daemon" paths.daemon
-
-def ensureLeanBundleExists (paths : BundlePaths) : IO Unit := do
-  ensureBundleExists paths
   ensurePathExists "Beam LSP plugin" paths.plugin
 
 def beamStateDirName : String :=
@@ -125,26 +102,6 @@ def compatibleLeanReleaseLinesPath (home : System.FilePath) : System.FilePath :=
 def customLeanToolchainsPath (home : System.FilePath) : System.FilePath :=
   home / "custom-lean-toolchains"
 
-def boolText (value : Bool) : String :=
-  if value then "true" else "false"
-
-private def hexDigit (n : Nat) : Char :=
-  if n < 10 then
-    Char.ofNat (48 + n)
-  else
-    Char.ofNat (87 + n)
-
-private def hexByte (byte : UInt8) : String :=
-  let n := byte.toNat
-  String.singleton (hexDigit (n / 16)) ++ String.singleton (hexDigit (n % 16))
-
-def utf8Hex (bytes : ByteArray) : String :=
-  String.intercalate " " <| Id.run do
-    let mut parts : Array String := #[]
-    for byte in bytes do
-      parts := parts.push (hexByte byte)
-    return parts.toList
-
 def bundleWorkspaceOwnerMarkerName : String :=
   ".lean-beam-bundle-workspace"
 
@@ -154,10 +111,9 @@ def bundleWorkspaceFor (bundleDir : System.FilePath) : System.FilePath :=
 def bundleWorkspaceOwnerMarker (workspace : System.FilePath) : System.FilePath :=
   workspace / bundleWorkspaceOwnerMarkerName
 
-def bundlePathsFor (workspace : System.FilePath) : BundlePaths :=
+def leanBundlePathsFor (workspace : System.FilePath) : LeanBundlePaths :=
   {
     daemon := workspace / ".lake" / "build" / "bin" / "beam-daemon"
-    client := workspace / ".lake" / "build" / "bin" / "beam-client"
     plugin := Beam.LSP.Lib.pluginSharedLibPath (workspace / ".lake" / "build" / "lib")
   }
 

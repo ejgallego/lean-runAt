@@ -104,8 +104,8 @@ Additional Beam lanes:
 
 Current Beam coverage includes:
 
-- fast Beam daemon smoke, request-stream, save-stream, startup-handshake with failed provisional
-  backend cleanup, tracked-diagnostic dedup,
+- fast Beam daemon smoke, broker stream ordering, save-stream, wrapper-readiness codec checks,
+  backend-startup failure with provisional backend cleanup, tracked-diagnostic dedup,
   exact broker request-handle lifetime, identity-matched daemon-generation probes, terminal shutdown
   response delivery, shutdown after the requesting TCP client resets its connection, protocol tests,
   and validated-toolchain/release-line CI policy consistency through
@@ -113,13 +113,13 @@ Current Beam coverage includes:
 - wrapper coverage through [tests/test-beam-wrapper.sh](../tests/test-beam-wrapper.sh), which reports
   focused probe, runtime, sync/save, handle, and diagnostic slices independently
 - focused daemon lifecycle coverage in [tests/test-beam-wrapper-daemon.sh](../tests/test-beam-wrapper-daemon.sh),
-  including the no-implicit-start contract, duplicate-owner rejection, Beam and non-Beam endpoint
-  collision safety without cross-project disclosure, authenticated generation probes, mode-`0700`
-  session-directory and mode-`0600` descriptor publication, rejection of symlinked or non-private
+  including the no-implicit-start contract, duplicate-owner rejection, authenticated generation
+  probes, interruption of a request whose authenticated endpoint stops reading during send,
+  mode-`0700` session-directory and mode-`0600` descriptor publication, rejection of symlinked or non-private
   existing session paths without mutating their targets, stable missing-path canonicalization,
   wrong-root status classification and recovery rejection with
   byte-for-byte descriptor preservation, unauthorized-shutdown rejection without listener teardown, oversized-frame
-  and first-message limits, a bounded identity probe against a silent non-Beam listener, cross-root
+  and first-message limits, cross-root
   unsafe-registry preservation that does not affect the daemon
   serving the other root, configuration-drift preservation of the owner and active request,
   explicit stop, committed-state reporting after shutdown delivery failure, cancellation of requests
@@ -131,8 +131,7 @@ Current Beam coverage includes:
   death through inherited-pipe EOF,
   read-only crash-fence lookup, four-state status projection, ambiguity-safe human root inference,
   explicit-root lifecycle commands, exact-generation non-signalling recovery, exact session-directory
-  selection, root-aware machine request routing, and self-termination after the project worktree
-  disappears without recreating it
+  selection, and self-termination after the project worktree disappears without recreating it
 - Linux-only PID-isolated sandbox wrapper coverage in [tests/test-beam-wrapper-sandbox.sh](../tests/test-beam-wrapper-sandbox.sh),
   including cross-namespace endpoint attachment, duplicate-owner rejection, a paused owner without
   time-based expiry, explicit stop, killed-owner EOF cleanup, fail-closed preservation of an
@@ -204,7 +203,7 @@ a failed run.
 [tests/test-beam-save-olean.sh](../tests/test-beam-save-olean.sh) includes a save-race case
 that injects a slow Lean command into `SaveSmoke/B.lean`. The command writes
 `LEAN_BEAM_SAVE_RACE_SENTINEL` when elaboration reaches the intended race window, then sleeps long
-enough for the shell test to edit the source file while `lean-close-save` is still in flight.
+enough for the shell test to edit the source file while `close-save` is still in flight.
 
 If the sentinel is not written before `BEAM_SAVE_RACE_SENTINEL_TIMEOUT` (default 60 seconds), the
 test now dumps the active save PID, runner CPU/platform context, Beam/Lean process snapshot, current
@@ -297,6 +296,9 @@ build the local fixture under CI contention. Keep `--timeout 30` for local repro
 are specifically checking the CI budget. The focused daemon lifecycle fixture explicitly prebuilds
 its toolchain into one owned shared cache before timing daemon startup, so cold bundle compilation
 is not misdiagnosed as a daemon-readiness timeout.
+The focused CLI daemon test also checks that a failed stderr evidence sink does not stop pipe
+draining, that sink failure observation is synchronized, and that a pipe held open past leader exit
+produces a bounded `pipeStillOpen` outcome rather than an unbounded task join.
 
 The focused harness also accepts `no-progress-sync` to isolate whether a timeout depends on MCP
 progress notifications or the underlying `lean_sync` / `waitForDiagnostics` path.

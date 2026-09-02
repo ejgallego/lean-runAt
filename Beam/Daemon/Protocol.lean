@@ -16,7 +16,7 @@ namespace Beam.Daemon
 open Beam.Broker
 
 def registrySchemaVersion : Nat :=
-  3
+  4
 
 inductive RegistryLifecycle where
   | live
@@ -34,6 +34,17 @@ instance : FromJson RegistryLifecycle where
     | .str "draining" => .ok .draining
     | json => .error s!"expected registry lifecycle 'live' or 'draining', got {json.compress}"
 
+local instance : ToJson UInt16 where
+  toJson port := toJson port.toNat
+
+local instance : FromJson UInt16 where
+  fromJson? json := do
+    let port ← fromJson? (α := Nat) json
+    if port < UInt16.size then
+      pure port.toUInt16
+    else
+      throw s!"expected TCP port below {UInt16.size}, got {port}"
+
 /-- One statically configured workspace owned by a CLI session. -/
 structure WorkspaceBinding where
   workspaceId : WorkspaceId
@@ -42,7 +53,7 @@ structure WorkspaceBinding where
   plugin? : Option String := none
   rocqCmd? : Option String := none
   toolchain? : Option String := none
-  bundleId? : Option String := none
+  bundleId : String
   deriving FromJson, ToJson
 
 /--
@@ -58,14 +69,12 @@ structure SessionDescriptor where
   capability : String
   pid : Nat
   ownerPid : Nat
-  port? : Option Nat := none
+  port : UInt16
   workspace : WorkspaceBinding
   /-- Hash of the complete frozen session configuration. -/
   configHash : String
-  clientBin? : Option String := none
-  daemonBin? : Option String := none
+  daemonBin : String
   startedAt : String
-  requestedPort? : Option Nat := none
   deriving FromJson, ToJson
 
 def SessionDescriptor.identity (entry : SessionDescriptor) : DaemonIdentity := {
@@ -76,6 +85,12 @@ def SessionDescriptor.identity (entry : SessionDescriptor) : DaemonIdentity := {
 def SessionDescriptor.redactedJson (entry : SessionDescriptor) : Json :=
   (toJson entry).setObjVal! "capability" (toJson "<redacted>")
 
+/-- Whether this single-workspace descriptor belongs to a canonical or equivalent project root. -/
+def SessionDescriptor.matchesRoot
+    (entry : SessionDescriptor)
+    (root : System.FilePath) : IO Bool := do
+  Beam.sameFilePath (System.FilePath.mk entry.workspace.root) root
+
 structure DesiredConfig where
   root : System.FilePath
   leanCmd? : Option String := none
@@ -83,135 +98,90 @@ structure DesiredConfig where
   rocqCmd? : Option String := none
   toolchain? : Option String := none
   daemonBin : System.FilePath
-  clientBin : System.FilePath
   bundleId : String
   configHash : String
   deriving Repr
 
-def natToPort? (n : Nat) : Option UInt16 :=
-  if n < UInt16.size then some n.toUInt16 else none
-
-def registryEndpoint? (entry : SessionDescriptor) : Option Transport.Endpoint := do
-  (natToPort? =<< entry.port?).map Transport.Endpoint.tcp
-
-def endpointFromEntry (entry : SessionDescriptor) : IO Transport.Endpoint := do
-  match registryEndpoint? entry with
-  | some endpoint => pure endpoint
-  | none =>
-      let message :=
-        s!"invalid Beam daemon transport data for session {entry.daemonId} ({entry.workspace.root})"
-      throw (IO.userError message)
+def registryEndpoint (entry : SessionDescriptor) : Transport.Endpoint :=
+  .tcp entry.port
 
 def endpointSummary (endpoint : Transport.Endpoint) : String :=
   Transport.endpointDescription endpoint
 
 private structure DaemonProbe where
   root : String
-  identity? : Option DaemonIdentity
+  identity : DaemonIdentity
 
-private def daemonProbeResponseTimeoutMs : Nat :=
+private def daemonProbeRequestTimeoutMs : Nat :=
   2000
 
-private def daemonProbeOfResponse (resp : Response) : Except BrokerClientFailure DaemonProbe := do
-  unless resp.ok do
-    throw <| .invalidResponse s!"Beam daemon stats probe failed: {(toJson resp).compress}"
-  let some result := resp.result?
-    | throw <| .invalidResponse "Beam daemon stats probe omitted its result"
-  let root ←
-    match result.getObjValAs? String "root" with
-    | .ok root => pure root
-    | .error err => throw <| .invalidResponse s!"invalid Beam daemon stats root: {err}"
-  let identity? ←
-    match result.getObjVal? "daemonIdentity" with
-    | .error _ => pure none
-    | .ok identityJson =>
-        match fromJson? identityJson with
-        | .ok identity => pure (some identity)
-        | .error err =>
-            throw <| .invalidResponse s!"invalid Beam daemon identity: {err}"
-  pure { root, identity? }
+private def daemonProbeOfResponse (resp : Response) : Except BrokerClientFailure DaemonProbe :=
+  match resp with
+  | .errorResult _ =>
+      .error <| .invalidResponse s!"Beam daemon stats probe failed: {(toJson resp).compress}"
+  | .successResult result _ => do
+    let root ←
+      match result.getObjValAs? String "root" with
+      | .ok root => pure root
+      | .error err => throw <| .invalidResponse s!"invalid Beam daemon stats root: {err}"
+    let identity ←
+      match result.getObjValAs? DaemonIdentity "daemonIdentity" with
+      | .ok identity => pure identity
+      | .error err =>
+          throw <| .invalidResponse s!"invalid Beam daemon identity: {err}"
+    pure { root, identity }
 
 private def daemonProbe
     (endpoint : Transport.Endpoint)
     (workspaceId : WorkspaceId)
+    (server : ServerExpectation)
     (capability? : Option String := none) : IO (Except BrokerClientFailure DaemonProbe) := do
   match ← sendRequestWithStreamTimeoutResult endpoint
       { op := .stats, workspaceId? := some workspaceId, daemonCapability? := capability? }
-      daemonProbeResponseTimeoutMs (fun _ => pure ()) with
+      daemonProbeRequestTimeoutMs (fun _ => pure ())
+      server with
   | .ok resp => pure <| daemonProbeOfResponse resp
   | .error failure => pure <| .error failure
 
-def daemonRootResult
-    (endpoint : Transport.Endpoint)
-    (workspaceId : WorkspaceId) : IO (Except BrokerClientFailure String) := do
-  pure <| (← daemonProbe endpoint workspaceId).map (·.root)
-
-def endpointOccupancyError
-    (endpoint : Transport.Endpoint)
-    (daemonRoot requestedRoot : System.FilePath) : String :=
-  s!"selected endpoint {endpointSummary endpoint} already serves Beam root {daemonRoot}, not {requestedRoot}"
-
-def endpointInUseError (endpoint : Transport.Endpoint) : String :=
-  s!"selected endpoint {endpointSummary endpoint} is already in use"
-
-def endpointGenerationMismatchError
-    (endpoint : Transport.Endpoint)
-    (daemonRoot : System.FilePath) : String :=
-  s!"selected endpoint {endpointSummary endpoint} already serves Beam root {daemonRoot} " ++
-    "with another daemon generation"
-
-def endpointProtocolError (endpoint : Transport.Endpoint) (detail : String) : String :=
-  s!"selected endpoint {endpointSummary endpoint} did not return a valid Beam daemon response: {detail}"
-
-def startupLogSuggestsEndpointInUse (logText : String) : Bool :=
-  logText.contains "address already in use" ||
-  logText.contains "Address already in use"
-
-def shouldRetryAutomaticStartup
-    (usesAutomaticEndpoint : Bool)
-    (tries : Nat)
-    (endpointOccupied startupAddressInUse : Bool) : Bool :=
-  usesAutomaticEndpoint && tries > 0 && (endpointOccupied || startupAddressInUse)
-
-def endpointAcceptsConnection (endpoint : Transport.Endpoint) : IO Bool := do
-  try
-    let conn ← Transport.connect endpoint
-    Transport.closeConnection conn
-    pure true
-  catch _ =>
-    pure false
-
 inductive DaemonGenerationStatus where
-  | unavailable
-  | unrecognized (failure : BrokerClientFailure)
+  | probeFailed (failure : BrokerClientFailure)
   | wrongRoot (daemonRoot : String)
   | wrongGeneration (daemonRoot : String)
   | exact
   deriving Repr
 
-/-- Classify one endpoint observation against the expected root and wrapper daemon generation. -/
+private def daemonGenerationStatusUsing
+    (endpoint : Transport.Endpoint)
+    (workspaceId : WorkspaceId)
+    (root : System.FilePath)
+    (identity : DaemonIdentity)
+    (capability? : Option String)
+    (server : ServerExpectation) : IO DaemonGenerationStatus := do
+  match ← daemonProbe endpoint workspaceId server capability? with
+  | .error failure => pure <| .probeFailed failure
+  | .ok probe =>
+      unless ← Beam.sameFilePath (System.FilePath.mk probe.root) root do
+        return .wrongRoot probe.root
+      if probe.identity == identity then
+        pure .exact
+      else
+        pure <| .wrongGeneration probe.root
+
+/-- Classify one wrapper endpoint after proving its expected generation on the same connection. -/
 def daemonGenerationStatus
     (endpoint : Transport.Endpoint)
     (workspaceId : WorkspaceId)
     (root : System.FilePath)
     (identity : DaemonIdentity)
     (capability : String) : IO DaemonGenerationStatus := do
-  match ← daemonProbe endpoint workspaceId (some capability) with
-  | .error failure =>
-      match failure with
-      | .transport _ _ =>
-          if ← endpointAcceptsConnection endpoint then
-            pure <| .unrecognized failure
-          else
-            pure .unavailable
-      | .invalidResponse _ | .streamCallback _ | .responseTimeout _ =>
-          pure <| .unrecognized failure
-  | .ok probe =>
-      unless ← Beam.sameFilePath (System.FilePath.mk probe.root) root do
-        return .wrongRoot probe.root
-      if probe.identity? == some identity then
-        pure .exact
-      else
-        pure <| .wrongGeneration probe.root
+  daemonGenerationStatusUsing endpoint workspaceId root identity (some capability) (.wrapper identity)
+
+/-- Classify an internal standalone broker, which deliberately has no wrapper greeting. -/
+def standaloneDaemonGenerationStatus
+    (endpoint : Transport.Endpoint)
+    (workspaceId : WorkspaceId)
+    (root : System.FilePath)
+    (identity : DaemonIdentity) : IO DaemonGenerationStatus := do
+  daemonGenerationStatusUsing endpoint workspaceId root identity none .standalone
 
 end Beam.Daemon

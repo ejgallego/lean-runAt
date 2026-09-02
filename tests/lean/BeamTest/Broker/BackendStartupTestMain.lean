@@ -4,6 +4,6 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Author: Emilio J. Gallego Arias
 -/
 
-import BeamTest.Broker.StartupHandshakeTest
+import BeamTest.Broker.BackendStartupTest
 
-def main := BeamTest.Broker.StartupHandshakeTest.main
+def main := BeamTest.Broker.BackendStartupTest.main

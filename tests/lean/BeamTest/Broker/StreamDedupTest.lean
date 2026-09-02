@@ -191,7 +191,6 @@ def checkRunAtStreamsSetupDiagnostics : IO Unit := do
     let resp ← server.dispatchRequest {
       op := .runAt
       workspaceId? := some fixtureWorkspaceId
-      root? := some root.toString
       path? := some "Tracked.lean"
       version? := some 1
       line? := some 0

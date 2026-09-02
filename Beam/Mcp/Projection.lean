@@ -125,14 +125,13 @@ def ToolName.annotations : ToolName → ToolEffectAnnotations
 
 def leanOperationToBrokerRequest
     (operation : Beam.Lean.Operation)
-    (root : String)
     (workspaceId : Beam.Workspace.WorkspaceId)
     (input : Json) : Except String Beam.Broker.Request := do
   let operationInput ←
     match input with
     | .obj fields => pure <| Json.obj (fields.erase "workspace")
     | other => throw s!"Lean operation input must be an object, got {other.compress}"
-  let req ← operation.toBrokerRequest root operationInput
+  let req ← operation.toBrokerRequest operationInput
   pure { req with workspaceId? := some workspaceId }
 
 def beamVersionDescription : String :=
@@ -249,6 +248,13 @@ structure ToolDescriptor where
 def toolNames : Array ToolName :=
   ToolName.all
 
+private def leanOperationProjectionGuidance : Beam.Lean.Operation → List String
+  | .runAt | .runAtHandle | .runWith | .runWithLinear =>
+      ["In MCP, this means: only then call lean_sync."]
+  | .codeActionResolve =>
+      ["Pass the CodeAction payload returned by lean_todo."]
+  | _ => []
+
 def ToolName.descriptor (tool : ToolName) : ToolDescriptor :=
   let (description, inputSchema) :=
     match tool with
@@ -256,11 +262,13 @@ def ToolName.descriptor (tool : ToolName) : ToolDescriptor :=
     | .beamStats => (beamStatsDescription, emptyInputSchema)
     | .beamFeedbackReport => (beamFeedbackReportDescription, feedbackReportInputSchema)
     | .leanOperation op =>
-        (String.intercalate " " [
-          op.behaviorDescription,
-          progressDiscovery "setup or a long-running request is detected",
-          Beam.Lean.sourceFileInvariant
-        ], schemaWithWorkspace op.inputSchema)
+        (String.intercalate " " <|
+          [op.behaviorDescription] ++
+          leanOperationProjectionGuidance op ++
+          [
+            progressDiscovery "setup or a long-running request is detected",
+            Beam.Lean.sourceFileInvariant
+          ], schemaWithWorkspace op.inputSchema)
     | .leanDropWorkspace => (dropWorkspaceDescription, dropWorkspaceInputSchema)
   { name := tool, description, inputSchema, annotations := tool.annotations }
 

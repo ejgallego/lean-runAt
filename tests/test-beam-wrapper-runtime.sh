@@ -62,7 +62,7 @@ with open(out_path, "wb") as out, open(err_path, "wb") as err:
             beam_script,
             "--root",
             project_root,
-            "lean-run-at",
+            "run-at",
             "tests/scenario/docs/SlowPoll.lean",
             version,
             "25",
@@ -74,7 +74,7 @@ with open(out_path, "wb") as out, open(err_path, "wb") as err:
         env=env,
     )
     if wait_mode == "stderr":
-        wait_for_stderr("running lean-run-at")
+        wait_for_stderr("running run-at")
     elif wait_mode == "sleep":
         time.sleep(1.0)
     else:
@@ -95,31 +95,23 @@ print(rc)
 PY
 }
 
-expect_sigint_cancelled() {
+expect_sigint_aborted() {
   local label="$1"
   local out_path="$2"
   local err_path="$3"
   local expected_client_request_id="$4"
-  local payload
-  payload="$(cat "$out_path")"
-  if [ "$(BEAM_JSON_PAYLOAD="$payload" read_json_text_field error.code)" != "requestCancelled" ]; then
-    echo "expected $label to report requestCancelled" >&2
-    printf '%s\n' "$payload" >&2
+  if [ -s "$out_path" ]; then
+    echo "expected $label not to fabricate a terminal broker response after disconnect" >&2
+    cat "$out_path" >&2
     cat "$err_path" >&2
     exit 1
   fi
   if [ -n "$expected_client_request_id" ]; then
-    if [ "$(BEAM_JSON_PAYLOAD="$payload" read_json_text_field clientRequestId)" != "$expected_client_request_id" ]; then
-      echo "expected $label to preserve explicit clientRequestId" >&2
-      printf '%s\n' "$payload" >&2
+    if ! grep -q "beam\[$expected_client_request_id\]" "$err_path"; then
+      echo "expected $label to preserve its explicit clientRequestId annotation" >&2
       cat "$err_path" >&2
       exit 1
     fi
-  elif [ -n "$(BEAM_JSON_PAYLOAD="$payload" read_json_text_field clientRequestId)" ]; then
-    echo "expected $label to hide generated clientRequestId" >&2
-    printf '%s\n' "$payload" >&2
-    cat "$err_path" >&2
-    exit 1
   elif grep -q 'beam\[' "$err_path"; then
     echo "expected $label stderr not to include a clientRequestId annotation" >&2
     cat "$err_path" >&2
@@ -131,8 +123,9 @@ expect_sigint_cancelled() {
     cat "$err_path" >&2
     exit 1
   fi
-  if ! grep -q 'requesting broker cancellation' "$err_path"; then
-    echo "expected $label to log broker cancellation on stderr" >&2
+  if ! grep -q 'interrupting broker request' "$err_path" ||
+      ! grep -q 'Beam request interrupted' "$err_path"; then
+    echo "expected $label to report bounded connection-owned interruption" >&2
     cat "$err_path" >&2
     exit 1
   fi
@@ -149,17 +142,13 @@ primary_registry="$(beam_wrapper_registry_path "$primary_root")"
 beam_wrapper_expect_file "$primary_registry"
 pid1="$(read_json_field "$primary_registry" pid)"
 port1="$(read_json_field "$primary_registry" port)"
-client1="$(read_json_field "$primary_registry" clientBin 2>/dev/null || true)"
-if [ -z "$client1" ]; then
-  client1="$client"
-fi
 
 beam_wrapper_start_owner "$signal_root"
 signal_owner_pid="$beam_wrapper_last_owner_pid"
 (
   cd "$signal_root"
-  slow_version="$(beam_wrapper_update_version "signal SlowPoll" "$beam_script" --root "$signal_root" lean-update tests/scenario/docs/SlowPoll.lean)"
-  command_version="$(beam_wrapper_update_version "signal CommandA" "$beam_script" --root "$signal_root" lean-update tests/scenario/docs/CommandA.lean)"
+  slow_version="$(beam_wrapper_update_version "signal SlowPoll" "$beam_script" --root "$signal_root" update tests/scenario/docs/SlowPoll.lean)"
+  command_version="$(beam_wrapper_update_version "signal CommandA" "$beam_script" --root "$signal_root" update tests/scenario/docs/CommandA.lean)"
 
   interrupt_out="$(beam_wrapper_mktemp_file interrupt-out)"
   interrupt_err="$(beam_wrapper_mktemp_file interrupt-err)"
@@ -170,12 +159,12 @@ signal_owner_pid="$beam_wrapper_last_owner_pid"
     exit 1
   fi
   if [ "$interrupt_status" = "0" ]; then
-    echo "expected wrapper lean-run-at SIGINT path to exit non-zero after broker cancellation" >&2
+    echo "expected wrapper run-at SIGINT path to exit non-zero after connection interruption" >&2
     cat "$interrupt_out" >&2
     cat "$interrupt_err" >&2
     exit 1
   fi
-  expect_sigint_cancelled "wrapper SIGINT path" "$interrupt_out" "$interrupt_err" wrapper-sigint
+  expect_sigint_aborted "wrapper SIGINT path" "$interrupt_out" "$interrupt_err" wrapper-sigint
 
   interrupt_anon_out="$(beam_wrapper_mktemp_file interrupt-anon-out)"
   interrupt_anon_err="$(beam_wrapper_mktemp_file interrupt-anon-err)"
@@ -186,16 +175,16 @@ signal_owner_pid="$beam_wrapper_last_owner_pid"
     exit 1
   fi
   if [ "$interrupt_anon_status" = "0" ]; then
-    echo "expected anonymous wrapper lean-run-at SIGINT path to exit non-zero after broker cancellation" >&2
+    echo "expected anonymous wrapper run-at SIGINT path to exit non-zero after connection interruption" >&2
     cat "$interrupt_anon_out" >&2
     cat "$interrupt_anon_err" >&2
     exit 1
   fi
-  expect_sigint_cancelled "anonymous wrapper SIGINT path" "$interrupt_anon_out" "$interrupt_anon_err" ""
+  expect_sigint_aborted "anonymous wrapper SIGINT path" "$interrupt_anon_out" "$interrupt_anon_err" ""
 
-  post_interrupt_hover="$("$beam_script" --root "$signal_root" lean-hover tests/scenario/docs/CommandA.lean "$command_version" 0 4)"
+  post_interrupt_hover="$("$beam_script" --root "$signal_root" hover tests/scenario/docs/CommandA.lean "$command_version" 0 4)"
   if [ "$(BEAM_JSON_PAYLOAD="$post_interrupt_hover" read_json_text_field ok)" != "true" ]; then
-    echo "expected wrapper SIGINT cancellation to preserve the isolated Beam daemon session" >&2
+    echo "expected wrapper SIGINT interruption to preserve the isolated Beam daemon session" >&2
     printf '%s\n' "$post_interrupt_hover" >&2
     exit 1
   fi
@@ -251,7 +240,7 @@ for attempt in range(1, max_attempts + 1):
                 beam_script,
                 "--root",
                 project_root,
-                "lean-run-at",
+                "run-at",
                 "tests/scenario/docs/SlowPoll.lean",
                 slow_version,
                 "25",
@@ -276,7 +265,7 @@ for attempt in range(1, max_attempts + 1):
                 beam_script,
                 "--root",
                 project_root,
-                "lean-hover",
+                "hover",
                 "tests/scenario/docs/CommandA.lean",
                 command_version,
                 "0",
@@ -338,13 +327,13 @@ PY
     exit 1
   fi
   if [ "$interrupt_quiet_status" = "0" ]; then
-    echo "expected non-progress wrapper lean-run-at SIGINT path to exit non-zero after broker cancellation" >&2
+    echo "expected non-progress wrapper run-at SIGINT path to exit non-zero after connection interruption" >&2
     cat "$interrupt_quiet_out" >&2
     cat "$interrupt_quiet_err" >&2
     exit 1
   fi
 
-  expect_sigint_cancelled "non-progress wrapper SIGINT path" "$interrupt_quiet_out" "$interrupt_quiet_err" "$interrupt_quiet_request_id"
+  expect_sigint_aborted "non-progress wrapper SIGINT path" "$interrupt_quiet_out" "$interrupt_quiet_err" "$interrupt_quiet_request_id"
 
   interrupt_quiet_anon_out="$(beam_wrapper_mktemp_file interrupt-quiet-anon-out)"
   interrupt_quiet_anon_err="$(beam_wrapper_mktemp_file interrupt-quiet-anon-err)"
@@ -355,12 +344,12 @@ PY
     exit 1
   fi
   if [ "$interrupt_quiet_anon_status" = "0" ]; then
-    echo "expected anonymous non-progress wrapper lean-run-at SIGINT path to exit non-zero after broker cancellation" >&2
+    echo "expected anonymous non-progress wrapper run-at SIGINT path to exit non-zero after connection interruption" >&2
     cat "$interrupt_quiet_anon_out" >&2
     cat "$interrupt_quiet_anon_err" >&2
     exit 1
   fi
-  expect_sigint_cancelled "anonymous non-progress wrapper SIGINT path" "$interrupt_quiet_anon_out" "$interrupt_quiet_anon_err" ""
+  expect_sigint_aborted "anonymous non-progress wrapper SIGINT path" "$interrupt_quiet_anon_out" "$interrupt_quiet_anon_err" ""
 
   "$beam_script" --root "$signal_root" stop > /dev/null 2>&1 || true
 )
@@ -372,21 +361,21 @@ beam_wrapper_start_owner "$signal_root"
 signal_owner_pid="$beam_wrapper_last_owner_pid"
 (
   cd "$signal_root"
-  slow_version="$(beam_wrapper_update_version "duplicate SlowPoll" "$beam_script" --root "$signal_root" lean-update tests/scenario/docs/SlowPoll.lean)"
-  command_version="$(beam_wrapper_update_version "duplicate CommandA" "$beam_script" --root "$signal_root" lean-update tests/scenario/docs/CommandA.lean)"
+  slow_version="$(beam_wrapper_update_version "duplicate SlowPoll" "$beam_script" --root "$signal_root" update tests/scenario/docs/SlowPoll.lean)"
+  command_version="$(beam_wrapper_update_version "duplicate CommandA" "$beam_script" --root "$signal_root" update tests/scenario/docs/CommandA.lean)"
 
   duplicate_slow_out="$(beam_wrapper_mktemp_file duplicate-slow-out)"
   duplicate_slow_err="$(beam_wrapper_mktemp_file duplicate-slow-err)"
   duplicate_out="$(beam_wrapper_mktemp_file duplicate-out)"
   duplicate_err="$(beam_wrapper_mktemp_file duplicate-err)"
   BEAM_PROGRESS=1 BEAM_REQUEST_ID=wrapper-duplicate-active \
-    "$beam_script" --root "$signal_root" lean-run-at tests/scenario/docs/SlowPoll.lean "$slow_version" 25 2 "poll_sleep_cmd" \
+    "$beam_script" --root "$signal_root" run-at tests/scenario/docs/SlowPoll.lean "$slow_version" 25 2 "poll_sleep_cmd" \
     >"$duplicate_slow_out" 2>"$duplicate_slow_err" &
   duplicate_slow_pid=$!
   sleep 1
 
   if BEAM_REQUEST_ID=wrapper-duplicate-active \
-      "$beam_script" --root "$signal_root" lean-hover tests/scenario/docs/CommandA.lean "$command_version" 0 4 \
+      "$beam_script" --root "$signal_root" hover tests/scenario/docs/CommandA.lean "$command_version" 0 4 \
       >"$duplicate_out" 2>"$duplicate_err"; then
     echo "expected duplicate active BEAM_REQUEST_ID wrapper request to fail" >&2
     cat "$duplicate_out" >&2
@@ -478,33 +467,6 @@ if [ "$pid1" = "$pid2" ]; then
 fi
 if [ "$port1" = "$port2" ]; then
   echo "expected distinct Beam daemon ports per project" >&2
-  exit 1
-fi
-
-cross_err="$(beam_wrapper_mktemp_file cross)"
-cross_req="$(beam_wrapper_mktemp_file cross-req)"
-printf '{"op":"ensure","workspaceId":"beam-cli-project","root":"%s"}\n' "$other_root" > "$cross_req"
-if "$client1" --port "$port1" request - <"$cross_req" >"$cross_err" 2>&1; then
-  echo "expected the CLI project workspace to reject another project root" >&2
-  cat "$cross_err" >&2
-  exit 1
-fi
-if ! grep -q "invalidParams" "$cross_err"; then
-  echo "expected cross-root Beam daemon request to fail with invalidParams" >&2
-  cat "$cross_err" >&2
-  exit 1
-fi
-
-port_scope_out="$(beam_wrapper_mktemp_file port-scope-out)"
-port_scope_err="$(beam_wrapper_mktemp_file port-scope-err)"
-if "$beam_script" --root "$primary_root" --port 43123 stats >"$port_scope_out" 2>"$port_scope_err"; then
-  echo "expected --port on an attaching command to be rejected" >&2
-  cat "$port_scope_out" >&2
-  exit 1
-fi
-if ! grep -Fq -- "--port is only valid" "$port_scope_err"; then
-  echo "expected rejected attaching --port to explain the owner-only scope" >&2
-  cat "$port_scope_err" >&2
   exit 1
 fi
 

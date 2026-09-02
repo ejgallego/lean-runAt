@@ -1,7 +1,7 @@
 # Sync And Diagnostics Contract
 
 This is the canonical contract for Beam sync, refresh, save, progress, diagnostics, and readiness
-reporting across the wrapper, broker stream, and MCP server.
+reporting across the wrapper, internal broker transport, and MCP server.
 
 Beam never applies source edits to `.lean` files on disk; the client applies source edits. The
 commands below read saved source into Beam's LSP mirror or write Lean/Lake build artifacts; none is
@@ -18,22 +18,23 @@ document version and return `changed: false`.
 `lean-beam sync` is the diagnostics/readiness barrier for a Lean file. It opens or updates the
 tracked file, waits for diagnostics for the current document version, streams fresh request
 diagnostics, and returns a machine-readable JSON verdict for that version. Wrapper stdout uses
-stable, agent-oriented field ordering; `lean-beam --root ROOT request-stream` is the compact one-line JSON
-stream for programmatic event consumers.
+stable, agent-oriented field ordering after a broker operation completes. Selector, setup, or
+transport failures can instead exit nonzero with human-facing stderr and no JSON, so automation
+must check the exit status before parsing stdout. Clients that require structured live events and
+failures should use MCP.
 
 The returned document `version` is the snapshot token for broker, MCP, and wrapper callers.
 Position- or range-bound operations reject missing or stale versions; clients can obtain the
-version from `lean-beam update`, broker `update_file`, or MCP `lean_update`. `lean-beam sync`,
-broker `sync_file`, and MCP `lean_sync` also return the current version when the caller needs the
-diagnostics/readiness barrier.
+version from `lean-beam update`, the internal broker `update_file` operation, or MCP `lean_update`.
+`lean-beam sync`, the internal broker `sync_file` operation, and MCP `lean_sync` also return the
+current version when the caller needs the diagnostics/readiness barrier.
 
 When the broker rejects a position- or range-bound request because the supplied version is stale,
 the failure uses `contentModified` and includes `error.data.reason = "documentVersionMismatch"`.
 The same payload reports `expectedVersion`, the currently accepted `acceptedVersion`, and
 `currentVersion` when the broker can name the current tracked document version.
 
-Example stale-version semantic response, as printed by the wrapper on stdout or carried in the
-`payload` of a terminal broker stream message:
+Example stale-version semantic response as printed by the wrapper on stdout:
 
 ```json
 {
@@ -112,61 +113,31 @@ Their transport types differ by surface.
 
 | Concept | Scope | Current surface |
 | --- | --- | --- |
-| Progress | Request-scoped operation movement, not diagnostics and not final readiness. | MCP `notifications/progress`; Beam stream `fileProgress` events; CLI progress text. |
+| Progress | Request-scoped operation movement, not diagnostics and not final readiness. | MCP `notifications/progress`; internal broker `fileProgress` events; CLI progress text. |
 | Status | Best-effort notice that a no-token MCP request is doing setup or remains pending. | MCP `notifications/message` with logger `beam.status`. |
-| Streamed diagnostics | Lean-published events observed while a request is pending. | MCP `notifications/message` with logger `lean.diagnostic`; Beam stream `diagnostic` events; CLI stderr diagnostics. |
-| Current result | Stable synced-state verdict for one document version. | Final broker/CLI `diagnostics`, `readiness`, and `fileProgress` fields; MCP spells the progress field `document_progress`. |
+| Streamed diagnostics | Lean-published events observed while a request is pending. | MCP `notifications/message` with logger `lean.diagnostic`; internal broker `diagnostic` events; CLI stderr diagnostics. |
+| Current result | Stable synced-state verdict for one document version. | Final internal broker response or wrapper stdout `diagnostics`, `readiness`, and `fileProgress` fields; MCP spells the progress field `document_progress`. |
 
 Wrapper stderr is the human-facing surface. Machine consumers of an owned wrapper session should
-use final stdout JSON or `lean-beam --root ROOT [--session-dir DIR] request-stream <json|->`.
+check exit status, then parse final stdout JSON when present. Use MCP for structured live events and
+failures.
 
-### Machine Broker Stream
+### Internal Broker Stream
 
-`lean-beam --root ROOT request-stream` prints one compact JSON object per line, in the order the
-broker observed it. Its input is a semantic project request with a required nonempty
-`clientRequestId`; callers cannot supply `root`, `workspaceId`, `daemonCapability`, executable
-configuration, workspace administration operations, or process-wide `shutdown` / `reset_stats`.
-Use the dedicated `lean-beam --root ROOT stop` command for lifecycle control. A request may produce any
-number of `fileProgress` and `diagnostic` messages, followed by exactly one terminal `response`; the
-response is last and no later message belongs to that request.
-
-Keep the session's `lean-beam serve` owner active for the request lifetime. Only the holder
-starts the daemon; the root-aware machine client reads the mode-`0600` descriptor, selects its
-frozen workspace binding, and injects routing and the per-generation capability. Requests
-participate in typed request admission and workspace-scoped cancellation but do not own the daemon.
-The raw `beam-client --port ... request-stream` surface requires complete internal request fields
-and is maintainer/debug tooling for separately managed brokers.
+The wrapper and daemon communicate through a private broker stream. It carries live progress and
+diagnostics before one terminal response, but its framing and envelopes are implementation details,
+not an installed command-line interface or a supported machine protocol. Maintainers keep its exact
+ordering and correlation contract in the broker stream tests and
+[development guidance](DEVELOPMENT.md#internal-broker-stream-contract).
 
 The selected root chooses a workspace runtime; it is not a filesystem authorization boundary.
 Relative paths resolve below that root, while absolute paths may identify dependency sources. Beam
 can also execute Lean metaprogramming with IO, so callers that require filesystem isolation must
 sandbox the owner process itself.
 
-Every stream variant uses the same `kind`, `payload`, and optional correlation envelope. When the
-request supplies `clientRequestId`, each message repeats it on that outer stream envelope:
-
-```jsonl
-{"clientRequestId":"sync-7","kind":"fileProgress","payload":{"done":false,"updates":2}}
-{"clientRequestId":"sync-7","kind":"diagnostic","payload":{"completionBlocking":false,"message":"unused variable","path":"Demo.lean","range":{"end":{"character":1,"line":0},"start":{"character":0,"line":0}},"severity":2,"uri":"file:///workspace/Demo.lean","version":3}}
-{"clientRequestId":"sync-7","kind":"response","payload":{"fileProgress":{"done":true,"updates":3},"ok":true,"result":{"diagnostics":{"counts":{"error":0,"hint":0,"information":0,"total":1,"unknown":0,"warning":1}},"path":"Demo.lean","readiness":{"blockingDiagnostics":[],"blockingErrorCount":0,"blockingMessages":[],"reason":"ok","saveReady":true},"version":3}}}
-```
-
-A failed terminal response uses the same envelope and preserves the latest progress observation in
-its semantic `payload`:
-
-```jsonl
-{"clientRequestId":"sync-8","kind":"response","payload":{"error":{"code":"syncBarrierIncomplete","data":{"completionBlockingDiagnostics":[],"recoveryPlan":["lean-beam refresh \"Demo.lean\"","lake build"],"saveDeps":[],"staleDirectDeps":[],"targetPath":"Demo.lean"},"message":"Lean diagnostics barrier did not complete for file:///workspace/Demo.lean at version 3; fileProgress={\"done\":false,\"updates\":3}. An imported target may be stale or broken, or the Lean worker may have exited. Run `lake build` or fix the upstream module first."},"fileProgress":{"done":false,"updates":3},"ok":false}}
-```
-
-The response `payload` is the semantic result and never repeats `clientRequestId`. The ordinary
-wrapper's final stdout object may echo a caller-supplied `BEAM_REQUEST_ID` as a presentation
-convenience; internally generated wrapper cancellation IDs remain hidden. This decoration is not
-part of the broker `Response` type.
-
-The terminal response's `fileProgress` is the latest observation available when the result was
-constructed. It can be newer than the last live broker `fileProgress` event because the barrier can
-adjust or reuse a prior observation, and it does not imply that the current request itself emitted
-every preceding update. Raw broker events are not throttled; MCP progress notifications are.
+The wrapper's final stdout object may echo a caller-supplied `BEAM_REQUEST_ID` as a presentation
+convenience; internally generated cancellation IDs remain hidden. This decoration is not part of
+the semantic broker response.
 
 ## MCP Diagnostics
 
@@ -205,9 +176,10 @@ enable diagnostic logging and/or request `diagnostic_scope: "all"` plus
 `diagnostics_in_result: true`.
 Successful `lake setup-file` status diagnostics are transient Lean observations. MCP projects them
 through live `beam.status` or tokened progress, and they usually do not appear in final
-`diagnostics_in_result` replay after Lean clears setup progress. Broker and CLI streams still carry
-Lean's temporary information-diagnostic envelope. Until Lean exposes a first-class setup/build
-status signal, the separation is an MCP projection rather than an end-to-end typed distinction.
+`diagnostics_in_result` replay after Lean clears setup progress. The internal broker stream still
+carries Lean's temporary information-diagnostic envelope, which the wrapper may render on stderr.
+Until Lean exposes a first-class setup/build status signal, the separation is an MCP projection
+rather than an end-to-end typed distinction.
 
 ## Progress
 

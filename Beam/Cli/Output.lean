@@ -5,10 +5,9 @@ Author: Emilio J. Gallego Arias
 -/
 
 import Lean
+import Beam.Broker.Protocol
 import Beam.Cli.Args
-import Beam.Cli.RuntimeBundle
 import Beam.JsonPretty
-import Beam.Broker.Client
 import Beam.LSP.RunAt
 
 open Lean
@@ -16,6 +15,67 @@ open Lean
 namespace Beam.Cli
 
 open Beam.Broker
+
+def boolText (value : Bool) : String :=
+  if value then "true" else "false"
+
+private def hexDigit (n : Nat) : Char :=
+  if n < 10 then
+    Char.ofNat (48 + n)
+  else
+    Char.ofNat (87 + n)
+
+private def hexByte (byte : UInt8) : String :=
+  let n := byte.toNat
+  String.singleton (hexDigit (n / 16)) ++ String.singleton (hexDigit (n % 16))
+
+private def utf8Hex (bytes : ByteArray) : String :=
+  String.intercalate " " <| Id.run do
+    let mut parts : Array String := #[]
+    for byte in bytes do
+      parts := parts.push (hexByte byte)
+    return parts.toList
+
+private def diagnosticSeverityLabel : Option Lsp.DiagnosticSeverity → String
+  | some .error => "error"
+  | some .warning => "warning"
+  | some .information => "info"
+  | some .hint => "hint"
+  | none => "diagnostic"
+
+private def condenseDiagnosticMessage (message : String) : String :=
+  String.intercalate " / " <|
+    ((message.split (· == '\n')).toList.map (fun line => line.trimAscii.toString)).filter
+      (fun line => !line.isEmpty)
+
+def formatStreamDiagnostic (diagnostic : StreamDiagnostic) : String :=
+  let pos := diagnostic.range.start
+  let line := pos.line + 1
+  let character := pos.character + 1
+  let severity := diagnosticSeverityLabel diagnostic.severity?
+  let message := condenseDiagnosticMessage diagnostic.message
+  let blocking :=
+    if diagnostic.completionBlocking then
+      " completionBlocking=true"
+    else
+      ""
+  s!"beam: diagnostic {severity}{blocking} {diagnostic.path}:{line}:{character}: {message}"
+
+/-- Render a CLI response, optionally adding caller-visible correlation at the presentation edge. -/
+def responseOutputJson (resp : Response) (clientRequestId? : Option String := none) : Json :=
+  match clientRequestId? with
+  | some clientRequestId =>
+      (toJson resp).setObjVal! "clientRequestId" (toJson clientRequestId)
+  | none =>
+      toJson resp
+
+def printResponse (resp : Response) (clientRequestId? : Option String := none) : IO Unit := do
+  IO.println <| Beam.orderedJsonPretty (responseOutputJson resp clientRequestId?)
+
+def failOnError (resp : Response) : IO Unit := do
+  match resp with
+  | .successResult .. => pure ()
+  | .errorResult failure => throw <| IO.userError failure.error.message
 
 def printJsonLine (json : Json) : IO Unit := do
   IO.println <| Beam.orderedJsonPretty json
@@ -31,7 +91,7 @@ def envClientRequestId? : IO (Option String) := do
 def withEnvClientRequestId (req : Request) : IO Request := do
   pure { req with clientRequestId? := req.clientRequestId? <|> (← envClientRequestId?) }
 
-def annotateRunatMessage (clientRequestId? : Option String) (msg : String) : String :=
+def annotateRequestMessage (clientRequestId? : Option String) (msg : String) : String :=
   match clientRequestId? with
   | some clientRequestId =>
       if msg.startsWith "beam:" then
@@ -52,20 +112,28 @@ def maybeEmitTextDebug
   else
     let bytes := text.toUTF8
     let containsLiteralBackslashN := hasSubstring text "\\n"
-    IO.eprintln <| annotateRunatMessage clientRequestId?
+    IO.eprintln <| annotateRequestMessage clientRequestId?
       s!"beam: debug text for {action}: source={source} utf8Bytes={bytes.size} containsNewline={boolText (text.contains '\n')} containsLiteralBackslashN={boolText containsLiteralBackslashN}"
-    IO.eprintln <| annotateRunatMessage clientRequestId?
+    IO.eprintln <| annotateRequestMessage clientRequestId?
       s!"beam: debug text escaped={(Json.str text).compress}"
-    IO.eprintln <| annotateRunatMessage clientRequestId?
+    IO.eprintln <| annotateRequestMessage clientRequestId?
       s!"beam: debug text utf8Hex={utf8Hex bytes}"
 
+/-- Why a broker response could not be decoded as the expected typed result. -/
+inductive ResponseResultError where
+  | broker (failure : ResponseFailure)
+  | invalidPayload (detail : String)
+
+/-- Decode a broker response while preserving broker failure and malformed-payload distinctions. -/
+def decodeResponseResult [FromJson α] (resp : Response) : Except ResponseResultError α :=
+  match resp with
+  | .successResult result _ =>
+      (fromJson? result).mapError ResponseResultError.invalidPayload
+  | .errorResult failure =>
+      .error <| .broker failure
+
 def decodeRunAtResult? (resp : Response) : Option Beam.LSP.RunAt.Result :=
-  match resp.result? with
-  | none => none
-  | some result =>
-      match fromJson? result with
-      | .ok payload => some payload
-      | .error _ => none
+  (decodeResponseResult resp).toOption
 
 def responseErrorSummary? (action failureBoundary : String) (resp : Response) : Option String :=
   resp.error?.map fun err =>
@@ -130,7 +198,7 @@ def maybeEmitLiteralBackslashNewlineHint
       match req.text?, decodeRunAtResult? resp with
       | some text, some result =>
           if !result.success && hasSubstring text "\\n" && !text.contains '\n' then
-            IO.eprintln <| annotateRunatMessage clientRequestId?
+            IO.eprintln <| annotateRequestMessage clientRequestId?
               "beam: hint: the probe text contains the literal characters '\\n'; if you meant a real newline, use --stdin or --text-file."
           else
             pure ()
@@ -139,13 +207,11 @@ def maybeEmitLiteralBackslashNewlineHint
   | _ =>
       pure ()
 
-def decodeSyncFileResult? (resp : Response) : Option SyncFileResult := do
-  let result ← resp.result?
-  fromJson? result |>.toOption
+def decodeSyncFileResult? (resp : Response) : Option SyncFileResult :=
+  (decodeResponseResult resp).toOption
 
-def decodeUpdateFileResult? (resp : Response) : Option UpdateFileResult := do
-  let result ← resp.result?
-  fromJson? result |>.toOption
+def decodeUpdateFileResult (resp : Response) : Except ResponseResultError UpdateFileResult :=
+  decodeResponseResult resp
 
 def responseFileProgress? (resp : Response) : Option SyncFileProgress :=
   resp.fileProgress?

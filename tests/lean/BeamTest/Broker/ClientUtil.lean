@@ -15,6 +15,10 @@ namespace BeamTest.Broker.TestUtil
 def testWorkspaceId : Beam.Broker.WorkspaceId :=
   "beam-test-project"
 
+/-- Keep test broker requests bounded without imposing production-scale timing assumptions. -/
+def testBrokerRequestTimeoutMs : Nat :=
+  120000
+
 /--
 Address ordinary fixture requests to the workspace created by the broker test harness.
 
@@ -32,33 +36,52 @@ structure ProgressEvent where
   clientRequestId? : Option String := none
   progress : Beam.Broker.SyncFileProgress
 
+private def clientResponse
+    (label : String)
+    (result : Except Beam.Broker.BrokerClientFailure Beam.Broker.Response) :
+    IO Beam.Broker.Response :=
+  match result with
+  | .ok response => pure response
+  | .error failure => throw <| IO.userError s!"{label}: {failure.detail}"
+
 def runClientWithStream
     (endpoint : Beam.Broker.Endpoint)
     (req : Beam.Broker.Request) :
     IO (Beam.Broker.Response × Array Beam.Broker.SyncFileProgress × Array Beam.Broker.StreamDiagnostic) := do
   let progressRef ← IO.mkRef #[]
   let diagnosticRef ← IO.mkRef #[]
-  let resp ← Beam.Broker.sendRequestWithCallbacks endpoint (inFixtureWorkspace req) {
-    onFileProgress := fun _ progress =>
+  let result ← Beam.Broker.sendRequestWithCallbacksTimeoutResult endpoint (inFixtureWorkspace req)
+    testBrokerRequestTimeoutMs {
+    onFileProgress := fun progress =>
       progressRef.modify fun seen => seen.push progress
-    onDiagnostic := fun _ diagnostic =>
+    onDiagnostic := fun diagnostic =>
       diagnosticRef.modify fun seen => seen.push diagnostic
-  }
+  } .standalone
+  let resp ← clientResponse "broker request failed" result
   pure (resp, ← progressRef.get, ← diagnosticRef.get)
 
 def runClientWithProgress
     (endpoint : Beam.Broker.Endpoint)
     (req : Beam.Broker.Request) : IO (Beam.Broker.Response × Array ProgressEvent) := do
   let progressRef ← IO.mkRef #[]
-  let resp ← Beam.Broker.sendRequestWithCallbacks endpoint (inFixtureWorkspace req) {
-    onFileProgress := fun clientRequestId? progress =>
-      progressRef.modify fun seen => seen.push { clientRequestId?, progress }
-  }
+  let result ← Beam.Broker.sendRequestWithStreamTimeoutResult endpoint (inFixtureWorkspace req)
+      testBrokerRequestTimeoutMs (server := .standalone) fun stream =>
+    match stream with
+    | .fileProgress clientRequestId? progress =>
+        progressRef.modify fun seen => seen.push { clientRequestId?, progress }
+    | .diagnostic .. | .response .. => pure ()
+  let resp ←
+    match result with
+    | .ok response => pure response
+    | .error failure =>
+        throw <| IO.userError s!"broker request failed: {failure.detail}"
   pure (resp, ← progressRef.get)
 
 def runClient (endpoint : Beam.Broker.Endpoint) (req : Beam.Broker.Request) : IO Beam.Broker.Response := do
-  let (resp, _) ← runClientWithProgress endpoint req
-  pure resp
+  clientResponse "broker request failed" <|
+    ← Beam.Broker.sendRequestWithCallbacksTimeoutResult endpoint (inFixtureWorkspace req)
+      testBrokerRequestTimeoutMs
+      (server := .standalone)
 
 def requireFileProgress (label : String) (resp : Beam.Broker.Response) :
     IO Beam.Broker.SyncFileProgress := do
@@ -108,6 +131,33 @@ def requireFinalStreamResponse
   | _ =>
       throw <| IO.userError
         s!"expected {label} response to arrive last, got {(toJson messages).compress}"
+
+def runBrokerStream
+    (endpoint : Beam.Broker.Endpoint)
+    (req : Beam.Broker.Request) : IO (Array Beam.Broker.StreamMessage) := do
+  let messagesRef ← IO.mkRef #[]
+  match ← Beam.Broker.sendRequestWithStreamTimeoutResult endpoint (inFixtureWorkspace req)
+      testBrokerRequestTimeoutMs (server := .standalone) fun message =>
+      messagesRef.modify (·.push message) with
+  | .ok _ => pure (← messagesRef.get)
+  | .error failure =>
+      throw <| IO.userError s!"broker stream request failed: {failure.detail}"
+
+def requireSuccessStream
+    (label : String)
+    (messages : Array Beam.Broker.StreamMessage) : IO (Array Beam.Broker.StreamMessage) := do
+  let response ← requireFinalStreamResponse label messages
+  unless response.ok do
+    throw <| IO.userError s!"expected {label} stream success, got {(toJson response).compress}"
+  pure messages
+
+def requireFailedStream
+    (label : String)
+    (messages : Array Beam.Broker.StreamMessage) : IO (Array Beam.Broker.StreamMessage) := do
+  let response ← requireFinalStreamResponse label messages
+  if response.ok then
+    throw <| IO.userError s!"expected {label} stream failure"
+  pure messages
 
 def expectStreamClientRequestId
     (label : String)

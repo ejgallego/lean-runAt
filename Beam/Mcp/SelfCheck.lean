@@ -8,6 +8,7 @@ import Lean
 import Beam.Mcp.Protocol
 import Beam.Mcp.Stdio
 import Beam.Path
+import Beam.System
 
 open Lean
 
@@ -36,19 +37,6 @@ private def timeoutMs : IO Nat := do
       if timeout == 0 then
         throw <| IO.userError "invalid LEAN_BEAM_MCP_SELF_CHECK_TIMEOUT_MS value '0': expected a positive timeout"
       pure timeout
-
-private partial def waitForTaskWithTimeout
-    (task : Task α)
-    (timeoutMs : Nat)
-    (pollMs : Nat := 50) : IO (Option α) := do
-  let rec loop (remainingMs : Nat) : IO (Option α) := do
-    if ← IO.hasFinished task then
-      return some (← IO.wait task)
-    if remainingMs == 0 then
-      return none
-    IO.sleep pollMs.toUInt32
-    loop (remainingMs - min pollMs remainingMs)
-  loop timeoutMs
 
 private def childArgs (opts : Options) : List String :=
   let args := []
@@ -90,7 +78,7 @@ private def readLine
     (phase : String)
     (timeoutMs : Nat) : IO String := do
   let task ← IO.asTask stdout.getLine Task.Priority.dedicated
-  match ← waitForTaskWithTimeout task timeoutMs with
+  match ← Beam.waitTaskWithTimeout task timeoutMs with
   | some line => pure <| Beam.Mcp.Stdio.stripLineEnding (← IO.ofExcept line)
   | none =>
       if (← child.tryWait).isSome then
@@ -236,7 +224,7 @@ def run (opts : Options) (pathText : String) : IO Unit := do
   let (_, child) ← child.takeStdin
   try
     let waitTask ← IO.asTask child.wait Task.Priority.dedicated
-    let some exitResult ← waitForTaskWithTimeout waitTask timeout
+    let some exitResult ← Beam.waitTaskWithTimeout waitTask timeout
       | throw <| IO.userError (timeoutMessage "EOF teardown" timeout)
     let exitCode ← IO.ofExcept exitResult
     if exitCode != 0 then

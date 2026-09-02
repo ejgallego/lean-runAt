@@ -424,13 +424,13 @@ edit_b "$tmp2"
 beam_start_owner "$tmp2"
 (
   cd "$tmp2"
-  save_json="$(beam --root "$tmp2" lean-close-save SaveSmoke/B.lean)"
+  save_json="$(beam --root "$tmp2" close-save SaveSmoke/B.lean)"
   if [ "$(BEAM_JSON_PAYLOAD="$save_json" python3 - <<'PY'
 import json, os
 print(json.loads(os.environ["BEAM_JSON_PAYLOAD"])["result"]["saved"]["version"])
 PY
 )" != "1" ]; then
-    echo "expected lean-close-save to report saved version 1" >&2
+    echo "expected close-save to report saved version 1" >&2
     printf '%s\n' "$save_json" >&2
     exit 1
   fi
@@ -439,7 +439,7 @@ import json, os
 print(json.loads(os.environ["BEAM_JSON_PAYLOAD"])["result"]["saved"]["sourceHash"])
 PY
 )" ]; then
-    echo "expected lean-close-save to report a non-empty sourceHash" >&2
+    echo "expected close-save to report a non-empty sourceHash" >&2
     printf '%s\n' "$save_json" >&2
     exit 1
   fi
@@ -452,12 +452,12 @@ PY
   mv "$trace_path" "$readonly_trace"
   chmod 444 "$readonly_trace"
   ln -s "$(basename "$readonly_trace")" "$trace_path"
-  if ! beam --root "$tmp2" lean-save SaveSmoke/B.lean > /dev/null; then
-    echo "expected lean-save to replace an unwritable trace symlink before artifact publication" >&2
+  if ! beam --root "$tmp2" save SaveSmoke/B.lean > /dev/null; then
+    echo "expected save to replace an unwritable trace symlink before artifact publication" >&2
     exit 1
   fi
   if [ -L "$trace_path" ] || [ ! -f "$trace_path" ]; then
-    echo "expected lean-save to publish a regular replacement trace" >&2
+    echo "expected save to publish a regular replacement trace" >&2
     exit 1
   fi
   chmod 644 "$readonly_trace"
@@ -472,9 +472,9 @@ PY
   mkdir "$ilean_path"
   blocked_save_out="$(mktemp "$tmp2/blocked-save-out-XXXXXX")"
   blocked_save_err="$(mktemp "$tmp2/blocked-save-err-XXXXXX")"
-  if beam --root "$tmp2" lean-save SaveSmoke/B.lean \
+  if beam --root "$tmp2" save SaveSmoke/B.lean \
       >"$blocked_save_out" 2>"$blocked_save_err"; then
-    echo "expected lean-save to reject an artifact target that is a directory" >&2
+    echo "expected save to reject an artifact target that is a directory" >&2
     cat "$blocked_save_out" >&2
     cat "$blocked_save_err" >&2
     exit 1
@@ -488,8 +488,8 @@ PY
   rmdir "$ilean_path"
   mv "$saved_ilean" "$ilean_path"
   rm -f "$blocked_save_out" "$blocked_save_err"
-  if ! beam --root "$tmp2" lean-save SaveSmoke/B.lean > /dev/null; then
-    echo "expected lean-save to republish the trace after the artifact target is restored" >&2
+  if ! beam --root "$tmp2" save SaveSmoke/B.lean > /dev/null; then
+    echo "expected save to republish the trace after the artifact target is restored" >&2
     exit 1
   fi
   if [ ! -f "$trace_path" ]; then
@@ -534,7 +534,7 @@ edit_module_b "$tmp8"
 beam_start_owner "$tmp8"
 (
   cd "$tmp8"
-  module_save_json="$(beam --root "$tmp8" lean-close-save SaveSmoke/ModuleB.lean)"
+  module_save_json="$(beam --root "$tmp8" close-save SaveSmoke/ModuleB.lean)"
   for artifact_key in olean oleanServer oleanPrivate ir; do
     artifact="$(BEAM_JSON_PAYLOAD="$module_save_json" BEAM_ARTIFACT_KEY="$artifact_key" python3 - <<'PY'
 import json, os
@@ -569,13 +569,13 @@ edit_structured_setup "$tmp7"
 beam_start_owner "$tmp7"
 (
   cd "$tmp7"
-  structured_save="$(beam --root "$tmp7" lean-save StructuredSetup/UsesOption.lean)"
+  structured_save="$(beam --root "$tmp7" save StructuredSetup/UsesOption.lean)"
   if [ "$(BEAM_JSON_PAYLOAD="$structured_save" python3 - <<'PY'
 import json, os
 print(json.loads(os.environ["BEAM_JSON_PAYLOAD"])["ok"])
 PY
 )" != "True" ]; then
-    echo "expected lean-save to reuse an LSP snapshot with structured Lake options" >&2
+    echo "expected save to reuse an LSP snapshot with structured Lake options" >&2
     printf '%s\n' "$structured_save" >&2
     exit 1
   fi
@@ -583,9 +583,9 @@ PY
 
   unsupported_save_out="$(mktemp /tmp/beam-save-olean-unsupported-save-out-XXXXXX)"
   unsupported_save_err="$(mktemp /tmp/beam-save-olean-unsupported-save-err-XXXXXX)"
-  if beam --root "$tmp7" lean-save BatchOnly/NeedsBatch.lean \
+  if beam --root "$tmp7" save BatchOnly/NeedsBatch.lean \
       >"$unsupported_save_out" 2>"$unsupported_save_err"; then
-    echo "expected lean-save to reject batch-only moreLeanArgs" >&2
+    echo "expected save to reject batch-only moreLeanArgs" >&2
     cat "$unsupported_save_out" >&2
     cat "$unsupported_save_err" >&2
     remove_owned_tmp_file "$unsupported_save_out"
@@ -633,7 +633,7 @@ LEAN_BEAM_BROKER_TRACE="$save_race_broker_trace" \
   LEAN_BEAM_BROKER_TRACE="$save_race_broker_trace" \
     LEAN_BEAM_BROKER_WAIT_DIAGNOSTICS_WATCHDOG_MS="$save_race_watchdog_ms" \
     LEAN_BEAM_SAVE_RACE_SENTINEL="$race_sentinel" \
-    beam --root "$tmp3" lean-sync SaveSmoke/B.lean > /dev/null
+    beam --root "$tmp3" sync SaveSmoke/B.lean > /dev/null
 )
 edit_b_slow "$tmp3"
 (
@@ -641,7 +641,7 @@ edit_b_slow "$tmp3"
   : > "$race_save_out"
   : > "$race_save_err"
   LEAN_BEAM_SAVE_RACE_SENTINEL="$race_sentinel" \
-    beam --root "$tmp3" lean-close-save SaveSmoke/B.lean >"$race_save_out" 2>"$race_save_err" &
+    beam --root "$tmp3" close-save SaveSmoke/B.lean >"$race_save_out" 2>"$race_save_err" &
   save_pid=$!
   if ! wait_for_file "$race_sentinel" "save_olean race sentinel" "${BEAM_SAVE_RACE_SENTINEL_TIMEOUT:-60}" 0.05; then
     dump_save_sentinel_context "save_olean race sentinel timeout" \
@@ -677,7 +677,7 @@ LEAN_BEAM_BROKER_TRACE="$save_race_broker_trace" \
   close_out="$(mktemp /tmp/beam-close-save-cancel-out-XXXXXX)"
   close_err="$(mktemp /tmp/beam-close-save-cancel-err-XXXXXX)"
   LEAN_BEAM_SAVE_RACE_SENTINEL="$cancel_sentinel" BEAM_REQUEST_ID=cancel-close-save \
-    beam --root "$tmp4" lean-close-save SaveSmoke/B.lean >"$close_out" 2>"$close_err" &
+    beam --root "$tmp4" close-save SaveSmoke/B.lean >"$close_out" 2>"$close_err" &
   close_pid=$!
   if ! wait_for_file "$cancel_sentinel" "cancel save sentinel" "${BEAM_SAVE_RACE_SENTINEL_TIMEOUT:-60}" 0.05; then
     dump_save_sentinel_context "cancel save sentinel timeout" \
@@ -689,7 +689,7 @@ LEAN_BEAM_BROKER_TRACE="$save_race_broker_trace" \
   fi
   cancel_json="$(beam --root "$tmp4" cancel cancel-close-save)"
   if ! printf '%s\n' "$cancel_json" | grep -q '"cancelled": true'; then
-    echo "expected explicit cancel to report cancelled=true for lean-close-save" >&2
+    echo "expected explicit cancel to report cancelled=true for close-save" >&2
     printf '%s\n' "$cancel_json" >&2
     cat "$close_out" >&2
     cat "$close_err" >&2
@@ -697,14 +697,14 @@ LEAN_BEAM_BROKER_TRACE="$save_race_broker_trace" \
     exit 1
   fi
   if wait "$close_pid"; then
-    echo "expected cancelled lean-close-save to exit non-zero" >&2
+    echo "expected cancelled close-save to exit non-zero" >&2
     cat "$close_out" >&2
     cat "$close_err" >&2
     rm -f "$close_out" "$close_err"
     exit 1
   fi
   if ! grep -q '"code": "requestCancelled"' "$close_out"; then
-    echo "expected cancelled lean-close-save to report requestCancelled" >&2
+    echo "expected cancelled close-save to report requestCancelled" >&2
     cat "$close_out" >&2
     cat "$close_err" >&2
     rm -f "$close_out" "$close_err"
@@ -719,26 +719,26 @@ LEAN_BEAM_BROKER_TRACE="$save_race_broker_trace" \
 beam_start_owner "$tmp6"
 (
   cd "$tmp6"
-  beam --root "$tmp6" lean-sync SaveSmoke/A.lean > /dev/null
+  beam --root "$tmp6" sync SaveSmoke/A.lean > /dev/null
   edit_b "$tmp6"
   save_out="$(mktemp /tmp/beam-stale-trace-save-out-XXXXXX)"
   save_err="$(mktemp /tmp/beam-stale-trace-save-err-XXXXXX)"
-  if beam --root "$tmp6" lean-save SaveSmoke/A.lean >"$save_out" 2>"$save_err"; then
-    echo "expected lean-save to reject an importer whose Lake save trace is stale" >&2
+  if beam --root "$tmp6" save SaveSmoke/A.lean >"$save_out" 2>"$save_err"; then
+    echo "expected save to reject an importer whose Lake save trace is stale" >&2
     cat "$save_out" >&2
     cat "$save_err" >&2
     rm -f "$save_out" "$save_err"
     exit 1
   fi
   if ! grep -q '"code": "saveTraceStale"' "$save_out"; then
-    echo "expected stale trace lean-save to report saveTraceStale" >&2
+    echo "expected stale trace save to report saveTraceStale" >&2
     cat "$save_out" >&2
     cat "$save_err" >&2
     rm -f "$save_out" "$save_err"
     exit 1
   fi
   if grep -q 'Beam daemon connection closed' "$save_err"; then
-    echo "expected stale trace lean-save to preserve the daemon connection" >&2
+    echo "expected stale trace save to preserve the daemon connection" >&2
     cat "$save_out" >&2
     cat "$save_err" >&2
     rm -f "$save_out" "$save_err"
@@ -759,49 +759,49 @@ beam_start_owner "$tmp5"
   save_out="$(mktemp /tmp/beam-stale-save-out-XXXXXX)"
   save_err="$(mktemp /tmp/beam-stale-save-err-XXXXXX)"
   BEAM_PROGRESS=1 BEAM_REQUEST_ID=concurrent-stale-sync \
-    beam --root "$tmp5" lean-sync SaveSmoke/A.lean >"$sync_out" 2>"$sync_err" &
+    beam --root "$tmp5" sync SaveSmoke/A.lean >"$sync_out" 2>"$sync_err" &
   sync_pid=$!
-  wait_for_file_text "$sync_err" "syncing SaveSmoke/A.lean" "concurrent stale lean-sync start" 300 0.05
+  wait_for_file_text "$sync_err" "syncing SaveSmoke/A.lean" "concurrent stale sync start" 300 0.05
   BEAM_REQUEST_ID=concurrent-stale-save \
-    beam --root "$tmp5" lean-save SaveSmoke/A.lean >"$save_out" 2>"$save_err" &
+    beam --root "$tmp5" save SaveSmoke/A.lean >"$save_out" 2>"$save_err" &
   save_pid=$!
   if wait "$sync_pid"; then
-    echo "expected concurrent stale lean-sync to fail" >&2
+    echo "expected concurrent stale sync to fail" >&2
     cat "$sync_out" >&2
     cat "$sync_err" >&2
     rm -f "$sync_out" "$sync_err" "$save_out" "$save_err"
     exit 1
   fi
   if wait "$save_pid"; then
-    echo "expected concurrent stale lean-save to fail" >&2
+    echo "expected concurrent stale save to fail" >&2
     cat "$save_out" >&2
     cat "$save_err" >&2
     rm -f "$sync_out" "$sync_err" "$save_out" "$save_err"
     exit 1
   fi
   if ! grep -q '"code": "syncBarrierIncomplete"' "$sync_out"; then
-    echo "expected concurrent stale lean-sync to report syncBarrierIncomplete" >&2
+    echo "expected concurrent stale sync to report syncBarrierIncomplete" >&2
     cat "$sync_out" >&2
     cat "$sync_err" >&2
     rm -f "$sync_out" "$sync_err" "$save_out" "$save_err"
     exit 1
   fi
   if ! grep -q '"code": "syncBarrierIncomplete"' "$save_out"; then
-    echo "expected concurrent stale lean-save to report syncBarrierIncomplete" >&2
+    echo "expected concurrent stale save to report syncBarrierIncomplete" >&2
     cat "$save_out" >&2
     cat "$save_err" >&2
     rm -f "$sync_out" "$sync_err" "$save_out" "$save_err"
     exit 1
   fi
   if grep -q 'Beam daemon connection closed' "$sync_err"; then
-    echo "expected concurrent stale lean-sync to preserve the daemon connection" >&2
+    echo "expected concurrent stale sync to preserve the daemon connection" >&2
     cat "$sync_out" >&2
     cat "$sync_err" >&2
     rm -f "$sync_out" "$sync_err" "$save_out" "$save_err"
     exit 1
   fi
   if grep -q 'Beam daemon connection closed' "$save_err"; then
-    echo "expected concurrent stale lean-save to preserve the daemon connection" >&2
+    echo "expected concurrent stale save to preserve the daemon connection" >&2
     cat "$save_out" >&2
     cat "$save_err" >&2
     rm -f "$sync_out" "$sync_err" "$save_out" "$save_err"

@@ -80,8 +80,7 @@ Supported command families:
   `lean-beam document-symbols`, `lean-beam workspace-symbols`, `lean-beam goals before`,
   `lean-beam goals after`
 - inspect actionable Lean items in a range: `lean-beam todo`
-- inspect file or daemon state: `lean-beam open-files`, `lean-beam doctor`, `lean-beam stats`,
-  `lean-beam reset-stats`
+- inspect file or daemon state: `lean-beam open-files`, `lean-beam doctor`, `lean-beam stats`
 - produce a local, pasteable bug report card from JSON input: `lean-beam feedback-report`
 - try one isolated speculative Lean snippet: `lean-beam run-at`
 - continue from one exact speculative state: `lean-beam run-at-handle`, `lean-beam run-with`,
@@ -97,8 +96,8 @@ What to treat as the normal agent workflow surface:
   `lean-beam workspace-symbols`, `lean-beam goals`, `lean-beam todo`, `lean-beam run-at`,
   `lean-beam sync`,
   `lean-beam refresh`
-- operational commands: `lean-beam open-files`, `lean-beam doctor`,
-  `lean-beam stats`, `lean-beam reset-stats`, `lean-beam feedback-report`, `lean-beam save`,
+- operational commands: `lean-beam open-files`, `lean-beam doctor`, `lean-beam stats`,
+  `lean-beam feedback-report`, `lean-beam save`,
   `lean-beam close-save`
 - pre-stable support APIs: `lean-beam run-at-handle`, `lean-beam run-with`, `lean-beam run-with-linear`,
   `lean-beam release`, `lean-beam-search`
@@ -127,12 +126,9 @@ Core workflow contract:
   to `leanOptions`, or use `lake build` when the arguments are intentionally batch-only
 - after changing a lakefile or related Lake workspace configuration, run `lean-beam --root ROOT stop`
   before the next command that uses the Lean server; `lean-beam refresh` does not restart it
-- treat wrapper `stderr` as human-facing only; use stdout JSON or
-  `lean-beam --root ROOT request-stream`
-  for machine-readable automation
-- for a machine-readable wrapper stream, keep `lean-beam serve` active and use
-  `lean-beam --root ROOT request-stream`; raw `beam-client --port` requests are maintainer tooling
-  for separately managed brokers
+- check wrapper exit status before parsing output; completed broker operations use final stdout JSON,
+  while selector, setup, or transport failures may have human-facing stderr and no JSON
+- use MCP when a client requires structured live progress or diagnostic notifications
 - `lean-beam feedback-report` and `beam_feedback_report` return a report to the caller; Beam does not
   upload or submit it; before posting non-confidential output, review caller-authored narrative,
   request/response payloads, local paths, Beam stats, open-file data, daemon logs/incidents, and
@@ -319,18 +315,22 @@ Use `lean-beam`, not raw JSON and not raw LSP.
   starting a new `lean-beam serve` owner
 - after abnormal owner/broker exit, preserves the session fence until explicit
   `recover --generation ID`; recovery quarantines metadata and never signals its persisted PIDs
-- `lean-beam --root ROOT stop` requires an explicit root; `lean-beam status`, `lean-beam stats`, and
-  `lean-beam reset-stats` may infer a unique root
+- `lean-beam --root ROOT stop` requires an explicit root; `lean-beam status` and `lean-beam stats`
+  may infer a unique root
 - `lean-beam prune` previews old installed runtimes; restart active agents and MCP clients before
   any `--apply`, and add `--bundles` when stale installed bundle caches should also be removed
 - wrapper commands talk to the per-project Beam daemon over localhost TCP; they are not direct in-process Lean calls
-- `lean-beam serve` prints a backend-readiness JSON response on stdout and keeps the wrapper
+- `lean-beam serve` prints a running-session JSON response after backend readiness and keeps the wrapper
   process alive as the session owner; an inherited pipe ties daemon lifetime to that process without
   heartbeat files or lease expiry
-- `--port` is an optional owner-start override for `lean-beam serve`; attaching commands
-  reject it instead of silently ignoring it
-- interrupting or killing the holder closes the owner pipe and shuts down the daemon; explicit
-  `lean-beam --root ROOT stop` releases the holder cleanly
+- the OS assigns the internal loopback endpoint and the daemon reports it through a private typed
+  readiness handshake; callers select sessions by root and optional session directory rather than
+  by transport details
+- interrupting an ordinary wrapper call closes its one-request connection so the daemon cancels
+  that exact admission; `lean-beam cancel <id>` remains available for cross-process cancellation
+- interrupting the holder or using `lean-beam --root ROOT stop` performs bounded owner cleanup;
+  killing the holder closes the owner pipe and requests cooperative daemon shutdown, while the
+  session fence remains for explicit recovery
 
 `lean-beam` is more than a one-shot probe:
 
@@ -451,8 +451,7 @@ Surface rule:
 
 - wrapper `stderr` is the human-facing diagnostic surface
 - wrapper `stderr` may distinguish request-level failures from a completed request whose payload
-  failed inside Lean; use stdout JSON for machine decisions
-- `lean-beam --root ROOT request-stream ...` is the supported machine-facing wrapper stream
+  failed inside Lean; check exit status first, then use stdout JSON when the broker completed
 - do not parse wrapper `stderr` in tooling
 - MCP clients can attach `tools/call` `_meta.progressToken` for detailed live updates; without one,
   Beam keeps fast broker-backed Lean operations, feedback collection, and workspace drops quiet and
@@ -477,7 +476,7 @@ Use this when you are deciding between commands:
 - human after a real saved edit: `lean-beam sync`
 - human checkpointing one synced module: `lean-beam save` or `lean-beam close-save`
 - human diagnosing daemon or save-state trouble: `lean-beam open-files` and `lean-beam doctor`
-- tooling that wants streamed diagnostics or progress: `lean-beam --root ROOT request-stream ...`
+- tooling that wants structured live diagnostics or progress: use the MCP server
 
 ## References
 

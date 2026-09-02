@@ -122,7 +122,6 @@ write_bundle_artifacts() {
   local workspace="$bundle_dir/workspace"
   mkdir -p "$workspace/.lake/build/bin" "$workspace/.lake/build/lib"
   : >"$workspace/.lake/build/bin/beam-daemon"
-  : >"$workspace/.lake/build/bin/beam-client"
   : >"$workspace/.lake/build/lib/$bundle_plugin_name"
 }
 write_complete_bundle() {
@@ -172,7 +171,7 @@ assert_contains_literal "$unknown_err" 'usage: lean-beam prune [--apply] [--bund
 assert_contains_literal "$unknown_err" 'unknown prune option: --unknown'
 
 noncurrent_err="$tmp_root/noncurrent.err"
-if BEAM_HOME="$old_runtime" "$beam_cli" install-prune > /dev/null 2>"$noncurrent_err"; then
+if BEAM_HOME="$old_runtime" "$beam_cli" prune > /dev/null 2>"$noncurrent_err"; then
   echo "expected prune from a non-current runtime to fail" >&2
   exit 1
 fi
@@ -208,7 +207,7 @@ assert_file "$stale_bundle/metadata.json"
 permission_lock_err="$tmp_root/permission-lock.err"
 chmod u-w "$install_root"
 set +e
-BEAM_HOME="$current_runtime" "$beam_cli" install-prune \
+BEAM_HOME="$current_runtime" "$beam_cli" prune \
   > /dev/null 2>"$permission_lock_err"
 permission_lock_status="$?"
 set -e
@@ -236,7 +235,7 @@ race_err="$tmp_root/race.err"
 lock_writer_pid="$!"
 wait_for_file "$race_lock_held" "prune install-lock holder" 10
 write_lock_owner "$race_lock" "$lock_writer_pid"
-BEAM_HOME="$current_runtime" "$beam_cli" install-prune --apply > /dev/null 2>"$race_err" &
+BEAM_HOME="$current_runtime" "$beam_cli" prune --apply > /dev/null 2>"$race_err" &
 race_pid="$!"
 sleep 0.3
 rm -f "$install_root/current"
@@ -477,7 +476,7 @@ assert_output_contains "relative install marker identity" "$relative_marker_vers
 relative_marker_err="$tmp_root/relative-marker.err"
 if (
   cd "$install_root"
-  BEAM_HOME="$current_runtime" "$beam_cli" install-prune
+  BEAM_HOME="$current_runtime" "$beam_cli" prune
 ) > /dev/null 2>"$relative_marker_err"; then
   echo "expected prune to reject a relative install root marker" >&2
   exit 1

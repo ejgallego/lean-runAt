@@ -226,19 +226,19 @@ lean-beam run-at "Foo.lean" "$version" 10 2 "exact trivial"
 `lean-beam serve` is the only wrapper command that starts a project session. Its
 inherited ownership pipe defines the session lifetime: interrupt the holder, or run
 `lean-beam --root ROOT stop`, to close the daemon and its backend processes. All other wrapper
-commands attach to an existing owner and fail with a recovery command when none
-is live. Attaching commands use the owner's frozen configuration and do not rebuild a competing
-desired configuration. A second owner does resolve its proposed configuration and reports any
-mismatch while preserving the old owner. During stopping the descriptor reports `draining` and a
-replacement owner is refused until owned cleanup completes after graceful or process-group
-teardown and daemon-leader reaping. MCP clients do not need a separate holder; the stdio MCP
-process owns its runtime session.
+commands attach to an existing owner and report the exact `serve` command when no session exists.
+Abnormal fenced state instead reports the explicit recovery command. Attaching commands use the
+owner's frozen configuration and do not rebuild a competing desired configuration. A second owner
+does resolve its proposed configuration and reports any mismatch while preserving the old owner.
+During stopping the descriptor reports `draining` and a replacement owner is refused until owned
+cleanup completes after graceful or process-group teardown and daemon-leader reaping. MCP clients
+do not need a separate holder; the stdio MCP process owns its runtime session.
 
 `lean-beam status` reports the public session state as `absent`, `running`, `stopping`, or
 `recoveryRequired`, together with the resolved workspace and session directory. Human-facing
 commands may infer a root only when the result is unique. If Lean and Rocq markers identify
-different candidate roots, Beam lists the ambiguity and requires `--root`. Machine requests,
-`stop`, and `recover` always require an explicit root.
+different candidate roots, Beam lists the ambiguity and requires `--root`. Automated callers should
+pass an explicit root; `stop` and `recover` always require one.
 
 Successful `serve`, `status`, `stop`, and `recover` commands emit the same top-level
 `{"ok": true, "result": ...}` shape. `serve` reports the public running session rather than its
@@ -282,9 +282,8 @@ the selected leaf without following links before every status or attachment oper
 drift therefore fails closed instead of silently weakening an already published session boundary.
 
 Each wrapper session publishes exactly one frozen workspace. Wrapper mode does not allow runtime
-`init_workspace`, `list_workspaces`, or `drop_workspace` requests. The
-supported semantic `request-stream` also excludes process-wide `shutdown` and `reset_stats`; use
-the dedicated `lean-beam --root ROOT stop` command for lifecycle control.
+`init_workspace`, `list_workspaces`, or `drop_workspace` requests. Use the dedicated
+`lean-beam --root ROOT stop` command for lifecycle control.
 
 Use a stable external session directory when ownership must remain fenced while the project path is
 deleted and recreated; deleting a project-local `.beam` necessarily deletes its default fence.
@@ -306,15 +305,12 @@ For a current descriptor, the selected `--root` must match its recorded workspac
 using the same session directory with an unrelated root cannot quarantine the session. `status`
 reports this as `sessionSelectorMismatch`, not as a lifecycle state or recovery requirement.
 
-Machine clients should avoid root auto-detection and raw port/session fields:
-
-```bash
-lean-beam --root /workspace/a request-stream \
-  '{"op":"stats","clientRequestId":"agent-stats-1"}'
-```
-
-The wrapper selects the frozen workspace and injects root, workspace identity, generation
-capability, and endpoint. `beam-client --port ...` is lower-level maintainer/debug tooling.
+Machine clients should pass an explicit `--root`, invoke the typed wrapper operations, and check
+the process exit status before parsing stdout. Completed broker operations print final JSON,
+including typed semantic failures. Selector, setup, and transport failures can exit nonzero with a
+human-readable stderr diagnostic and no JSON. Use MCP when a client requires structured live
+progress, diagnostics, or failures; Beam intentionally does not expose its raw port, session
+capability, or generic broker request record as an installed client interface.
 
 The `python3` line extracts `result.version` for shell examples. You can also copy that version
 number from the printed `lean-beam update` JSON.

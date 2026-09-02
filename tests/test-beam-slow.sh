@@ -50,7 +50,6 @@ run_step "build" lake build \
   Beam.LSP:shared \
   beam-cli \
   beam-daemon \
-  beam-client \
   lean-beam-mcp
 
 mcp_stdio_timeout="${BEAM_MCP_STDIO_TIMEOUT:-60}"

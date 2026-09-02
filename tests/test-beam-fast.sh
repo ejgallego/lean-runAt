@@ -8,6 +8,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+beam_fast_state_root="$(mktemp -d "${TMPDIR:-/tmp}/beam-fast-state-XXXXXX")"
+beam_fast_cleanup() {
+  rm -rf -- "$beam_fast_state_root"
+}
+trap beam_fast_cleanup EXIT
+export BEAM_BUNDLE_DIR="$beam_fast_state_root/bundles"
+export BEAM_SESSION_ROOT="$beam_fast_state_root/sessions"
+
 bash scripts/check-daemon-safety.sh
 bash scripts/check-task-priority.sh
 bash scripts/check-markdown-links.sh
@@ -25,11 +33,24 @@ run_quiet_lake_build() {
   rm -f "$log"
 }
 
+run_quiet_test() {
+  local label="$1"
+  shift
+  local log
+  log="$(mktemp /tmp/beam-fast-test-log-XXXXXX)"
+  if ! "$@" > "$log" 2>&1; then
+    echo "beam-fast test failed: $label" >&2
+    cat "$log" >&2
+    rm -f "$log"
+    return 1
+  fi
+  rm -f "$log"
+}
+
 run_quiet_lake_build \
   Beam.LSP:shared \
   beam-cli \
   beam-daemon \
-  beam-client \
   lean-beam-mcp \
   BeamTest.Broker.StreamDedupTest \
   BeamTest.Broker.RequestHandleTest \
@@ -40,28 +61,28 @@ run_quiet_lake_build \
   beam-daemon-smoke-test \
   beam-sync-concurrency-test \
   beam-daemon-save-stream-test \
-  beam-daemon-request-stream-test \
+  beam-daemon-stream-contract-test \
   beam-sync-result-test \
-  beam-daemon-startup-handshake-test \
+  beam-daemon-backend-startup-test \
   beam-cli-daemon-test \
   beam-feedback-test \
   beam-mcp-projection-test \
   beam-mcp-protocol-test
 
-.lake/build/bin/beam-broker-protocol-test > /dev/null
-.lake/build/bin/beam-broker-pending-test > /dev/null
-.lake/build/bin/beam-broker-document-state-test > /dev/null
-.lake/build/bin/beam-broker-open-docs-test > /dev/null
-.lake/build/bin/beam-cli-daemon-test > /dev/null
-.lake/build/bin/beam-feedback-test > /dev/null
-.lake/build/bin/beam-mcp-projection-test > /dev/null
-.lake/build/bin/beam-mcp-protocol-test > /dev/null
-.lake/build/bin/beam-daemon-smoke-test > /dev/null
-.lake/build/bin/beam-sync-concurrency-test > /dev/null
-.lake/build/bin/beam-daemon-save-stream-test > /dev/null
-.lake/build/bin/beam-daemon-request-stream-test > /dev/null
-.lake/build/bin/beam-sync-result-test > /dev/null
-.lake/build/bin/beam-daemon-startup-handshake-test > /dev/null
+run_quiet_test broker-protocol .lake/build/bin/beam-broker-protocol-test
+run_quiet_test broker-pending .lake/build/bin/beam-broker-pending-test
+run_quiet_test broker-document-state .lake/build/bin/beam-broker-document-state-test
+run_quiet_test broker-open-docs .lake/build/bin/beam-broker-open-docs-test
+run_quiet_test cli-daemon .lake/build/bin/beam-cli-daemon-test
+run_quiet_test feedback .lake/build/bin/beam-feedback-test
+run_quiet_test mcp-projection .lake/build/bin/beam-mcp-projection-test
+run_quiet_test mcp-protocol .lake/build/bin/beam-mcp-protocol-test
+run_quiet_test daemon-smoke .lake/build/bin/beam-daemon-smoke-test
+run_quiet_test sync-concurrency .lake/build/bin/beam-sync-concurrency-test
+run_quiet_test daemon-save-stream .lake/build/bin/beam-daemon-save-stream-test
+run_quiet_test daemon-stream-contract .lake/build/bin/beam-daemon-stream-contract-test
+run_quiet_test sync-result .lake/build/bin/beam-sync-result-test
+run_quiet_test daemon-backend-startup .lake/build/bin/beam-daemon-backend-startup-test
 
 assert_output_contains() {
   local label="$1"
@@ -143,6 +164,12 @@ fi
 if [ -n "$source_tree_dirty" ]; then
   assert_output_contains "lean-beam --version" "$lean_beam_version" "source dirty: $source_tree_dirty"
 fi
+
+lean_beam_help="$(scripts/lean-beam --help)"
+assert_output_contains "lean-beam --help" "$lean_beam_help" \
+  "lean-beam [--root PATH] run-at"
+assert_output_omits "lean-beam --help" "$lean_beam_help" "lean-run-at"
+assert_output_omits "lean-beam --help" "$lean_beam_help" "reset-stats"
 
 if scripts/lean-beam feedback --help > /dev/null 2>&1; then
   echo "expected obsolete lean-beam feedback command to be rejected" >&2
@@ -347,125 +374,6 @@ if ! grep -Fq 'workspace root is not a Lean/Lake project' "$cli_non_workspace_er
 fi
 rm -rf -- "$cli_non_workspace_root"
 rm -f "$cli_non_workspace_err"
-
-wrapper_todo_control_dir="$(mktemp -d /tmp/lean-beam-wrapper-todo-XXXXXX)"
-wrapper_todo_update_out="$(mktemp /tmp/lean-beam-wrapper-todo-update-out-XXXXXX)"
-wrapper_todo_update_err="$(mktemp /tmp/lean-beam-wrapper-todo-update-err-XXXXXX)"
-wrapper_todo_out="$(mktemp /tmp/lean-beam-wrapper-todo-out-XXXXXX)"
-wrapper_todo_err="$(mktemp /tmp/lean-beam-wrapper-todo-err-XXXXXX)"
-wrapper_todo_owner_out="$(mktemp /tmp/lean-beam-wrapper-todo-owner-out-XXXXXX)"
-wrapper_todo_owner_err="$(mktemp /tmp/lean-beam-wrapper-todo-owner-err-XXXXXX)"
-wrapper_todo_owner_pid=""
-wrapper_todo_cleanup() {
-  scripts/lean-beam --root tests/save_olean_project \
-    --session-dir "$wrapper_todo_control_dir" stop > /dev/null 2>&1 || true
-  if [ -n "$wrapper_todo_owner_pid" ]; then
-    wait "$wrapper_todo_owner_pid" 2>/dev/null || true
-  fi
-  rm -rf -- "$wrapper_todo_control_dir"
-  rm -f "$wrapper_todo_update_out" "$wrapper_todo_update_err" "$wrapper_todo_out" "$wrapper_todo_err" \
-    "$wrapper_todo_owner_out" "$wrapper_todo_owner_err"
-}
-
-scripts/lean-beam --root tests/save_olean_project \
-  --session-dir "$wrapper_todo_control_dir" serve \
-  >"$wrapper_todo_owner_out" 2>"$wrapper_todo_owner_err" &
-wrapper_todo_owner_pid="$!"
-for _ in $(seq 1 600); do
-  if grep -Fq "serving Beam session" "$wrapper_todo_owner_err"; then
-    break
-  fi
-  if ! kill -0 "$wrapper_todo_owner_pid" 2>/dev/null; then
-    echo "expected lean-beam todo wrapper owner to remain alive" >&2
-    cat "$wrapper_todo_owner_err" >&2
-    wrapper_todo_cleanup
-    exit 1
-  fi
-  sleep 0.1
-done
-if ! grep -Fq "serving Beam session" "$wrapper_todo_owner_err"; then
-  echo "timed out waiting for lean-beam todo wrapper owner" >&2
-  cat "$wrapper_todo_owner_err" >&2
-  wrapper_todo_cleanup
-  exit 1
-fi
-
-if ! scripts/lean-beam --root tests/save_olean_project \
-      --session-dir "$wrapper_todo_control_dir" \
-      update TodoSmoke.lean \
-    > "$wrapper_todo_update_out" 2>"$wrapper_todo_update_err"; then
-  echo "expected lean-beam update wrapper smoke to succeed before todo" >&2
-  cat "$wrapper_todo_update_err" >&2
-  wrapper_todo_cleanup
-  exit 1
-fi
-
-if ! wrapper_todo_version="$(
-    WRAPPER_TODO_UPDATE_OUT="$wrapper_todo_update_out" python3 - <<'PY'
-import json
-import os
-import sys
-
-with open(os.environ["WRAPPER_TODO_UPDATE_OUT"], encoding="utf-8") as f:
-    response = json.load(f)
-
-version = response.get("result", {}).get("version")
-if not isinstance(version, int):
-    print(f"expected wrapper update response to return version, got {response}", file=sys.stderr)
-    sys.exit(1)
-
-print(version)
-PY
-)"; then
-  wrapper_todo_cleanup
-  exit 1
-fi
-
-if ! scripts/lean-beam --root tests/save_olean_project \
-      --session-dir "$wrapper_todo_control_dir" \
-      todo TodoSmoke.lean "$wrapper_todo_version" 13 0 14 0 --kind sorry --suggest none \
-    > "$wrapper_todo_out" 2>"$wrapper_todo_err"; then
-  echo "expected lean-beam todo wrapper smoke to succeed" >&2
-  cat "$wrapper_todo_err" >&2
-  wrapper_todo_cleanup
-  exit 1
-fi
-
-if ! WRAPPER_TODO_OUT="$wrapper_todo_out" python3 - <<'PY'
-import json
-import os
-import sys
-
-with open(os.environ["WRAPPER_TODO_OUT"], encoding="utf-8") as f:
-    response = json.load(f)
-
-if response.get("ok") is not True:
-    print(f"expected lean-beam todo wrapper response ok=true, got {response}", file=sys.stderr)
-    sys.exit(1)
-
-items = response.get("result", {}).get("items", [])
-if len(items) != 1:
-    print(f"expected one wrapper todo item, got {items}", file=sys.stderr)
-    sys.exit(1)
-
-item = items[0]
-if item.get("kind") != "sorry":
-    print(f"expected wrapper todo kind sorry, got {item}", file=sys.stderr)
-    sys.exit(1)
-
-if item.get("runAtPosition") != {"line": 13, "character": 2}:
-    print(f"unexpected wrapper todo runAtPosition: {item}", file=sys.stderr)
-    sys.exit(1)
-
-if "runAtText" in item:
-    print(f"expected --suggest none to omit wrapper runAtText: {item}", file=sys.stderr)
-    sys.exit(1)
-PY
-then
-  wrapper_todo_cleanup
-  exit 1
-fi
-wrapper_todo_cleanup
 
 python3 - <<'PY'
 import json

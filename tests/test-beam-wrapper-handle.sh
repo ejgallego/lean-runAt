@@ -22,9 +22,9 @@ beam_wrapper_start_owner "$handle_root"
 example : True ∧ True := by
 EOF
 
-  handle_version="$(beam_wrapper_update_version HandleSmoke "$beam_script" lean-update HandleSmoke.lean)"
+  handle_version="$(beam_wrapper_update_version HandleSmoke "$beam_script" update HandleSmoke.lean)"
 
-  mint_handle_stdin="$(printf 'constructor' | "$beam_script" lean-run-at-handle HandleSmoke.lean "$handle_version" 0 27 --stdin)"
+  mint_handle_stdin="$(printf 'constructor' | "$beam_script" run-at-handle HandleSmoke.lean "$handle_version" 0 27 --stdin)"
   if [ "$(BEAM_JSON_PAYLOAD="$mint_handle_stdin" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper handle mint via --stdin to succeed" >&2
     printf '%s\n' "$mint_handle_stdin" >&2
@@ -38,7 +38,7 @@ EOF
 
   handle_mint_file="handle-mint.txt"
   printf 'constructor' > "$handle_mint_file"
-  mint_handle_file="$("$beam_script" lean-run-at-handle HandleSmoke.lean "$handle_version" 0 27 --text-file "$handle_mint_file")"
+  mint_handle_file="$("$beam_script" run-at-handle HandleSmoke.lean "$handle_version" 0 27 --text-file "$handle_mint_file")"
   if [ "$(BEAM_JSON_PAYLOAD="$mint_handle_file" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper handle mint via --text-file to succeed" >&2
     printf '%s\n' "$mint_handle_file" >&2
@@ -52,7 +52,7 @@ EOF
   branch_handle_file="branch-handle.json"
   printf '%s\n' "$mint_handle_file" > "$branch_handle_file"
 
-  mint_handle="$("$beam_script" lean-run-at-handle HandleSmoke.lean "$handle_version" 0 27 "constructor")"
+  mint_handle="$("$beam_script" run-at-handle HandleSmoke.lean "$handle_version" 0 27 "constructor")"
   if [ "$(BEAM_JSON_PAYLOAD="$mint_handle" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper handle mint to succeed" >&2
     printf '%s\n' "$mint_handle" >&2
@@ -65,7 +65,7 @@ EOF
   fi
 
   branch_step_stdin_err="$(beam_wrapper_mktemp_file run-with-stdin)"
-  branch_step_stdin="$(printf 'exact trivial' | BEAM_DEBUG_TEXT=1 "$beam_script" lean-run-with HandleSmoke.lean "$mint_handle_stdin" --stdin 2>"$branch_step_stdin_err")"
+  branch_step_stdin="$(printf 'exact trivial' | BEAM_DEBUG_TEXT=1 "$beam_script" run-with HandleSmoke.lean "$mint_handle_stdin" --stdin 2>"$branch_step_stdin_err")"
   if [ "$(BEAM_JSON_PAYLOAD="$branch_step_stdin" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper non-linear handle continuation via --stdin to succeed" >&2
     printf '%s\n' "$branch_step_stdin" >&2
@@ -78,13 +78,13 @@ EOF
     cat "$branch_step_stdin_err" >&2
     exit 1
   fi
-  if ! grep -q 'debug text for lean-run-with: source=stdin' "$branch_step_stdin_err"; then
+  if ! grep -q 'debug text for run-with: source=stdin' "$branch_step_stdin_err"; then
     echo "expected wrapper run-with debug-text mode to report stdin as the continuation text source" >&2
     cat "$branch_step_stdin_err" >&2
     exit 1
   fi
 
-  branch_step_file="$(printf 'exact trivial' | "$beam_script" lean-run-with HandleSmoke.lean --handle-file "$branch_handle_file" --stdin)"
+  branch_step_file="$(printf 'exact trivial' | "$beam_script" run-with HandleSmoke.lean --handle-file "$branch_handle_file" --stdin)"
   if [ "$(BEAM_JSON_PAYLOAD="$branch_step_file" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper non-linear handle continuation via --handle-file to succeed" >&2
     printf '%s\n' "$branch_step_file" >&2
@@ -97,7 +97,7 @@ EOF
   fi
 
   stdin_conflict_err="$(beam_wrapper_mktemp_file run-with-stdin-conflict)"
-  if printf '%s\n' "$mint_handle" | "$beam_script" lean-run-with HandleSmoke.lean - --stdin >"$stdin_conflict_err" 2>&1; then
+  if printf '%s\n' "$mint_handle" | "$beam_script" run-with HandleSmoke.lean - --stdin >"$stdin_conflict_err" 2>&1; then
     echo "expected wrapper run-with to reject reading both handle json and text from stdin" >&2
     cat "$stdin_conflict_err" >&2
     exit 1
@@ -108,7 +108,7 @@ EOF
     exit 1
   fi
 
-  branch_step="$(printf '%s\n' "$mint_handle" | "$beam_script" lean-run-with HandleSmoke.lean - "exact trivial")"
+  branch_step="$(printf '%s\n' "$mint_handle" | "$beam_script" run-with HandleSmoke.lean - "exact trivial")"
   if [ "$(BEAM_JSON_PAYLOAD="$branch_step" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper non-linear handle continuation to succeed" >&2
     printf '%s\n' "$branch_step" >&2
@@ -120,7 +120,7 @@ EOF
     exit 1
   fi
 
-  branch_done="$(printf '%s\n' "$branch_step" | "$beam_script" lean-run-with HandleSmoke.lean - "exact trivial")"
+  branch_done="$(printf '%s\n' "$branch_step" | "$beam_script" run-with HandleSmoke.lean - "exact trivial")"
   if [ "$(BEAM_JSON_PAYLOAD="$branch_done" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper second non-linear handle continuation to succeed" >&2
     printf '%s\n' "$branch_done" >&2
@@ -132,7 +132,7 @@ EOF
     exit 1
   fi
 
-  mint_linear="$("$beam_script" lean-run-at-handle HandleSmoke.lean "$handle_version" 0 27 "constructor")"
+  mint_linear="$("$beam_script" run-at-handle HandleSmoke.lean "$handle_version" 0 27 "constructor")"
   if [ "$(BEAM_JSON_PAYLOAD="$mint_linear" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper linear handle mint to succeed" >&2
     printf '%s\n' "$mint_linear" >&2
@@ -143,7 +143,7 @@ EOF
   printf 'exact trivial' > "$linear_text_file"
   linear_handle_file="linear-handle.json"
   printf '%s\n' "$mint_linear" > "$linear_handle_file"
-  linear_step="$("$beam_script" lean-run-with-linear HandleSmoke.lean --handle-file "$linear_handle_file" --text-file "$linear_text_file")"
+  linear_step="$("$beam_script" run-with-linear HandleSmoke.lean --handle-file "$linear_handle_file" --text-file "$linear_text_file")"
   if [ "$(BEAM_JSON_PAYLOAD="$linear_step" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper linear handle continuation via --handle-file and --text-file to succeed" >&2
     printf '%s\n' "$linear_step" >&2
@@ -156,7 +156,7 @@ EOF
   fi
 
   linear_reuse_err="$(beam_wrapper_mktemp_file linear-reuse)"
-  if printf '%s\n' "$mint_linear" | "$beam_script" lean-run-with HandleSmoke.lean - "exact trivial" >"$linear_reuse_err" 2>&1; then
+  if printf '%s\n' "$mint_linear" | "$beam_script" run-with HandleSmoke.lean - "exact trivial" >"$linear_reuse_err" 2>&1; then
     echo "expected consumed linear handle to fail when reused" >&2
     cat "$linear_reuse_err" >&2
     exit 1
@@ -169,7 +169,7 @@ EOF
 
   release_handle_file="release-handle.json"
   printf '%s\n' "$linear_step" > "$release_handle_file"
-  release_out="$("$beam_script" lean-release HandleSmoke.lean --handle-file "$release_handle_file")"
+  release_out="$("$beam_script" release HandleSmoke.lean --handle-file "$release_handle_file")"
   if [ "$(BEAM_JSON_PAYLOAD="$release_out" read_json_text_field ok)" != "true" ]; then
     echo "expected wrapper handle release via --handle-file to succeed" >&2
     printf '%s\n' "$release_out" >&2
@@ -177,7 +177,7 @@ EOF
   fi
 
   release_reuse_err="$(beam_wrapper_mktemp_file release-reuse)"
-  if printf '%s\n' "$linear_step" | "$beam_script" lean-run-with HandleSmoke.lean - "exact trivial" >"$release_reuse_err" 2>&1; then
+  if printf '%s\n' "$linear_step" | "$beam_script" run-with HandleSmoke.lean - "exact trivial" >"$release_reuse_err" 2>&1; then
     echo "expected released handle to fail when reused" >&2
     cat "$release_reuse_err" >&2
     exit 1
@@ -188,7 +188,7 @@ EOF
     exit 1
   fi
 
-  close_handle_out="$("$beam_script" lean-close HandleSmoke.lean)"
+  close_handle_out="$("$beam_script" close HandleSmoke.lean)"
   if [ "$(BEAM_JSON_PAYLOAD="$close_handle_out" read_json_text_field ok)" != "true" ]; then
     echo "expected handle smoke file close to succeed" >&2
     printf '%s\n' "$close_handle_out" >&2
@@ -220,7 +220,7 @@ EOF
     exit 1
   fi
 
-  portable_helper_version="$(beam_wrapper_update_version "portable HandleSmoke" "$beam_script" lean-update HandleSmoke.lean)"
+  portable_helper_version="$(beam_wrapper_update_version "portable HandleSmoke" "$beam_script" update HandleSmoke.lean)"
   portable_helper_root="$(PATH="$portable_wrapper_bin:$PATH" "$portable_wrapper_bin/lean-beam-search" mint HandleSmoke.lean "$portable_helper_version" 0 27 "constructor")"
   if [ "$(BEAM_JSON_PAYLOAD="$portable_helper_root" read_json_text_field ok)" != "true" ]; then
     echo "expected symlinked helper to work when readlink -f is unavailable" >&2
@@ -303,7 +303,7 @@ EOF
     exit 1
   fi
 
-  close_helper_handle_out="$("$beam_script" lean-close HandleSmoke.lean)"
+  close_helper_handle_out="$("$beam_script" close HandleSmoke.lean)"
   if [ "$(BEAM_JSON_PAYLOAD="$close_helper_handle_out" read_json_text_field ok)" != "true" ]; then
     echo "expected helper handle smoke file close to succeed" >&2
     printf '%s\n' "$close_helper_handle_out" >&2

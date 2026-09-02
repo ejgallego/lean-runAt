@@ -10,7 +10,7 @@ import Lean
 
 open Lean
 
-namespace BeamTest.Broker.StartupHandshakeTest
+namespace BeamTest.Broker.BackendStartupTest
 
 open BeamTest.Broker.TestUtil
 
@@ -100,11 +100,11 @@ private def checkStartupFailure
   let broker ← spawnLeanBrokerWithPlugin endpoint root plugin fakeServer.toString
   try
     waitForBrokerReadyForRoot endpoint root
-    let resp ← runClient endpoint { op := .ensure, root? := some root.toString }
+    let resp ← runClient endpoint { op := .ensure }
     if resp.ok then
-      throw <| IO.userError s!"expected startup handshake failure, got success {(toJson resp).compress}"
+      throw <| IO.userError s!"expected backend startup failure, got success {(toJson resp).compress}"
     let some err := resp.error?
-      | throw <| IO.userError s!"expected startup handshake error payload, got {(toJson resp).compress}"
+      | throw <| IO.userError s!"expected backend startup error payload, got {(toJson resp).compress}"
     if err.code != "internalError" then
       throw <| IO.userError s!"expected internalError for startup failure, got {(toJson resp).compress}"
     unless err.message.contains "Lean backend failed during startup" do
@@ -149,4 +149,4 @@ def main : IO Unit := do
     catch _ =>
       pure ()
 
-end BeamTest.Broker.StartupHandshakeTest
+end BeamTest.Broker.BackendStartupTest

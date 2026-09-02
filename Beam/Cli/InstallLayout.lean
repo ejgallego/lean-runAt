@@ -84,7 +84,7 @@ def bundleSourceHashInputLabels : List String :=
   bundleRootFiles ++ bundleSourceDirs.map (· ++ "/**")
 
 def installRuntimePaths : List String :=
-  ["libexec/beam-cli", "libexec/beam-daemon", "libexec/beam-client",
+  ["libexec/beam-cli", "libexec/beam-daemon",
     "libexec/lean-beam-mcp", s!"libexec/{Beam.LSP.Lib.pluginSharedLibName}"]
 
 def installWrapperPaths : List String :=

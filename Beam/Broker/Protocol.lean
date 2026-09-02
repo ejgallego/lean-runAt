@@ -20,6 +20,36 @@ structure DaemonIdentity where
   configHash : String
   deriving BEq, Repr, FromJson, ToJson
 
+def serverHelloSchemaVersion : Nat :=
+  1
+
+/-- Identity greeting emitted by a wrapper daemon before it accepts one request connection. -/
+structure ServerHello where
+  schemaVersion : Nat
+  identity : DaemonIdentity
+  deriving Repr, FromJson, ToJson
+
+def ServerHello.current (identity : DaemonIdentity) : ServerHello := {
+  schemaVersion := serverHelloSchemaVersion
+  identity
+}
+
+def ServerHello.decode
+    (expectedIdentity : DaemonIdentity)
+    (msg : String) : Except String Unit := do
+  let json ←
+    match Json.parse msg with
+    | .ok json => pure json
+    | .error err => throw s!"invalid Beam daemon greeting json: {err}"
+  let hello ←
+    match fromJson? (α := ServerHello) json with
+    | .ok hello => pure hello
+    | .error err => throw s!"invalid Beam daemon greeting payload: {err}"
+  unless hello.schemaVersion == serverHelloSchemaVersion do
+    throw s!"unsupported Beam daemon greeting schema {hello.schemaVersion}"
+  unless hello.identity == expectedIdentity do
+    throw "Beam daemon greeting identity does not match the selected session"
+
 instance : Repr Lsp.DiagnosticSeverity where
   reprPrec severity _ :=
     match severity with
@@ -53,7 +83,6 @@ inductive Op where
   | listWorkspaces
   | dropWorkspace
   | stats
-  | resetStats
   | shutdown
   deriving Inhabited, BEq, Repr
 
@@ -61,7 +90,7 @@ def Op.all : Array Op := #[
   .ensure, .openDocs, .cancel, .updateFile, .syncFile, .refreshFile, .close, .runAt,
   .hover, .signatureHelp, .definition, .references, .documentSymbols, .workspaceSymbols,
   .codeActionResolve, .saveOlean, .goals, .todo, .runWith, .release, .initWorkspace,
-  .listWorkspaces, .dropWorkspace, .stats, .resetStats, .shutdown
+  .listWorkspaces, .dropWorkspace, .stats, .shutdown
 ]
 
 def Op.key : Op → String
@@ -89,7 +118,6 @@ def Op.key : Op → String
   | .listWorkspaces => "list_workspaces"
   | .dropWorkspace => "drop_workspace"
   | .stats => "stats"
-  | .resetStats => "reset_stats"
   | .shutdown => "shutdown"
 
 instance : ToJson Op where
@@ -121,7 +149,6 @@ instance : FromJson Op where
     | .str "list_workspaces" => .ok .listWorkspaces
     | .str "drop_workspace" => .ok .dropWorkspace
     | .str "stats" => .ok .stats
-    | .str "reset_stats" => .ok .resetStats
     | .str "shutdown" => .ok .shutdown
     | j => .error s!"expected Beam daemon op, got {j.compress}"
 
@@ -250,7 +277,7 @@ inductive WorkspaceScope where
 
 /-- Describe whether a broker operation is process-wide or resolves one workspace. -/
 def Op.workspaceScope : Op → WorkspaceScope
-  | .listWorkspaces | .resetStats | .shutdown => .none
+  | .listWorkspaces | .shutdown => .none
   | .openDocs | .stats => .optional
   | .cancel
   | .ensure | .updateFile | .syncFile | .refreshFile | .close | .runAt | .hover
@@ -264,7 +291,7 @@ def Op.tracksActiveRequest : Op → Bool
   | .ensure | .openDocs | .updateFile | .syncFile | .refreshFile | .close | .runAt | .hover
   | .signatureHelp | .definition | .references | .documentSymbols | .workspaceSymbols
   | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release | .initWorkspace
-  | .listWorkspaces | .dropWorkspace | .stats | .resetStats => true
+  | .listWorkspaces | .dropWorkspace | .stats => true
 
 private def Op.optionalRequestFields (op : Op) : Array String :=
   #["clientRequestId", "daemonCapability"] ++
@@ -272,47 +299,46 @@ private def Op.optionalRequestFields (op : Op) : Array String :=
   | .none => #[]
   | .optional | .required => #["workspaceId"]) ++
   match op with
-  | .ensure => #["root"]
-  | .openDocs | .stats => #["root"]
+  | .ensure | .openDocs | .stats => #[]
   | .cancel => #["cancelRequestId"]
-  | .updateFile => #["root", "path"]
+  | .updateFile => #["path"]
   | .syncFile | .refreshFile =>
-      #["root", "path", "diagnosticScope", "diagnosticsInResult"]
-  | .close => #["root", "path", "diagnosticScope", "saveArtifacts"]
+      #["path", "diagnosticScope", "diagnosticsInResult"]
+  | .close => #["path", "diagnosticScope", "saveArtifacts"]
   | .runAt =>
-      #["root", "path", "version", "line", "character", "text", "storeHandle"]
+      #["path", "version", "line", "character", "text", "storeHandle"]
   | .hover | .signatureHelp | .definition =>
-      #["root", "path", "version", "line", "character"]
+      #["path", "version", "line", "character"]
   | .references =>
-      #["root", "path", "version", "line", "character", "includeDeclaration"]
-  | .documentSymbols => #["root", "path", "version"]
-  | .workspaceSymbols => #["root", "query"]
-  | .codeActionResolve => #["root", "path", "version", "codeAction"]
-  | .saveOlean => #["root", "path", "diagnosticScope"]
+      #["path", "version", "line", "character", "includeDeclaration"]
+  | .documentSymbols => #["path", "version"]
+  | .workspaceSymbols => #["query"]
+  | .codeActionResolve => #["path", "version", "codeAction"]
+  | .saveOlean => #["path", "diagnosticScope"]
   | .goals =>
       #[
-        "root", "path", "version", "line", "character", "text", "mode", "compact",
+        "path", "version", "line", "character", "text", "mode", "compact",
         "ppFormat"
       ]
   | .todo =>
       #[
-        "root", "path", "version", "line", "character", "endLine", "endCharacter", "kinds",
+        "path", "version", "line", "character", "endLine", "endCharacter", "kinds",
         "suggest"
       ]
   | .runWith =>
-      #["root", "path", "text", "storeHandle", "linear", "handle"]
-  | .release => #["root", "path", "handle"]
+      #["path", "text", "storeHandle", "linear", "handle"]
+  | .release => #["path", "handle"]
   | .initWorkspace =>
       #["workspaceMode", "root", "leanCmd", "leanPlugin", "rocqCmd"]
   | .dropWorkspace => #[]
-  | .listWorkspaces | .resetStats | .shutdown => #[]
+  | .listWorkspaces | .shutdown => #[]
 
 private def Op.usesBackend : Op → Bool
   | .ensure | .updateFile | .syncFile | .refreshFile | .close | .runAt | .hover
   | .signatureHelp | .definition | .references | .documentSymbols | .workspaceSymbols
   | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release => true
   | .openDocs | .cancel | .initWorkspace | .listWorkspaces | .dropWorkspace | .stats
-  | .resetStats | .shutdown => false
+  | .shutdown => false
 
 private def optionalJsonField [ToJson α] (name : String) : Option α → List (String × Json)
   | some value => [(name, toJson value)]
@@ -377,8 +403,6 @@ def Request.validateFields (req : Request) : Except String Unit := do
     throw s!"broker op '{req.op.key}' accepts no unrelated fields: {String.intercalate ", " unexpected.toList}"
   if !req.op.usesBackend && req.backend != .lean then
     throw s!"broker op '{req.op.key}' does not select a backend"
-  if (req.op == .stats || req.op == .openDocs) && req.root?.isSome && req.workspaceId?.isNone then
-    throw s!"broker op '{req.op.key}' requires 'workspaceId' when 'root' is present"
 
 private def optionalField? [FromJson α] (j : Json) (field : String) : Except String (Option α) := do
   match j.getObjVal? field with
@@ -437,69 +461,6 @@ instance : FromJson Request where
     }
     request.validateFields
     pure request
-
-/--
-A semantic request accepted by the supported project-session client.
-
-Session routing and authority are supplied by the selected session descriptor, not by caller JSON.
-The generic `Request` remains the internal broker protocol used by maintenance tooling.
--/
-structure ProjectRequest where
-  private request : Request
-
-private def projectRequestForbiddenFields : Array String :=
-  #["workspaceId", "workspaceMode", "daemonCapability", "root", "leanCmd", "leanPlugin", "rocqCmd"]
-
-private def ProjectRequest.supportedOp : Op → Bool
-  | .openDocs | .cancel | .updateFile | .syncFile | .refreshFile | .close | .runAt
-  | .hover | .signatureHelp | .definition | .references | .documentSymbols | .workspaceSymbols
-  | .codeActionResolve | .saveOlean | .goals | .todo | .runWith | .release | .stats => true
-  | .ensure | .initWorkspace | .listWorkspaces | .dropWorkspace | .resetStats | .shutdown => false
-
-def ProjectRequest.ofRequest (request : Request) : Except String ProjectRequest := do
-  unless ProjectRequest.supportedOp request.op do
-    throw s!"broker op '{request.op.key}' is not available through a project session"
-  if request.workspaceId?.isSome || request.workspaceMode?.isSome ||
-      request.daemonCapability?.isSome || request.root?.isSome || request.leanCmd?.isSome ||
-      request.leanPlugin?.isSome || request.rocqCmd?.isSome then
-    throw "project requests cannot select session routing, authority, or executable configuration"
-  let some clientRequestId := request.clientRequestId?
-    | throw "project requests require a non-empty clientRequestId"
-  if clientRequestId.isEmpty then
-    throw "project requests require a non-empty clientRequestId"
-  request.validateFields
-  pure { request }
-
-instance : FromJson ProjectRequest where
-  fromJson? json := do
-    match json with
-    | .obj fields =>
-        let forbidden := projectRequestForbiddenFields.filter fields.contains
-        unless forbidden.isEmpty do
-          throw s!"project request contains session-owned fields: {String.intercalate ", " forbidden.toList}"
-    | _ => pure ()
-    ProjectRequest.ofRequest (← fromJson? json)
-
-def ProjectRequest.op (request : ProjectRequest) : Op :=
-  request.request.op
-
-/-- Attach one semantic request to a selected, authenticated workspace session. -/
-def ProjectRequest.attach
-    (request : ProjectRequest)
-    (workspaceId : WorkspaceId)
-    (root capability : String) : Request :=
-  let request := request.request
-  let request := { request with daemonCapability? := some capability }
-  match request.op.workspaceScope with
-  | .none => request
-  | .optional | .required =>
-    let request := { request with workspaceId? := some workspaceId }
-    if request.op == .cancel then
-      request
-    else {
-      request with
-      root? := some root
-    }
 
 structure Error where
   code : String
