@@ -561,7 +561,7 @@ private def checkRuntimeSetupErrors : IO Unit := do
       throw <| IO.userError s!"explicit MCP runtime setup failed: {err.message}"
   | .ok config =>
       require "explicit MCP runtime should infer its sibling target Lake helper"
-        config.leanLakeHelper?.isSome
+        (config.lean?.bind (·.lakeHelper?)).isSome
 
   for (label, options) in #[
       ("Lean command only", ({ beamCli? := some "unused", leanCmd? := some "lean" } : Beam.Mcp.Runtime.Options)),

@@ -159,6 +159,7 @@ private def fakeServerWithLeanSession
     (session : Beam.Broker.Session) : IO Beam.Broker.ServerRuntime := do
   let config : Beam.Broker.BrokerConfig := { root }
   let workspace : Beam.Broker.WorkspaceState := {
+    generation := 1
     config
     lean := { nextEpoch := 1, session? := some session }
   }

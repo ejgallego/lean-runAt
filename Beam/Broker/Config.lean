@@ -8,12 +8,49 @@ import Lean
 
 namespace Beam.Broker
 
+/-- Complete process configuration for one Lean backend. -/
+structure LeanBackendConfig where
+  command : String
+  plugin : System.FilePath
+  lakeHelper? : Option System.FilePath := none
+  deriving BEq, Inhabited, Repr
+
+/-- Complete process configuration for one Rocq backend. -/
+structure RocqBackendConfig where
+  command : String
+  deriving BEq, Inhabited, Repr
+
+/--
+Runtime configuration for one broker workspace.
+
+The optional backends permit an intentionally backend-less standalone bootstrap workspace. Once a
+backend is present, its required process configuration is complete by construction.
+-/
 structure BrokerConfig where
   root : System.FilePath
-  leanCmd? : Option String := none
-  leanPlugin? : Option System.FilePath := none
-  leanLakeHelper? : Option System.FilePath := none
-  rocqCmd? : Option String := none
-  deriving Inhabited, Repr
+  lean? : Option LeanBackendConfig := none
+  rocq? : Option RocqBackendConfig := none
+  deriving BEq, Inhabited, Repr
+
+namespace BrokerConfig
+
+/-- Assemble the typed runtime model from optional fields at a process boundary. -/
+def ofOptions
+    (root : System.FilePath)
+    (leanCommand? : Option String)
+    (leanPlugin? : Option System.FilePath)
+    (rocqCommand? : Option String := none) : Except String BrokerConfig := do
+  let lean? ←
+    match leanCommand?, leanPlugin? with
+    | none, none => pure none
+    | some command, some plugin => pure <| some { command, plugin }
+    | _, _ => throw "Lean backend configuration requires a command and plugin together"
+  pure {
+    root
+    lean?
+    rocq? := rocqCommand?.map fun command => { command }
+  }
+
+end BrokerConfig
 
 end Beam.Broker

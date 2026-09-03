@@ -21,18 +21,13 @@ open Lean.Lsp
 
 namespace Beam.Broker.Backend.Lean
 
-private def pluginPath (config : BrokerConfig) : IO System.FilePath := do
-  match config.leanPlugin? with
-  | some path => Beam.resolveExistingPath path
-  | none => throw <| IO.userError "missing Beam daemon --lean-plugin configuration"
-
 def command (config : BrokerConfig) : IO (String × Array String × Array (String × Option String)) := do
-  let some cmd := config.leanCmd?
-    | throw <| IO.userError "missing Beam daemon --lean-cmd configuration"
-  let plugin := ← pluginPath config
-  let lakeEnv ← leanServerLakeEnv config.root config.leanCmd? config.leanLakeHelper?
+  let some leanConfig := config.lean?
+    | throw <| IO.userError "Lean backend is not configured"
+  let plugin ← Beam.resolveExistingPath leanConfig.plugin
+  let lakeEnv ← leanServerLakeEnv config.root (some leanConfig.command) leanConfig.lakeHelper?
   pure (
-    cmd,
+    leanConfig.command,
     #["--server"] ++ lakeEnv.moreServerArgs ++
       #[s!"--plugin={plugin}", "-Dexperimental.module=true"],
     lakeEnv.env)

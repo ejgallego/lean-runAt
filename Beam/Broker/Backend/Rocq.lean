@@ -15,13 +15,10 @@ open Lean.Lsp
 
 namespace Beam.Broker.Backend.Rocq
 
-private def lspPath (config : BrokerConfig) : IO String := do
-  match config.rocqCmd? with
-  | some path => pure path
-  | none => throw <| IO.userError "missing Beam daemon --rocq-cmd configuration"
-
 def command (config : BrokerConfig) : IO (String × Array String) := do
-  pure ((← lspPath config), #[])
+  let some rocqConfig := config.rocq?
+    | throw <| IO.userError "Rocq backend is not configured"
+  pure (rocqConfig.command, #[])
 
 def initializeParams (root : System.FilePath) : Json :=
   let rootUri := System.Uri.pathToUri root
