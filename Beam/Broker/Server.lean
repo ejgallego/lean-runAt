@@ -55,6 +55,7 @@ def startBackendStderrCapture (stderr : IO.FS.Handle) : IO BackendStderrCapture 
 
 structure Session where
   workspaceId : WorkspaceId
+  workspaceGeneration : Nat
   backend : Backend
   root : System.FilePath
   epoch : Nat
@@ -318,6 +319,13 @@ private def setBackendState
   | .lean => { workspace with lean := backendState }
   | .rocq => { workspace with rocq := backendState }
 
+private def detachBackendSession
+    (backend : BackendState) : BackendState × Option Session :=
+  match backend.session? with
+  | none => (backend, none)
+  | some session =>
+      ({ backend with session? := none, nextEpoch := backend.nextEpoch + 1 }, some session)
+
 private def getBackendMetrics (workspace : WorkspaceState) (backend : Backend) : BackendMetrics :=
   match backend with
   | .lean => workspace.leanMetrics
@@ -346,6 +354,7 @@ private def recordSessionSpawn (workspaceId : WorkspaceId) (backend : Backend) (
 
 private def recordRequestMetrics
     (workspaceId : WorkspaceId)
+    (workspaceGeneration : Nat)
     (backend : Backend)
     (op : String)
     (ok : Bool)
@@ -355,20 +364,23 @@ private def recordRequestMetrics
     match getWorkspace? state workspaceId with
     | none => state
     | some workspace =>
-        let metrics := getBackendMetrics workspace backend
-        let opStats := (metrics.ops.get? op).getD {}
-        let opStats := opStats.record ok errorCode? latencyMs
-        let metrics := {
-          metrics with
-          requestCount := metrics.requestCount + 1
-          successCount := metrics.successCount + (if ok then 1 else 0)
-          errorCount := metrics.errorCount + (if ok then 0 else 1)
-          cancelledCount := metrics.cancelledCount + (if isCancelledCode errorCode? then 1 else 0)
-          workerExitedCount := metrics.workerExitedCount + (if isWorkerExitedCode errorCode? then 1 else 0)
-          invalidParamsCount := metrics.invalidParamsCount + (if isInvalidParamsCode errorCode? then 1 else 0)
-          ops := metrics.ops.insert op opStats
-        }
-        setWorkspace state workspaceId (setBackendMetrics workspace backend metrics)
+        if workspace.generation != workspaceGeneration then
+          state
+        else
+          let metrics := getBackendMetrics workspace backend
+          let opStats := (metrics.ops.get? op).getD {}
+          let opStats := opStats.record ok errorCode? latencyMs
+          let metrics := {
+            metrics with
+            requestCount := metrics.requestCount + 1
+            successCount := metrics.successCount + (if ok then 1 else 0)
+            errorCount := metrics.errorCount + (if ok then 0 else 1)
+            cancelledCount := metrics.cancelledCount + (if isCancelledCode errorCode? then 1 else 0)
+            workerExitedCount := metrics.workerExitedCount + (if isWorkerExitedCode errorCode? then 1 else 0)
+            invalidParamsCount := metrics.invalidParamsCount + (if isInvalidParamsCode errorCode? then 1 else 0)
+            ops := metrics.ops.insert op opStats
+          }
+          setWorkspace state workspaceId (setBackendMetrics workspace backend metrics)
 
 private def sessionSnapshotJson (session? : Option Session) : Json :=
   match session? with
@@ -648,6 +660,7 @@ until the initialization response and `initialized` notification have both compl
 -/
 private def acquireBackendSession
     (workspaceId : WorkspaceId)
+    (workspaceGeneration : Nat)
     (backend : Backend)
     (config : BrokerConfig)
     (epoch : Nat) : IO Session := do
@@ -669,6 +682,7 @@ private def acquireBackendSession
       let sessionToken ← mkSessionToken
       let session : Session := {
         workspaceId
+        workspaceGeneration
         backend
         root
         epoch
@@ -710,12 +724,6 @@ private def acquireBackendSession
     discard <| Beam.waitTaskWithTimeout initializeTask sessionShutdownReplyTimeoutMs
     throw <| IO.userError message
 
-private def requireWorkspace (workspaceId : WorkspaceId) : M WorkspaceState := do
-  let state ← get
-  match getWorkspace? state workspaceId with
-  | some workspace => pure workspace
-  | none => throw <| IO.userError s!"unknown Beam workspace '{workspaceId}'"
-
 private def ensureSession (workspaceId : WorkspaceId) (backend : Backend) : M Session := do
   let state ← get
   let workspace ←
@@ -724,26 +732,12 @@ private def ensureSession (workspaceId : WorkspaceId) (backend : Backend) : M Se
     | none => throw <| IO.userError s!"unknown Beam workspace '{workspaceId}'"
   let config := workspace.config
   let backendState := getBackendState workspace backend
-  let (backendState, restart) ← match backendState.session? with
-    | some session =>
-        if ← sessionExited session then
-          shutdownSession session
-          pure ({ backendState with session? := none, nextEpoch := backendState.nextEpoch + 1 }, true)
-        else
-          pure (backendState, false)
-    | none =>
-        pure (backendState, false)
   match backendState.session? with
-  | some session =>
-      modify fun st =>
-        match getWorkspace? st workspaceId with
-        | some workspace => setWorkspace st workspaceId (setBackendState workspace backend backendState)
-        | none => st
-      pure session
+  | some session => pure session
   | none =>
       let session ←
-        acquireBackendSession workspaceId backend config backendState.nextEpoch
-      recordSessionSpawn workspaceId backend restart
+        acquireBackendSession workspaceId workspace.generation backend config backendState.nextEpoch
+      recordSessionSpawn workspaceId backend (backendState.nextEpoch > 1)
       let backendState := { backendState with session? := some session }
       modify fun st =>
         match getWorkspace? st workspaceId with
@@ -989,38 +983,23 @@ private def updateSession (session : Session) : M Unit := do
     match getWorkspace? state session.workspaceId with
     | none => state
     | some workspace =>
-        let backendState := getBackendState workspace session.backend
-        setWorkspace state session.workspaceId
-          (setBackendState workspace session.backend { backendState with session? := some session })
+        if workspace.generation != session.workspaceGeneration then
+          state
+        else
+          let backendState := getBackendState workspace session.backend
+          setWorkspace state session.workspaceId
+            (setBackendState workspace session.backend { backendState with session? := some session })
 
-private def currentSession? (workspaceId : WorkspaceId) (backend : Backend) : M (Option Session) := do
+private def storedSession? (workspaceId : WorkspaceId) (backend : Backend) : M (Option Session) := do
   let state ← get
   let some workspace := getWorkspace? state workspaceId
     | pure none
-  match (getBackendState workspace backend).session? with
-  | none =>
-      pure none
-  | some session =>
-      if ← sessionExited session then
-        shutdownSession session
-        modify fun st =>
-          match getWorkspace? st workspaceId with
-          | none => st
-          | some workspace =>
-              let backendState := getBackendState workspace backend
-              setWorkspace st workspaceId <| setBackendState workspace backend {
-                backendState with
-                session? := none
-                nextEpoch := backendState.nextEpoch + 1
-              }
-        pure none
-      else
-        pure (some session)
+  pure (getBackendState workspace backend).session?
 
 private def resolveCurrentHandle
     (workspaceId : WorkspaceId)
     (handle : Handle) : M (Except ResponseFailure (Session × Json)) := do
-  match ← currentSession? workspaceId handle.backend with
+  match ← storedSession? workspaceId handle.backend with
   | none =>
       pure <| .error <| BrokerFailure.toResponseFailure {
         code := .contentModified
@@ -1033,6 +1012,7 @@ private def resolveCurrentHandle
 
 private def sameSessionIdentity (left right : Session) : Bool :=
   left.workspaceId == right.workspaceId &&
+    left.workspaceGeneration == right.workspaceGeneration &&
     left.backend == right.backend &&
     left.root == right.root &&
     left.epoch == right.epoch &&
@@ -1041,7 +1021,7 @@ private def sameSessionIdentity (left right : Session) : Bool :=
 private def modifyCurrentSessionIfMatching
     (session : Session)
     (f : Session → Session) : M Unit := do
-  match ← currentSession? session.workspaceId session.backend with
+  match ← storedSession? session.workspaceId session.backend with
   | some current =>
       if sameSessionIdentity current session then
         updateSession (f current)
@@ -1099,6 +1079,54 @@ def ServerRuntime.withState (server : ServerRuntime) (act : M α) : IO α := do
     set state
     pure a
 
+private inductive LiveBackendStateResult (α : Type) where
+  | done (result : Except ResponseFailure α)
+  | detached (session : Session)
+
+private def detachExitedSession?
+    (workspaceId : WorkspaceId)
+    (backend : Backend) : M (Option Session) := do
+  let state ← get
+  let some workspace := getWorkspace? state workspaceId
+    | pure none
+  let backendState := getBackendState workspace backend
+  let some session := backendState.session?
+    | pure none
+  unless ← sessionExited session do
+    return none
+  let (backendState, detached?) := detachBackendSession backendState
+  set <| setWorkspace state workspaceId (setBackendState workspace backend backendState)
+  pure detached?
+
+/--
+Run a backend state action only while the caller's workspace generation remains current. Any
+already-exited session is atomically detached and cleaned up outside the global broker state mutex
+before retrying against that same generation.
+-/
+private partial def ServerRuntime.withLiveBackendState
+    (server : ServerRuntime)
+    (workspaceId : WorkspaceId)
+    (workspaceGeneration : Nat)
+    (backend : Backend)
+    (workspaceChangedFailure : ResponseFailure)
+    (act : M (Except ResponseFailure α)) : IO (Except ResponseFailure α) := do
+  let result : LiveBackendStateResult α ← server.withState do
+    let state ← get
+    match getWorkspace? state workspaceId with
+    | none => pure <| .done (.error workspaceChangedFailure)
+    | some workspace =>
+        if workspace.generation != workspaceGeneration then
+          pure <| .done (.error workspaceChangedFailure)
+        else
+          match ← detachExitedSession? workspaceId backend with
+          | some session => pure <| .detached session
+          | none => .done <$> act
+  match result with
+  | .done result => pure result
+  | .detached session =>
+      shutdownSession session
+      server.withLiveBackendState workspaceId workspaceGeneration backend workspaceChangedFailure act
+
 /-- Return the canonical root currently owned by `workspaceId`, if that workspace exists. -/
 def ServerRuntime.workspaceRoot?
     (server : ServerRuntime)
@@ -1134,13 +1162,6 @@ def ServerRuntime.create
     closeMutex := ← Std.Mutex.new false
     closeDone := ← IO.Promise.new
   }
-
-private def detachBackendSession
-    (backend : BackendState) : BackendState × Option Session :=
-  match backend.session? with
-  | none => (backend, none)
-  | some session =>
-      ({ backend with session? := none, nextEpoch := backend.nextEpoch + 1 }, some session)
 
 private def collectSessions
     (left? right? : Option Session) : Array Session :=
@@ -1375,14 +1396,17 @@ def ServerRuntime.dropWorkspace
 private def recordDispatchMetrics
     (server : ServerRuntime)
     (req : Request)
+    (workspaceGeneration? : Option Nat)
     (resp : Response)
     (startedAt : Nat) : IO Unit := do
   if let some backend := req.payload.backend? then
     let finishedAt ← IO.monoNanosNow
     let latencyMs := (finishedAt - startedAt) / 1000000
     if let some workspaceId := req.resolvedWorkspaceId? then
+      let some workspaceGeneration := workspaceGeneration? | return
       server.withState do
-        recordRequestMetrics workspaceId backend req.op.key resp.ok (resp.error?.map (·.code)) latencyMs
+        recordRequestMetrics workspaceId workspaceGeneration backend req.op.key resp.ok
+          (resp.error?.map (·.code)) latencyMs
 
 private def cancelRegisteredRequest
     (server : ServerRuntime)
@@ -1485,6 +1509,7 @@ private def closeAndRequestStop
 
 private structure WorkspaceRequest where
   workspaceId : WorkspaceId
+  workspaceGeneration : Nat
   clientRequestId? : Option String := none
 
 private structure BackendWorkspaceRequest extends WorkspaceRequest where
@@ -1504,9 +1529,24 @@ private def validateRequestWorkspace
     | .error err => return .error (responseFailureFor .invalidParams err)
   let workspace? ← server.withState do
     pure <| (← get).workspaces.get? workspaceId
-  unless workspace?.isSome do
-    return .error (responseFailureFor .invalidParams s!"unknown Beam workspace '{workspaceId}'")
-  pure (.ok { workspaceId, clientRequestId? := req.clientRequestId? })
+  let some workspace := workspace?
+    | return .error (responseFailureFor .invalidParams s!"unknown Beam workspace '{workspaceId}'")
+  pure (.ok {
+    workspaceId
+    workspaceGeneration := workspace.generation
+    clientRequestId? := req.clientRequestId?
+  })
+
+private def requestWorkspaceChangedFailure (req : WorkspaceRequest) : ResponseFailure :=
+  responseFailureFor .contentModified <|
+    s!"workspace '{req.workspaceId}' changed while the request was in flight; retry the request"
+
+private def ServerRuntime.withRequestBackendState
+    (server : ServerRuntime)
+    (req : BackendWorkspaceRequest)
+    (act : M (Except ResponseFailure α)) : IO (Except ResponseFailure α) :=
+  server.withLiveBackendState req.workspaceId req.workspaceGeneration req.backend
+    (requestWorkspaceChangedFailure req.toWorkspaceRequest) act
 
 private def mergeFileProgressIfCurrent
     (server : ServerRuntime)
@@ -1520,8 +1560,13 @@ private def withCurrentMatchingSession
     (server : ServerRuntime)
     (session : Session)
     (k : Session → M α) : HandlerM α := do
-  liftFailureIO <| server.withState do
-    match ← currentSession? session.workspaceId session.backend with
+  let sessionChangedFailure := BrokerFailure.toResponseFailure {
+    code := .workerExited
+    message := "broker backend session changed while request was in flight"
+  }
+  liftFailureIO <| server.withLiveBackendState session.workspaceId session.workspaceGeneration
+      session.backend sessionChangedFailure do
+    match ← storedSession? session.workspaceId session.backend with
     | some current =>
       if sameSessionIdentity current session then
           .ok <$> k current
@@ -1658,21 +1703,26 @@ private def readRequestSyncSnapshot
     (server : ServerRuntime)
     (req : BackendWorkspaceRequest)
     (path : System.FilePath) : IO (Except ResponseFailure FileSyncSnapshot) := do
-  let readContext? ← server.withState do
+  let readContext : Except ResponseFailure (System.FilePath × Nat) ← server.withState do
     let state ← get
     match getWorkspace? state req.workspaceId with
-    | none => pure none
+    | none => pure <| .error <| requestWorkspaceChangedFailure req.toWorkspaceRequest
     | some workspace =>
-        let readSeq := workspace.nextFileSnapshotSeq
-        let workspace := { workspace with nextFileSnapshotSeq := readSeq + 1 }
-        set <| setWorkspace state req.workspaceId workspace
-        pure <| some (workspace.config.root, workspace.generation, readSeq)
-  let some (root, workspaceGeneration, readSeq) := readContext?
-    | return .error <| responseFailureFor .contentModified <|
-        s!"workspace '{req.workspaceId}' was removed before the request source file could be read; retry after initializing it"
+        if workspace.generation != req.workspaceGeneration then
+          pure <| .error <| requestWorkspaceChangedFailure req.toWorkspaceRequest
+        else
+          let readSeq := workspace.nextFileSnapshotSeq
+          let workspace := { workspace with nextFileSnapshotSeq := readSeq + 1 }
+          set <| setWorkspace state req.workspaceId workspace
+          pure <| .ok (workspace.config.root, readSeq)
+  let (root, readSeq) ←
+    match readContext with
+    | .ok context => pure context
+    | .error failure => return .error failure
   -- Reserve the ordering token under the mutex, then do the slow file IO
   -- outside it.
-  pure <| .ok <| ← readFileSyncSnapshot root path req.backend workspaceGeneration (readSeq := readSeq)
+  pure <| .ok <| ←
+    readFileSyncSnapshot root path req.backend req.workspaceGeneration (readSeq := readSeq)
 
 private structure StartedTrackedBarrier where
   session : Session
@@ -1699,7 +1749,7 @@ private def startTrackedDiagnosticsBarrierIO
     match ← readRequestSyncSnapshot server req path with
     | .ok snapshot => pure snapshot
     | .error failure => return .error failure
-  server.withState do
+  server.withRequestBackendState req do
     withWorkspaceForSnapshot req.workspaceId snapshot fun workspace => do
       let session ← ensureSession req.workspaceId req.backend
       let synced ← syncFileSnapshotDetailed session snapshot
@@ -2071,13 +2121,14 @@ private def closeTrackedFileIfOpen
     (server : ServerRuntime)
     (req : BackendWorkspaceRequest)
     (path : System.FilePath) : HandlerM Unit :=
-  liftHandlerIO <| server.withState do
-    match ← currentSession? req.workspaceId req.backend with
+  liftFailureIO <| server.withRequestBackendState req do
+    match ← storedSession? req.workspaceId req.backend with
     | some session =>
         let session ← closeFile session path
         updateSession session
+        pure (.ok ())
     | none =>
-        pure ()
+        pure (.ok ())
 
 private def handleRefreshFileOp
     (server : ServerRuntime)
@@ -2101,7 +2152,7 @@ private def handleUpdateFileOp
   let path := System.FilePath.mk request.path
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftFailureIO <| readRequestSyncSnapshot server req path
-  let updated ← liftFailureIO <| server.withState do
+  let updated ← liftFailureIO <| server.withRequestBackendState req do
     withSessionForSnapshot req.workspaceId req.backend snapshot fun session => do
       let synced ← syncFileSnapshotDetailed session snapshot
       updateSession synced.session
@@ -2127,14 +2178,14 @@ private def handleCloseOp
     finalizeSavedDoc server saved.session saved.uri saved.version true
     pure <| saveCompletedResponse saved true
   else
-    liftHandlerIO <| server.withState do
-      match ← currentSession? req.workspaceId req.backend with
+    liftFailureIO <| server.withRequestBackendState req do
+      match ← storedSession? req.workspaceId req.backend with
       | some session =>
           let session ← closeFile session path
           updateSession session
-          pure <| Response.success (Json.mkObj [("closed", toJson true)])
+          pure <| .ok <| Response.success (Json.mkObj [("closed", toJson true)])
       | none =>
-          pure <| Response.success (Json.mkObj [("closed", toJson true)])
+          pure <| .ok <| Response.success (Json.mkObj [("closed", toJson true)])
 
 private def runAtSetupProgressEmitter?
     (emitDiagnostic? : Option (StreamDiagnostic → IO Unit)) :
@@ -2155,7 +2206,7 @@ private def handleRunAtOp
   let path := System.FilePath.mk request.path
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftFailureIO <| readRequestSyncSnapshot server req path
-  let started ← liftFailureIO <| server.withState do
+  let started ← liftFailureIO <| server.withRequestBackendState req do
     startSyncedWorkspaceRequest req.workspaceId req.backend snapshot method
       (fun uri _ => Json.mkObj <|
         [ ("textDocument", toJson ({ uri := uri, version? := some request.version : VersionedTextDocumentIdentifier }))
@@ -2199,7 +2250,7 @@ private def handlePositionLspOp
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftFailureIO <|
     readRequestSyncSnapshot server req (System.FilePath.mk request.path)
-  let started ← liftFailureIO <| server.withState do
+  let started ← liftFailureIO <| server.withRequestBackendState req do
     startSyncedWorkspaceRequest req.workspaceId req.backend snapshot method
       (fun uri _ => positionLspParams request uri extraFields)
       (trackedLeanDocumentVersion req.backend)
@@ -2268,7 +2319,7 @@ private def handleDocumentSymbolsOp
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftFailureIO <|
     readRequestSyncSnapshot server req (System.FilePath.mk request.path)
-  let started ← liftFailureIO <| server.withState do
+  let started ← liftFailureIO <| server.withRequestBackendState req do
     startSyncedWorkspaceRequest req.workspaceId req.backend snapshot method
       (fun uri _ => Json.mkObj [
         ("textDocument", toJson ({ uri := uri : TextDocumentIdentifier }))
@@ -2289,14 +2340,15 @@ private def handleWorkspaceSymbolsOp
     HandlerM Response := do
   let method ← requestMethod <| workspaceSymbolsMethod request.backend
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
-  let (session, pending) ← liftHandlerIO <| server.withState do
-    let session ← ensureSession req.workspaceId req.backend
-    let params := toJson ({ query := request.query : WorkspaceSymbolParams })
-    let (session, pending) ← startRequestJsonTrackedDetailed session method params
-      (clientRequestId? := req.clientRequestId?)
-      (cancelRef? := cancelRef?)
-    updateSession session
-    pure (session, pending)
+  let (session, pending) ← liftFailureIO <|
+    server.withRequestBackendState req do
+      let session ← ensureSession req.workspaceId req.backend
+      let params := toJson ({ query := request.query : WorkspaceSymbolParams })
+      let (session, pending) ← startRequestJsonTrackedDetailed session method params
+        (clientRequestId? := req.clientRequestId?)
+        (cancelRef? := cancelRef?)
+      updateSession session
+      pure (.ok (session, pending))
   liftHandlerIO <| propagatePendingCancellation session cancelRef?
   let result ← awaitPending pending
   withCurrentMatchingSession server session fun _ => pure ()
@@ -2329,7 +2381,7 @@ private def handleCodeActionResolveOp
   if sourceUri != snapshot.uri then
     throw <| responseFailureFor .invalidParams
       s!"codeAction.data targets {sourceUri}, not requested document {snapshot.uri}"
-  let started ← liftFailureIO <| server.withState do
+  let started ← liftFailureIO <| server.withRequestBackendState req do
     startSyncedWorkspaceRequest req.workspaceId req.backend snapshot method
       (fun _uri _docState => toJson request.codeAction)
       (trackedLeanDocumentVersion req.backend)
@@ -2373,7 +2425,7 @@ private def handleGoalsOp
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftFailureIO <|
     readRequestSyncSnapshot server req (System.FilePath.mk request.path)
-  let started ← liftFailureIO <| server.withState do
+  let started ← liftFailureIO <| server.withRequestBackendState req do
     let position : Lsp.Position := { line := request.line, character := request.character }
     startSyncedWorkspaceRequest req.workspaceId req.backend snapshot method
       (fun uri docState =>
@@ -2419,7 +2471,7 @@ private def handleTodoOp
   }
   let snapshot ← liftFailureIO <|
     readRequestSyncSnapshot server req (System.FilePath.mk request.path)
-  let started ← liftFailureIO <| server.withState do
+  let started ← liftFailureIO <| server.withRequestBackendState req do
     startSyncedWorkspaceRequest req.workspaceId req.backend snapshot method
       (fun uri _docState => Json.mkObj <|
         [ ("textDocument", toJson ({ uri := uri, version? := some request.version : VersionedTextDocumentIdentifier }))
@@ -2450,7 +2502,7 @@ private def handleRunWithOp
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftFailureIO <|
     readRequestSyncSnapshot server req (System.FilePath.mk request.path)
-  let started ← liftFailureIO <| server.withState do
+  let started ← liftFailureIO <| server.withRequestBackendState req do
     match ← resolveCurrentHandle req.workspaceId request.handle with
     | .error resp => pure (.error resp)
     | .ok (session, rawHandle) =>
@@ -2487,7 +2539,7 @@ private def handleReleaseOp
   liftFailureIO <| ensureRequestNotCancelled cancelRef?
   let snapshot ← liftFailureIO <|
     readRequestSyncSnapshot server req (System.FilePath.mk request.path)
-  let started ← liftFailureIO <| server.withState do
+  let started ← liftFailureIO <| server.withRequestBackendState req do
     match ← resolveCurrentHandle req.workspaceId request.handle with
     | .error resp => pure (.error resp)
     | .ok (session, rawHandle) =>
@@ -2596,7 +2648,7 @@ private def handleRequestIO
           | .ensure _ =>
               let resp ←
                 try
-                  server.withState do
+                  let result ← server.withRequestBackendState workspaceReq do
                     let session ← ensureSession workspaceReq.workspaceId workspaceReq.backend
                     let payload := Json.mkObj [
                       ("workspace_id", toJson workspaceReq.workspaceId),
@@ -2604,7 +2656,10 @@ private def handleRequestIO
                       ("root", toJson session.root.toString),
                       ("epoch", toJson session.epoch)
                     ]
-                    pure <| Response.success payload
+                    pure <| .ok <| Response.success payload
+                  match result with
+                  | .error failure => pure failure.toResponse
+                  | .ok response => pure response
                 catch e =>
                   pure <| errorResponseFor .internalError e.toString
               pure resp
@@ -2659,6 +2714,13 @@ private def ServerRuntime.withRequestAdmission
     (req : Request)
     (act : RequestHandle → IO Response) : IO Response := do
   let startedAt ← IO.monoNanosNow
+  let workspaceGeneration? ←
+    match req.payload.backend?, req.resolvedWorkspaceId? with
+    | some _, some workspaceId => server.withState do
+        pure <| (getWorkspace? (← get) workspaceId).map (·.generation)
+    | _, _ => pure none
+  let recordMetrics := fun (resp : Response) =>
+    recordDispatchMetrics server req workspaceGeneration? resp startedAt
   traceBroker
     s!"dispatch start op={req.op.key} clientRequestId={optionLabel req.clientRequestId?}"
   match server.mode with
@@ -2666,19 +2728,19 @@ private def ServerRuntime.withRequestAdmission
   | .wrapper _ expected =>
       unless req.daemonCapability? == some expected do
         let resp := errorResponseFor .invalidParams "invalid Beam daemon capability"
-        recordDispatchMetrics server req resp startedAt
+        recordMetrics resp
         return resp
       if req.op == .initWorkspace || req.op == .listWorkspaces || req.op == .dropWorkspace then
         let resp := errorResponseFor .invalidParams
           s!"broker op '{req.op.key}' is unavailable in wrapper-owned daemon mode"
-        recordDispatchMetrics server req resp startedAt
+        recordMetrics resp
         return resp
   match req.validateFields with
   | .error err =>
       let resp := errorResponseFor .invalidParams err
       traceBroker
         s!"dispatch rejected op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} error={err}"
-      recordDispatchMetrics server req resp startedAt
+      recordMetrics resp
       return resp
   | .ok () => pure ()
   try
@@ -2689,7 +2751,7 @@ private def ServerRuntime.withRequestAdmission
         | .ok active => pure (some active)
         | .error failure =>
             let resp := BrokerFailure.toResponse failure
-            recordDispatchMetrics server req resp startedAt
+            recordMetrics resp
             return resp
       else
         pure none
@@ -2698,7 +2760,7 @@ private def ServerRuntime.withRequestAdmission
       let resp ← act handle
       traceBroker
         s!"dispatch complete op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} ok={resp.ok}"
-      recordDispatchMetrics server req resp startedAt
+      recordMetrics resp
       pure resp
     finally
       ActiveRequestRegistry.unregister server.activeRequests active?
@@ -2706,7 +2768,7 @@ private def ServerRuntime.withRequestAdmission
     let resp := errorResponseFor .internalError e.toString
     traceBroker
       s!"dispatch exception op={req.op.key} clientRequestId={optionLabel req.clientRequestId?} error={e.toString}"
-    recordDispatchMetrics server req resp startedAt
+    recordMetrics resp
     pure resp
 
 /--

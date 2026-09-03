@@ -161,8 +161,9 @@ use it instead of maintaining their own operation lists.
 Workspace teardown must not wait for backend shutdown while holding `ServerRuntime.state`: reset,
 drop, and runtime close detach backend sessions and commit the new workspace state atomically, then
 wait for or terminate the detached processes after releasing the mutex. This keeps teardown of one
-workspace from blocking state access for every other workspace. Other state transactions, including
-session startup and restart, may still perform process I/O while holding that mutex.
+workspace from blocking state access for every other workspace. Request-time cleanup follows the
+same detach-then-clean-up pattern and remains fenced to the request's workspace generation. Starting
+a replacement backend session may still perform process I/O while holding the mutex.
 
 ## MCP Projection Changes
 

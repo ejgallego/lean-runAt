@@ -1110,10 +1110,53 @@ private def stubbornSession
   let stderrCapture ← startBackendStderrCapture proc.stderr
   pure {
     workspaceId
+    workspaceGeneration := 1
     backend := .lean
     root
     epoch := 1
     sessionToken := s!"stubborn-{workspaceId}"
+    proc
+    stdin := IO.FS.Stream.ofHandle proc.stdin
+    stdout := IO.FS.Stream.ofHandle proc.stdout
+    stderrCapture
+    pending
+  }
+
+/-- Model an exited worker whose descendant keeps the session pipes open during bounded cleanup. -/
+private def exitedSessionWithInheritedStdio
+    (workspaceId : WorkspaceId)
+    (root cleanupStarted release done : System.FilePath) : IO Session := do
+  let childScript :=
+    "import pathlib, sys, time\n" ++
+    "sys.stdin.buffer.readline()\n" ++
+    "pathlib.Path(sys.argv[1]).write_text('cleanup')\n" ++
+    "deadline = time.monotonic() + 30\n" ++
+    "while not pathlib.Path(sys.argv[2]).exists() and time.monotonic() < deadline:\n" ++
+    " time.sleep(0.01)\n" ++
+    "pathlib.Path(sys.argv[2]).unlink(missing_ok=True)\n" ++
+    "pathlib.Path(sys.argv[3]).write_text('done')\n"
+  let proc ← IO.Process.spawn {
+    toStdioConfig := brokerStdio
+    cmd := "python3"
+    args := #[
+      "-c",
+      "import subprocess, sys\nsubprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]])",
+      childScript,
+      cleanupStarted.toString,
+      release.toString,
+      done.toString
+    ]
+  }
+  let pending ← Std.Mutex.new ({} : Std.TreeMap Lean.JsonRpc.RequestID PendingRequest)
+  let stderrCapture ← startBackendStderrCapture proc.stderr
+  discard <| proc.wait
+  pure {
+    workspaceId
+    workspaceGeneration := 1
+    backend := .lean
+    root
+    epoch := 1
+    sessionToken := s!"exited-{workspaceId}"
     proc
     stdin := IO.FS.Stream.ofHandle proc.stdin
     stdout := IO.FS.Stream.ofHandle proc.stdout
@@ -1204,6 +1247,93 @@ private def checkLifecycleTeardownConcurrency : IO Unit := do
   checkLifecycleTeardownReleasesStateMutex .reset
   checkLifecycleTeardownReleasesStateMutex .drop
 
+private def checkDeadSessionCleanupReleasesStateMutex : IO Unit := do
+  let nonce ← IO.monoNanosNow
+  let targetId := "dead-session-target"
+  let observerId := "dead-session-observer"
+  let targetRoot := System.FilePath.mk s!"/tmp/beam-dead-session-target-{nonce}"
+  let replacementRoot := System.FilePath.mk s!"/tmp/beam-dead-session-replacement-{nonce}"
+  let observerRoot := System.FilePath.mk s!"/tmp/beam-dead-session-observer-{nonce}"
+  let cleanupStarted := System.FilePath.mk s!"/tmp/beam-dead-session-cleanup-{nonce}"
+  let release := System.FilePath.mk s!"/tmp/beam-dead-session-release-{nonce}"
+  let done := System.FilePath.mk s!"/tmp/beam-dead-session-done-{nonce}"
+  let targetConfig : BrokerConfig := { root := targetRoot }
+  let replacementConfig : BrokerConfig := { root := replacementRoot }
+  let observerConfig : BrokerConfig := { root := observerRoot }
+  let runtime ← ServerRuntime.create targetConfig targetId
+  let session ← exitedSessionWithInheritedStdio targetId targetRoot cleanupStarted release done
+  runtime.state.atomically do
+    let state ← get
+    let targetWorkspace : WorkspaceState := {
+      generation := 1
+      config := targetConfig
+      lean := { nextEpoch := 2, session? := some session }
+    }
+    let observerWorkspace : WorkspaceState := { generation := 2, config := observerConfig }
+    let workspaces := state.workspaces.insert targetId targetWorkspace
+    let workspaces := workspaces.insert observerId observerWorkspace
+    set { state with workspaces }
+  let closeTask ← IO.asTask (prio := Task.Priority.dedicated) <| runtime.dispatchRequest {
+    payload := .close { path := "Dead.lean" }
+    workspaceId? := some targetId
+  }
+  try
+    unless ← waitForPath cleanupStarted do
+      throw <| IO.userError "dead-session cleanup did not start"
+    require "dead-session cleanup fixture should retain the inherited pipes"
+      (!(← IO.hasFinished closeTask))
+
+    match ← runtime.initWorkspaceWithConfig targetId replacementConfig (some .reset) with
+    | .error failure =>
+        throw <| IO.userError s!"dead-session workspace reset failed: {failure.error.message}"
+    | .ok result =>
+        require "dead-session workspace reset should invalidate the old generation"
+          result.invalidatedHandles
+    require "dead-session workspace reset should finish before cleanup"
+      (!(← IO.hasFinished closeTask))
+    require "dead-session workspace reset should retain its replacement root"
+      ((← runtime.workspaceRoot? targetId) == some replacementRoot)
+
+    let queryTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      runtime.workspaceRoot? observerId
+    let some queryOutcome ← waitForTaskBefore queryTask closeTask
+      | throw <| IO.userError "unrelated workspace query blocked on dead-session cleanup"
+    let queryRoot ←
+      match queryOutcome with
+      | .ok queryRoot => pure queryRoot
+      | .error err => throw err
+    require "unrelated workspace query should retain its root"
+      (queryRoot == some observerRoot)
+    require "unrelated workspace query should finish before dead-session cleanup"
+      (!(← IO.hasFinished closeTask))
+
+    let response ← IO.ofExcept <| ← IO.wait closeTask
+    require "an old-generation close should be rejected after reset"
+      (response.error?.any fun err =>
+        err.code == "contentModified" && err.message.contains "changed while")
+    let replacement ← runtime.state.atomically do
+      let state ← get
+      let some workspace := state.workspaces.get? targetId
+        | throw <| IO.userError "replacement workspace disappeared after old-generation close"
+      pure workspace
+    require "an old-generation close should not alter the replacement root"
+      (replacement.config.root == replacementRoot)
+    require "an old-generation close should not restore its detached session"
+      replacement.lean.session?.isNone
+    require "an old-generation close should not update replacement metrics"
+      (replacement.leanMetrics.requestCount == 0)
+  finally
+    if !(← release.pathExists) then
+      IO.FS.writeFile release "release"
+    discard <| waitForPath done
+    try
+      runtime.close
+    catch _ =>
+      pure ()
+    for path in [cleanupStarted, done] do
+      if ← path.pathExists then
+        IO.FS.removeFile path
+
 private def checkWorkspaceSnapshotResetIsolation : IO Unit := do
   let nonce ← IO.monoNanosNow
   let workspaceId := "snapshot-reset"
@@ -1292,6 +1422,7 @@ private def pendingOnlySession
   let stderrCapture ← startBackendStderrCapture proc.stderr
   pure {
     workspaceId
+    workspaceGeneration := 1
     backend := .lean
     root
     epoch := 1
@@ -1528,6 +1659,7 @@ def main : IO Unit := do
   checkWorkspaceRoutingFields
   checkWorkspaceLifecycleProtocol
   checkLifecycleTeardownConcurrency
+  checkDeadSessionCleanupReleasesStateMutex
   checkWorkspaceSnapshotResetIsolation
   checkCompletedRequestResetIsolation
   checkSessionCloseAdmission
