@@ -100,6 +100,7 @@ private def fakeTrackedSession (root transcript : System.FilePath) : IO Beam.Bro
   let stderrCapture ← Beam.Broker.startBackendStderrCapture proc.stderr
   let session : Beam.Broker.Session := {
     workspaceId := fixtureWorkspaceId
+    workspaceGeneration := 1
     backend := .lean
     root
     epoch := 1
@@ -140,6 +141,7 @@ private def fakeSessionWithSyncedDoc
   }
   let session : Beam.Broker.Session := {
     workspaceId := fixtureWorkspaceId
+    workspaceGeneration := 1
     backend := .lean
     root
     epoch := 1
