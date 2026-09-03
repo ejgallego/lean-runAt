@@ -813,6 +813,36 @@ private def checkWorkspaceRoutingFields : IO Unit := do
     require s!"minimal {op.key} request changed its flat JSON wire shape"
       (toJson decoded == requestJson)
 
+  let initWithLean : Request := {
+    payload := .initWorkspace {
+      root := "/workspace"
+      lean? := some { command := "lean", plugin := "/beam/libbeam.so" }
+      rocqCmd? := some "rocq"
+    }
+  }
+  let initWithLeanJson := toJson initWithLean
+  requireJsonString "typed workspace init" "leanCmd" "lean" initWithLeanJson
+  requireJsonString "typed workspace init" "leanPlugin" "/beam/libbeam.so" initWithLeanJson
+  requireJsonString "typed workspace init" "rocqCmd" "rocq" initWithLeanJson
+  let decodedInitWithLean ← expectOk "typed workspace init round trip" <|
+    fromJson? (α := Request) initWithLeanJson
+  require "typed workspace init should preserve its flat wire shape"
+    (toJson decodedInitWithLean == initWithLeanJson)
+
+  for (label, field, value) in #[
+      ("command-only workspace init", "leanCmd", "lean"),
+      ("plugin-only workspace init", "leanPlugin", "/beam/libbeam.so")
+    ] do
+    match fromJson? (α := Request) <| Json.mkObj [
+        ("op", toJson "init_workspace"),
+        ("root", toJson "/workspace"),
+        (field, toJson value)
+      ] with
+    | .ok _ => throw <| IO.userError s!"{label}: partial Lean configuration decoded"
+    | .error err =>
+        require s!"{label}: error should name both coupled fields"
+          (err.contains "leanCmd" && err.contains "leanPlugin")
+
   let unscopedReq := Request.stats
   require "missing workspace id remains unscoped" unscopedReq.resolvedWorkspaceId?.isNone
   requireFieldAbsent "stats request serialization" "backend" (toJson unscopedReq)
@@ -1123,10 +1153,11 @@ private def checkLifecycleTeardownReleasesStateMutex
   runtime.state.atomically do
     let state ← get
     let targetWorkspace : WorkspaceState := {
+      generation := 1
       config := targetConfig
       lean := { nextEpoch := 2, session? := some session }
     }
-    let observerWorkspace : WorkspaceState := { config := observerConfig }
+    let observerWorkspace : WorkspaceState := { generation := 2, config := observerConfig }
     let workspaces := state.workspaces.insert targetId targetWorkspace
     let workspaces := workspaces.insert observerId observerWorkspace
     set { state with workspaces }
@@ -1173,6 +1204,201 @@ private def checkLifecycleTeardownConcurrency : IO Unit := do
   checkLifecycleTeardownReleasesStateMutex .reset
   checkLifecycleTeardownReleasesStateMutex .drop
 
+private def checkWorkspaceSnapshotResetIsolation : IO Unit := do
+  let nonce ← IO.monoNanosNow
+  let workspaceId := "snapshot-reset"
+  let oldRoot := System.FilePath.mk s!"/tmp/beam-snapshot-old-{nonce}"
+  let newRoot := System.FilePath.mk s!"/tmp/beam-snapshot-new-{nonce}"
+  let fifo := oldRoot / "Slow.lean"
+  let writerReady := oldRoot / "writer-ready"
+  let releaseWriter := oldRoot / "release-writer"
+  IO.FS.createDirAll oldRoot
+  IO.FS.createDirAll newRoot
+  let mkfifo ← IO.Process.output { cmd := "mkfifo", args := #[fifo.toString] }
+  unless mkfifo.exitCode == 0 do
+    throw <| IO.userError s!"failed to create snapshot-reset FIFO: {mkfifo.stderr}"
+  let runtime ← ServerRuntime.create ({ root := oldRoot } : BrokerConfig) workspaceId
+  let requestTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+    runtime.dispatchRequest {
+      payload := .updateFile { path := "Slow.lean" }
+      workspaceId? := some workspaceId
+    }
+  let writer ← IO.Process.spawn {
+    cmd := "python3"
+    args := #[
+      "-c",
+      "import pathlib, sys, time\nwith open(sys.argv[1], 'w') as stream:\n pathlib.Path(sys.argv[2]).write_text('ready')\n while not pathlib.Path(sys.argv[3]).exists(): time.sleep(0.01)\n stream.write('def slowSnapshot : Nat := 1\\n')",
+      fifo.toString,
+      writerReady.toString,
+      releaseWriter.toString
+    ]
+  }
+  try
+    unless ← waitForPath writerReady do
+      throw <| IO.userError "snapshot-reset writer did not rendezvous with the broker read"
+    let oldGeneration ← runtime.state.atomically do
+      let state ← get
+      let some workspace := state.workspaces.get? workspaceId
+        | throw <| IO.userError "snapshot-reset workspace disappeared before reset"
+      pure workspace.generation
+    match ← runtime.initWorkspaceWithConfig workspaceId { root := newRoot } (some .reset) with
+    | .error failure =>
+        throw <| IO.userError s!"snapshot-reset workspace reset failed: {failure.error.message}"
+    | .ok result =>
+        require "snapshot-reset should invalidate the previous workspace generation"
+          result.invalidatedHandles
+    let newGeneration ← runtime.state.atomically do
+      let state ← get
+      let some workspace := state.workspaces.get? workspaceId
+        | throw <| IO.userError "snapshot-reset workspace disappeared after reset"
+      pure workspace.generation
+    require "workspace reset should allocate a fresh generation" (newGeneration != oldGeneration)
+    IO.FS.writeFile releaseWriter "release"
+    let response ← IO.ofExcept <| ← IO.wait requestTask
+    require "an old-generation source snapshot should be rejected as stale"
+      (response.error?.any fun err =>
+        err.code == "contentModified" && err.message.contains "changed while")
+    let leanSessionActive ← runtime.state.atomically do
+      let state ← get
+      pure <| state.workspaces.get? workspaceId |>.bind (fun workspace => workspace.lean.session?)
+        |>.isSome
+    require "a stale snapshot should not start a backend in the replacement workspace"
+      !leanSessionActive
+  finally
+    if !(← releaseWriter.pathExists) then
+      IO.FS.writeFile releaseWriter "release"
+    if (← writer.tryWait).isNone then
+      writer.kill
+    discard <| writer.wait
+    runtime.close
+    if ← oldRoot.pathExists then
+      IO.FS.removeDirAll oldRoot
+    if ← newRoot.pathExists then
+      IO.FS.removeDirAll newRoot
+
+private def pendingOnlySession
+    (workspaceId : WorkspaceId)
+    (root exit : System.FilePath) : IO Session := do
+  let proc ← IO.Process.spawn {
+    toStdioConfig := brokerStdio
+    cmd := "python3"
+    args := #[
+      "-c",
+      "import pathlib, sys, time\nwhile not pathlib.Path(sys.argv[1]).exists(): time.sleep(0.01)",
+      exit.toString
+    ]
+  }
+  let pending ← Std.Mutex.new ({} : Std.TreeMap Lean.JsonRpc.RequestID PendingRequest)
+  let stderrCapture ← startBackendStderrCapture proc.stderr
+  pure {
+    workspaceId
+    backend := .lean
+    root
+    epoch := 1
+    sessionToken := s!"pending-only-{workspaceId}"
+    proc
+    stdin := IO.FS.Stream.ofHandle proc.stdin
+    stdout := IO.FS.Stream.ofHandle proc.stdout
+    stderrCapture
+    pending
+  }
+
+private partial def takePendingRequests
+    (store : PendingRequestStore)
+    (count : Nat)
+    (tries : Nat := 200) : IO (Array PendingRequest) := do
+  if (← PendingRequestStore.snapshot store).size >= count then
+    PendingRequestStore.clear store
+  else if tries == 0 then
+    throw <| IO.userError s!"timed out waiting for {count} pending backend request(s)"
+  else
+    IO.sleep 10
+    takePendingRequests store count (tries - 1)
+
+private partial def waitForWorkspaceRoot
+    (runtime : ServerRuntime)
+    (workspaceId : WorkspaceId)
+    (expected : System.FilePath)
+    (tries : Nat := 200) : IO Bool := do
+  if (← runtime.workspaceRoot? workspaceId) == some expected then
+    pure true
+  else if tries == 0 then
+    pure false
+  else
+    IO.sleep 10
+    waitForWorkspaceRoot runtime workspaceId expected (tries - 1)
+
+private def checkCompletedRequestResetIsolation : IO Unit := do
+  let nonce ← IO.monoNanosNow
+  let workspaceId := s!"completed-reset-{nonce}"
+  let oldRoot := System.FilePath.mk s!"/tmp/beam-completed-reset-old-{nonce}"
+  let newRoot := System.FilePath.mk s!"/tmp/beam-completed-reset-new-{nonce}"
+  let exit := oldRoot / "exit-backend"
+  IO.FS.createDirAll oldRoot
+  IO.FS.createDirAll newRoot
+  IO.FS.writeFile (oldRoot / "Demo.lean") "def demo : Nat := 1\n"
+  let config : BrokerConfig := { root := oldRoot }
+  let runtime ← ServerRuntime.create config workspaceId
+  let session ← pendingOnlySession workspaceId oldRoot exit
+  runtime.state.atomically do
+    let state ← get
+    let some workspace := state.workspaces.get? workspaceId
+      | throw <| IO.userError "completed-reset workspace disappeared"
+    let workspace := { workspace with
+      lean := { nextEpoch := 2, session? := some session }
+    }
+    set { state with workspaces := state.workspaces.insert workspaceId workspace }
+  let documentTask ← IO.asTask (prio := Task.Priority.dedicated) <| runtime.dispatchRequest {
+    payload := .runAt {
+      path := "Demo.lean"
+      version := 1
+      line := 0
+      character := 0
+      text := "rfl"
+    }
+    workspaceId? := some workspaceId
+  }
+  let symbolsTask ← IO.asTask (prio := Task.Priority.dedicated) <| runtime.dispatchRequest {
+    payload := .workspaceSymbols { query := "demo" }
+    workspaceId? := some workspaceId
+  }
+  try
+    let requests ← takePendingRequests session.pending 2
+    let resetTask ← IO.asTask (prio := Task.Priority.dedicated) <|
+      runtime.initWorkspaceWithConfig workspaceId { root := newRoot } (some .reset)
+    unless ← waitForWorkspaceRoot runtime workspaceId newRoot do
+      throw <| IO.userError "completed-reset workspace reset did not commit"
+    for request in requests do
+      PendingRequest.resolveResponse request (Json.mkObj [])
+    for (label, task) in [("document request", documentTask), ("workspace symbols", symbolsTask)] do
+      let response ← IO.ofExcept <| ← IO.wait task
+      require s!"{label}: an old-session result should be rejected after reset"
+        (response.error?.any fun err => err.code == "workerExited")
+    let shutdownRequests ← takePendingRequests session.pending 1
+    for request in shutdownRequests do
+      PendingRequest.resolveResponse request Json.null
+    IO.FS.writeFile exit "exit"
+    match ← IO.ofExcept <| ← IO.wait resetTask with
+    | .ok result =>
+        require "completed reset should invalidate the old session" result.invalidatedHandles
+    | .error failure =>
+        throw <| IO.userError s!"completed workspace reset failed: {failure.error.message}"
+  finally
+    if !(← exit.pathExists) then
+      IO.FS.writeFile exit "exit"
+    try
+      runtime.close
+    catch _ =>
+      pure ()
+    try
+      session.proc.kill
+    catch _ =>
+      pure ()
+    if ← oldRoot.pathExists then
+      IO.FS.removeDirAll oldRoot
+    if ← newRoot.pathExists then
+      IO.FS.removeDirAll newRoot
+
 private partial def waitForCancellation
     (cancelRef : IO.Ref Bool)
     (tries : Nat := 100) : IO Unit := do
@@ -1217,6 +1443,32 @@ private def checkSessionCloseAdmission : IO Unit := do
   require "shutdown remains idempotent after admission closes" shutdown.ok
   require "closed admission should leave no active request"
     ((← ActiveRequestRegistry.count runtime.activeRequests) == 0)
+
+private def checkBrokerConfigBoundary : IO Unit := do
+  let root := System.FilePath.mk "/workspace"
+  let plugin := System.FilePath.mk "/beam/libbeam.so"
+  let config ←
+    match BrokerConfig.ofOptions root (some "lean") (some plugin) (some "rocq") with
+    | .ok config => pure config
+    | .error err => throw <| IO.userError s!"complete broker config failed: {err}"
+  match config.lean?, config.rocq? with
+  | some leanConfig, some rocqConfig =>
+      require "broker config should preserve the Lean command" (leanConfig.command == "lean")
+      require "broker config should preserve the Lean plugin" (leanConfig.plugin == plugin)
+      require "broker CLI boundary should not invent a Lake helper" leanConfig.lakeHelper?.isNone
+      require "broker config should preserve the Rocq command" (rocqConfig.command == "rocq")
+  | _, _ => throw <| IO.userError "complete broker config lost a configured backend"
+
+  let partialConfigs : Array (String × Option String × Option System.FilePath) := #[
+    ("command only", some "lean", none),
+    ("plugin only", none, some plugin)
+  ]
+  for (label, command?, plugin?) in partialConfigs do
+    match BrokerConfig.ofOptions root command? plugin? with
+    | .ok _ => throw <| IO.userError s!"partial broker config '{label}' was accepted"
+    | .error err =>
+        require s!"partial broker config '{label}' should explain the coupled fields"
+          (err.contains "command and plugin together")
 
 private def checkWrapperDaemonAuthorization : IO Unit := do
   let base := System.FilePath.mk s!"/tmp/beam-wrapper-daemon-authorization-{← IO.monoNanosNow}"
@@ -1276,7 +1528,10 @@ def main : IO Unit := do
   checkWorkspaceRoutingFields
   checkWorkspaceLifecycleProtocol
   checkLifecycleTeardownConcurrency
+  checkWorkspaceSnapshotResetIsolation
+  checkCompletedRequestResetIsolation
   checkSessionCloseAdmission
+  checkBrokerConfigBoundary
   checkWrapperDaemonAuthorization
 
 end BeamTest.Broker.ProtocolTest

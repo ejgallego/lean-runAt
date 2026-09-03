@@ -111,9 +111,11 @@ def mkBrokerConfig (opts : Options) (root : System.FilePath) : IO (Except RpcErr
   | .ok runtime =>
       pure <| .ok {
         root := root
-        leanCmd? := some runtime.leanCmd
-        leanPlugin? := some runtime.leanPlugin
-        leanLakeHelper? := some runtime.leanLakeHelper
+        lean? := some {
+          command := runtime.leanCmd
+          plugin := runtime.leanPlugin
+          lakeHelper? := some runtime.leanLakeHelper
+        }
       }
 
 end Beam.Mcp.Runtime

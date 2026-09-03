@@ -300,11 +300,14 @@ structure ReleaseRequest where
   path : String
   handle : Handle
 
+structure InitLeanBackendConfig where
+  command : String
+  plugin : String
+
 structure InitWorkspaceRequest where
   workspaceMode? : Option Beam.Workspace.InitMode := none
   root : String
-  leanCmd? : Option String := none
-  leanPlugin? : Option String := none
+  lean? : Option InitLeanBackendConfig := none
   rocqCmd? : Option String := none
 
 /-- The fields owned by exactly one broker operation. -/
@@ -535,8 +538,12 @@ private def RequestPayload.jsonFields : RequestPayload → List (String × Json)
   | .initWorkspace request =>
       optionalJsonField "workspaceMode" request.workspaceMode? ++
       [("root", toJson request.root)] ++
-      optionalJsonField "leanCmd" request.leanCmd? ++
-      optionalJsonField "leanPlugin" request.leanPlugin? ++
+      (match request.lean? with
+      | some lean => [
+          ("leanCmd", toJson lean.command),
+          ("leanPlugin", toJson lean.plugin)
+        ]
+      | none => []) ++
       optionalJsonField "rocqCmd" request.rocqCmd?
   | .stats | .listWorkspaces | .dropWorkspace | .shutdown => []
 
@@ -739,11 +746,18 @@ instance : FromJson Request where
             handle
           }
       | .initWorkspace =>
+          let leanCmd? ← optionalField? (α := String) j "leanCmd"
+          let leanPlugin? ← optionalField? (α := String) j "leanPlugin"
+          let lean? ←
+            match leanCmd?, leanPlugin? with
+            | none, none => pure none
+            | some command, some plugin => pure <| some { command, plugin }
+            | some _, none => throw "'leanCmd' requires 'leanPlugin'"
+            | none, some _ => throw "'leanPlugin' requires 'leanCmd'"
           pure <| .initWorkspace {
             workspaceMode? := ← optionalField? (α := Beam.Workspace.InitMode) j "workspaceMode"
             root := ← requiredField j "root"
-            leanCmd? := ← optionalField? (α := String) j "leanCmd"
-            leanPlugin? := ← optionalField? (α := String) j "leanPlugin"
+            lean?
             rocqCmd? := ← optionalField? (α := String) j "rocqCmd"
           }
       | .listWorkspaces => pure .listWorkspaces

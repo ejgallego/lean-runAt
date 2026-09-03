@@ -827,8 +827,7 @@ private def runWorkspaceLifecycleSmoke
   let initResp ← runClient endpoint {
     payload := .initWorkspace {
       root := otherRoot.toString
-      leanCmd? := some leanCmd
-      leanPlugin? := some plugin.toString
+      lean? := some { command := leanCmd, plugin := plugin.toString }
     }
     workspaceId? := some workspaceId
   }
@@ -839,8 +838,7 @@ private def runWorkspaceLifecycleSmoke
   let duplicateRoot ← runClient endpoint {
     payload := .initWorkspace {
       root := otherRoot.toString
-      leanCmd? := some leanCmd
-      leanPlugin? := some plugin.toString
+      lean? := some { command := leanCmd, plugin := plugin.toString }
     }
     workspaceId? := some "duplicate"
   }
@@ -877,8 +875,7 @@ private def runWorkspaceLifecycleSmoke
     payload := .initWorkspace {
       root := otherRoot.toString
       workspaceMode? := some .reset
-      leanCmd? := some leanCmd
-      leanPlugin? := some plugin.toString
+      lean? := some { command := leanCmd, plugin := plugin.toString }
     }
     workspaceId? := some workspaceId
   }
