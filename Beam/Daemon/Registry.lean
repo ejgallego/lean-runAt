@@ -64,12 +64,13 @@ private def validateWorkspaceBinding (workspace : WorkspaceBinding) : Except Str
   if let some toolchain := workspace.toolchain? then
     if toolchain.isEmpty then
       throw s!"session workspace '{workspace.workspaceId}' Lean toolchain must not be empty"
-  if workspace.leanCmd?.isSome != workspace.plugin?.isSome then
-    throw s!"session workspace '{workspace.workspaceId}' must configure the Lean command and plugin together"
-  if workspace.leanCmd?.isNone && workspace.rocqCmd?.isNone then
-    throw s!"session workspace '{workspace.workspaceId}' must configure at least one backend"
   if workspace.toolchain?.isSome && workspace.leanCmd?.isNone then
     throw s!"session workspace '{workspace.workspaceId}' cannot name a Lean toolchain without a Lean backend"
+  if workspace.leanCmd?.isSome != workspace.plugin?.isSome ||
+      workspace.leanCmd?.isSome != workspace.toolchain?.isSome then
+    throw s!"session workspace '{workspace.workspaceId}' must configure the Lean command, plugin, and toolchain together"
+  if workspace.leanCmd?.isNone && workspace.rocqCmd?.isNone then
+    throw s!"session workspace '{workspace.workspaceId}' must configure at least one backend"
   if workspace.bundleId.isEmpty then
     throw s!"session workspace '{workspace.workspaceId}' bundle id must not be empty"
 private def validateSessionDescriptor (entry : SessionDescriptor) : Except String Unit := do

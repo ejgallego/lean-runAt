@@ -228,17 +228,15 @@ def printInstallManifestWithSourceCommit
 def printMcpConfig (home : System.FilePath) (opts : CliOptions) : IO Unit := do
   let root ← projectRoot opts .lean
   let desired ← desiredConfig home root .lean
-  let some leanCmd := desired.leanCmd?
-    | throw <| IO.userError s!"could not resolve Lean command for MCP project root {root}"
-  let some plugin := desired.plugin?
-    | throw <| IO.userError s!"could not resolve Beam LSP plugin for MCP project root {root}"
+  let .lean leanConfig _ := desired.backends
+    | throw <| IO.userError s!"could not resolve Lean backend for MCP project root {root}"
   printJsonLine <| Json.mkObj [
     ("root", toJson root.toString),
-    ("lean_cmd", toJson leanCmd),
-    ("lean_plugin", toJson plugin.toString),
+    ("lean_cmd", toJson leanConfig.command),
+    ("lean_plugin", toJson leanConfig.plugin.toString),
     ("lean_lake_helper", toJson desired.daemonBin.toString),
-    ("toolchain", toJson desired.toolchain?),
-    ("bundle_id", toJson desired.bundleId)
+    ("toolchain", toJson leanConfig.toolchain),
+    ("bundle_id", toJson leanConfig.bundleId)
   ]
 
 end Beam.Cli

@@ -91,17 +91,6 @@ def SessionDescriptor.matchesRoot
     (root : System.FilePath) : IO Bool := do
   Beam.sameFilePath (System.FilePath.mk entry.workspace.root) root
 
-structure DesiredConfig where
-  root : System.FilePath
-  leanCmd? : Option String := none
-  plugin? : Option System.FilePath := none
-  rocqCmd? : Option String := none
-  toolchain? : Option String := none
-  daemonBin : System.FilePath
-  bundleId : String
-  configHash : String
-  deriving Repr
-
 def registryEndpoint (entry : SessionDescriptor) : Transport.Endpoint :=
   .tcp entry.port
 

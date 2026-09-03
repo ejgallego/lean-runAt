@@ -7,6 +7,7 @@ Author: Emilio J. Gallego Arias
 import Lean
 import Beam.Broker.Client
 import Beam.Broker.Transport
+import Beam.Cli.DaemonConfig
 import Beam.Cli.Lock
 import Beam.Cli.Project
 import Beam.Daemon.Debug
@@ -116,22 +117,6 @@ private def withExistingProjectControl
   catch
   | .noFileOrDirectory .. => pure ()
   | err => throw err
-
-private def computeConfigHash
-    (root : System.FilePath)
-    (leanCmd? : Option String)
-    (plugin? : Option System.FilePath)
-    (rocqCmd? : Option String)
-    (daemonBin : System.FilePath)
-    (bundleId : String) : String := Id.run do
-  let mut acc : UInt64 := 14695981039346656037
-  acc := mixField acc root.toString
-  acc := mixField acc (leanCmd?.getD "")
-  acc := mixField acc (plugin?.map (·.toString) |>.getD "")
-  acc := mixField acc (rocqCmd?.getD "")
-  acc := mixField acc daemonBin.toString
-  acc := mixField acc bundleId
-  s!"{acc.toNat}"
 
 private def hexDigit (n : Nat) : Char :=
   if n < 10 then
@@ -544,20 +529,14 @@ private def startDaemon
     (logPath : System.FilePath)
     (identity : DaemonIdentity)
     (capability : String) : IO StartedDaemon := do
-  let mut args : Array String := #[
+  let args : Array String := #[
     "--root", desired.root.toString,
     "--workspace-id", projectDaemonWorkspaceId,
     "--daemon-id", identity.daemonId,
     "--config-hash", identity.configHash,
     "--session-owner-stdin",
     "--port", "0"
-  ]
-  if let some leanCmd := desired.leanCmd? then
-    args := args ++ #["--lean-cmd", leanCmd]
-  if let some plugin := desired.plugin? then
-    args := args ++ #["--lean-plugin", plugin.toString]
-  if let some rocqCmd := desired.rocqCmd? then
-    args := args ++ #["--rocq-cmd", rocqCmd]
+  ] ++ desired.backends.daemonArgs
   let some logDir := logPath.parent
     | throw <| IO.userError s!"Beam daemon startup log has no parent directory: {logPath}"
   let some logLeaf := logPath.fileName
@@ -662,7 +641,7 @@ private def newDaemonCapability : IO String := do
 
 private def registryEntryFor
     (desired : DesiredConfig)
-    (daemonId : String)
+    (identity : DaemonIdentity)
     (capability : String)
     (pid : Nat)
     (endpoint : Transport.Endpoint) : IO SessionDescriptor := do
@@ -673,21 +652,13 @@ private def registryEntryFor
   pure {
     schemaVersion := registrySchemaVersion
     lifecycle := .live
-    daemonId
+    daemonId := identity.daemonId
     capability
     pid
     ownerPid := ownerPid.toNat
     port
-    workspace := {
-      workspaceId := projectDaemonWorkspaceId
-      root := desired.root.toString
-      leanCmd? := desired.leanCmd?
-      plugin? := desired.plugin?.map (·.toString)
-      rocqCmd? := desired.rocqCmd?
-      toolchain? := desired.toolchain?
-      bundleId := desired.bundleId
-    }
-    configHash := desired.configHash
+    workspace := desired.backends.toWorkspaceBinding projectDaemonWorkspaceId desired.root
+    configHash := identity.configHash
     daemonBin := desired.daemonBin.toString
     startedAt := ← Beam.utcTimestamp
   }
@@ -696,8 +667,9 @@ private def startDaemonEntry
     (desired : DesiredConfig)
     (controlDir : System.FilePath) : IO (SessionDescriptor × StartedDaemon) := do
   let logPath ← daemonStartupLogPathFor desired.root (some controlDir)
-  let daemonId ← newDaemonGenerationId desired.configHash
-  let identity : DaemonIdentity := { daemonId, configHash := desired.configHash }
+  let configHash := desired.configHash
+  let daemonId ← newDaemonGenerationId configHash
+  let identity : DaemonIdentity := { daemonId, configHash }
   let capability ← newDaemonCapability
   let started ← startDaemon desired logPath identity capability
   let readiness : Except String SessionDescriptor ←
@@ -707,7 +679,7 @@ private def startDaemonEntry
           if (← started.child.tryWait).isSome then
             pure <| .error "Beam daemon exited immediately after reporting readiness"
           else
-            let entry ← registryEntryFor desired daemonId capability started.child.pid.toNat endpoint
+            let entry ← registryEntryFor desired identity capability started.child.pid.toNat endpoint
             pure (.ok entry)
       | .error detail => pure (.error detail)
     catch err =>
@@ -721,40 +693,30 @@ private def startDaemonEntry
       throw <| IO.userError (← daemonStartupFailure logPath detail)
 
 def desiredConfig (home root : System.FilePath) (required : Backend) : IO DesiredConfig := do
-  let (daemonBin, plugin?, leanCmd?, toolchain?, bundleId) ←
-    match required with
-    | .lean =>
-        unless ← hasLeanProject root do
-          throw <| IO.userError s!"could not resolve Lean Beam daemon config for {root}"
-        let toolchain ← leanToolchain root
-        let (bundle, bundleId) ← ensureToolchainBundle root home toolchain
-        ensureLeanBundleExists bundle
-        pure (bundle.daemon, some bundle.plugin, some (← leanBin root), some toolchain, bundleId)
-    | .rocq =>
-        pure (← ensureDefaultDaemon home, none, none, none, "default")
-  let rocqCmd? ←
-    if ← hasRocqProject root then
-      maybeRocqCmd root
-    else if required == .rocq then
-      some <$> rocqCmd root
-    else
-      pure none
   match required with
-  | .lean => pure ()
+  | .lean =>
+      unless ← hasLeanProject root do
+        throw <| IO.userError s!"could not resolve Lean Beam daemon config for {root}"
+      let toolchain ← leanToolchain root
+      let (bundle, bundleId) ← ensureToolchainBundle root home toolchain
+      ensureLeanBundleExists bundle
+      let lean : LeanBackendConfig := {
+        command := ← leanBin root
+        plugin := bundle.plugin
+        toolchain
+        bundleId
+      }
+      let rocq? ←
+        if ← hasRocqProject root then
+          let command? ← maybeRocqCmd root
+          pure <| command?.map fun command => ({ command } : RocqBackendConfig)
+        else
+          pure none
+      pure { root, backends := .lean lean rocq?, daemonBin := bundle.daemon }
   | .rocq =>
-      if rocqCmd?.isNone then
-        throw <| IO.userError s!"could not resolve Rocq Beam daemon config for {root}"
-  let configHash := computeConfigHash root leanCmd? plugin? rocqCmd? daemonBin bundleId
-  pure {
-    root
-    leanCmd?
-    plugin?
-    rocqCmd?
-    toolchain?
-    daemonBin
-    bundleId
-    configHash
-  }
+      let rocq : RocqBackendConfig := { command := ← rocqCmd root }
+      let daemonBin ← ensureDefaultDaemon home
+      pure { root, backends := .rocq rocq, daemonBin }
 
 structure ProjectDaemonClient where
   endpoint : Transport.Endpoint
