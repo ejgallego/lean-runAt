@@ -7,6 +7,7 @@
       "definition": "Beam/LSP/RunAt.lean#method",
       "requiredCoverage": [
         "isolation",
+        "tactic-position",
         "single-command-limit",
         "theorem-proof-failure",
         "theorem-tactic-failure",

@@ -51,6 +51,8 @@ Current request semantics:
 - command-mode `text` is one Lean command, not a top-level command sequence
 - proof-mode `text` is one tactic block
 - `position` uses Lean/LSP `Position` semantics against the matching document version
+- proof execution uses Lean's cursor-selected before/after tactic state; the tactic's start
+  selects its before-state, while positions inside it may select its after-state
 - positions outside the document are invalid request parameters
 - request-level failures are reported as transport errors rather than as `Result`
 -/

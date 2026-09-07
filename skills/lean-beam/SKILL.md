@@ -239,6 +239,11 @@ batch-equivalence check rather than one-file probing.
 `lean-beam run-at` is a speculative execution request against one explicit broker document version.
 Read it as "try this Lean text here", not as "edit the file here".
 
+To probe a replacement for an existing tactic, use the position of its first character after
+indentation. That selects the state before the tactic. A position inside a simple tactic can select
+the state after it; moving to the following line also includes earlier tactics' effects. Inspect
+with `goals before` / `goals after` when needed; those queries do not change `run-at`'s selection.
+
 What `lean-beam run-at` does not do:
 
 - it does not edit the source file or create a new on-disk baseline for the next request
@@ -266,6 +271,7 @@ Use the right tool for each goal:
 Open [references/lean-run-at-semantics.md](references/lean-run-at-semantics.md) when the task needs
 concrete examples for:
 
+- selecting the state before a tactic when probing its replacement
 - full-file diagnostics after a speculative probe
 - chaining speculative state across multiple calls
 - indentation-sensitive or newline-sensitive probes on blank or layout-sensitive lines

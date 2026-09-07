@@ -19,6 +19,9 @@ Use this reference when the task needs more than the default loop in `SKILL.md`.
 - valid probe positions are not arbitrary file coordinates; `lean-beam run-at` needs a command basis or
   proof/tactic snapshot at that position, or one Lean can recover from nearby syntax
 - positions inside proof bodies are the safest choice for tactic probes
+- for a tactic replacement, select the tactic's first character after indentation; positions inside
+  a simple tactic may use its after-state. See the
+  [replacement-position example](lean-run-at-semantics.md#selecting-a-tactic-replacement-position)
 - standalone comments, blank lines, and many declaration headers often do not have a usable basis
 - nearby whitespace/comments may still work when Lean can recover a neighboring basis, but do not
   assume that from arbitrary file positions

@@ -3,6 +3,45 @@
 Use this reference when a task is confused about what `lean-beam run-at` means. The short rule is:
 `lean-beam run-at` is a speculative execution probe against one explicit broker document version, not a source edit.
 
+## Selecting A Tactic Replacement Position
+
+The wrapper takes `<path> <version> <line> <character>`. Both coordinates are zero-based; the
+version is the value returned by `lean-beam update`.
+
+For `BeamRunAtProbe.lean` containing exactly these three lines:
+
+```lean
+example (a b : Nat) (h : a = b) : 0 + a = b := by
+  simp
+  exact h
+```
+
+The start of `simp` is line `1`, character `2`. After updating the file, use that position to
+test replacing `simp`:
+
+```bash
+lean-beam run-at "BeamRunAtProbe.lean" <version-from-update> 1 2 -- "exact h"
+```
+
+This returns `result.success=false`: `h : a = b` does not solve `0 + a = b`.
+The same probe at `2 2` succeeds because that is the start of `exact h`, after `simp` has already
+simplified the goal.
+
+| Position (line, character) | Selected state | Probe `exact h` |
+| --- | --- | --- |
+| `1 2`: start of `simp` | Before `simp`: `0 + a = b` | Fails |
+| `1 3`: inside `simp` | After `simp`: `a = b` | Succeeds |
+| `2 2`: start of `exact h` | Before `exact h`: `a = b` | Succeeds |
+
+`run-at` follows Lean's cursor-based tactic selection. At a tactic's first character it uses the
+before-state; inside a simple tactic or at its end it generally uses the after-state. Nested
+tactics and nearby whitespace can select a different enclosing or neighboring tactic, so choose
+the start of the specific tactic you intend to replace.
+
+`goals before` and `goals after` inspect both sides of the selected tactic. They do not configure
+the state used by a later `run-at`. After applying a replacement to the saved file, use
+`lean-beam sync` to check the resulting file, including later proof steps.
+
 ## What It Is Not
 
 - it is not an edit to the file on disk

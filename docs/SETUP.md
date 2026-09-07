@@ -204,7 +204,15 @@ lean-beam doctor
 ```
 
 Command positions use Lean/LSP coordinates: line and character are zero-based, and character counts
-UTF-16 code units.
+UTF-16 code units. The arguments to `run-at` are `<path> <version> <line> <character> <text>`;
+the version precedes the coordinates.
+
+To try replacing an existing tactic, point to its first character after indentation. At that position,
+`run-at` uses the state before the tactic. A position inside a simple tactic can select its
+after-state, and the following tactic starts with the preceding tactic's effects already applied.
+For example, `simp` on the second line with two leading spaces starts at `1 2`.
+See the [tactic replacement example](../skills/lean-beam/references/lean-run-at-semantics.md#selecting-a-tactic-replacement-position)
+for concrete before/after results.
 
 Start one foreground owner for the wrapper session and keep it running. In another terminal or agent
 process, ask questions against saved Lean files in that project:
