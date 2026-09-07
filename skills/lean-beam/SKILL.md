@@ -189,6 +189,8 @@ Prefer the smallest command that matches the actual task:
 - use `lean-beam todo` when you want actionable items in a saved file range, such as sorries, holes,
   diagnostics, code actions, or incomplete proofs
 - use `lean-beam run-at` when you want to try one speculative Lean snippet without editing the file
+- for a tactic replacement, probe at its first character after indentation to use its before-state;
+  positions inside a simple tactic can use its after-state
 - before `lean-beam run-at`, `lean-beam run-at-handle`, `lean-beam hover`,
   `lean-beam signature-help`, `lean-beam definition`, `lean-beam references`,
   `lean-beam document-symbols`, `lean-beam goals`, or `lean-beam todo`, call
@@ -239,11 +241,6 @@ batch-equivalence check rather than one-file probing.
 `lean-beam run-at` is a speculative execution request against one explicit broker document version.
 Read it as "try this Lean text here", not as "edit the file here".
 
-To probe a replacement for an existing tactic, use the position of its first character after
-indentation. That selects the state before the tactic. A position inside a simple tactic can select
-the state after it; moving to the following line also includes earlier tactics' effects. Inspect
-with `goals before` / `goals after` when needed; those queries do not change `run-at`'s selection.
-
 What `lean-beam run-at` does not do:
 
 - it does not edit the source file or create a new on-disk baseline for the next request
@@ -271,17 +268,12 @@ Use the right tool for each goal:
 Open [references/lean-run-at-semantics.md](references/lean-run-at-semantics.md) when the task needs
 concrete examples for:
 
-- selecting the state before a tactic when probing its replacement
 - full-file diagnostics after a speculative probe
 - chaining speculative state across multiple calls
 - indentation-sensitive or newline-sensitive probes on blank or layout-sensitive lines
 
-Open [references/workflow-details.md](references/workflow-details.md) when the task needs the shell-oriented
-details for:
-
-- `--text-file`, `--`, or stdin-handle piping variants
-- handle-file versus stdin-handle tradeoffs
-- debugging-oriented wrapper details instead of the normal path
+Open [references/workflow-details.md](references/workflow-details.md) for position semantics,
+text/handle input variants, and wrapper debugging.
 
 Open [references/commit-speculative.md](references/commit-speculative.md) when the task needs the
 current workflow for turning a good speculative probe into a real saved edit.
