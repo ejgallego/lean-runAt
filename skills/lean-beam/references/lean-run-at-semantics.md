@@ -3,6 +3,8 @@
 Use this reference when a task is confused about what `lean-beam run-at` means. The short rule is:
 `lean-beam run-at` is a speculative execution probe against one explicit broker document version, not a source edit.
 
+For coordinates and tactic-state selection, see [Position Semantics](workflow-details.md#position-semantics).
+
 ## What It Is Not
 
 - it is not an edit to the file on disk

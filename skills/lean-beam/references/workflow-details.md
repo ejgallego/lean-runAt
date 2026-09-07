@@ -5,9 +5,7 @@ Use this reference when the task needs more than the default loop in `SKILL.md`.
 ## Position Semantics
 
 - `lean-beam run-at` and `lean-beam run-at-handle` take the broker document version before
-  Lean/LSP `Position` coordinates: `<version> <line> <character>`
-- the wrapper passes those coordinates through directly; they are not editor-specific line numbers,
-  byte offsets, or parser-token offsets
+  Lean/LSP `Position` coordinates: `<version> <line> <character>`; use the version from `update`
 - line `0` is the first line, and character `0` is the first UTF-16 code unit on that line
 - on a truly empty line, only character `0` is valid; character `1` is already out of range
 - on an indented blank line, either probe after the existing spaces using that exact character
@@ -18,13 +16,35 @@ Use this reference when the task needs more than the default loop in `SKILL.md`.
   execution basis there
 - valid probe positions are not arbitrary file coordinates; `lean-beam run-at` needs a command basis or
   proof/tactic snapshot at that position, or one Lean can recover from nearby syntax
-- positions inside proof bodies are the safest choice for tactic probes
+- for a tactic replacement, select its first character after indentation to use its before-state;
+  inside a simple tactic or at its end, Lean generally selects the after-state
 - standalone comments, blank lines, and many declaration headers often do not have a usable basis
 - nearby whitespace/comments may still work when Lean can recover a neighboring basis, but do not
   assume that from arbitrary file positions
 - those errors do not by themselves mean the Beam daemon is unhealthy
-- known-good proof probe in this repo:
-  `lean-beam run-at "tests/interactive/proofBasisBefore.lean" <version-from-update> 2 2 "exact trivial"`
+
+For `BeamRunAtProbe.lean` containing exactly these three lines:
+
+```lean
+example (a b : Nat) (h : a = b) : 0 + a = b := by
+  simp
+  exact h
+```
+
+| Position (line, character) | Selected state | Probe `exact h` |
+| --- | --- | --- |
+| `1 2`: start of `simp` | Before `simp`: `0 + a = b` | Fails |
+| `1 3`: inside `simp` | After `simp`: `a = b` | Succeeds |
+| `2 2`: start of `exact h` | Before `exact h`: `a = b` | Succeeds |
+
+After updating the file, this replacement probe correctly returns `result.success=false`:
+
+```bash
+lean-beam run-at "BeamRunAtProbe.lean" <version-from-update> 1 2 -- "exact h"
+```
+
+Nested tactics and whitespace may select an enclosing or neighboring tactic. `goals before` and
+`goals after` inspect both sides of the selected tactic; they do not configure a later `run-at`.
 
 ## Command Details
 

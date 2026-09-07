@@ -189,6 +189,8 @@ Prefer the smallest command that matches the actual task:
 - use `lean-beam todo` when you want actionable items in a saved file range, such as sorries, holes,
   diagnostics, code actions, or incomplete proofs
 - use `lean-beam run-at` when you want to try one speculative Lean snippet without editing the file
+- for a tactic replacement, probe at its first character after indentation to use its before-state;
+  positions inside a simple tactic can use its after-state
 - before `lean-beam run-at`, `lean-beam run-at-handle`, `lean-beam hover`,
   `lean-beam signature-help`, `lean-beam definition`, `lean-beam references`,
   `lean-beam document-symbols`, `lean-beam goals`, or `lean-beam todo`, call
@@ -270,12 +272,8 @@ concrete examples for:
 - chaining speculative state across multiple calls
 - indentation-sensitive or newline-sensitive probes on blank or layout-sensitive lines
 
-Open [references/workflow-details.md](references/workflow-details.md) when the task needs the shell-oriented
-details for:
-
-- `--text-file`, `--`, or stdin-handle piping variants
-- handle-file versus stdin-handle tradeoffs
-- debugging-oriented wrapper details instead of the normal path
+Open [references/workflow-details.md](references/workflow-details.md) for position semantics,
+text/handle input variants, and wrapper debugging.
 
 Open [references/commit-speculative.md](references/commit-speculative.md) when the task needs the
 current workflow for turning a good speculative probe into a real saved edit.

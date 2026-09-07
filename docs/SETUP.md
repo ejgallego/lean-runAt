@@ -204,7 +204,9 @@ lean-beam doctor
 ```
 
 Command positions use Lean/LSP coordinates: line and character are zero-based, and character counts
-UTF-16 code units.
+UTF-16 code units. To probe a tactic replacement, select its first character after indentation
+to use its before-state. See [Position Semantics](../skills/lean-beam/references/workflow-details.md#position-semantics)
+for the argument order and a before/after example.
 
 Start one foreground owner for the wrapper session and keep it running. In another terminal or agent
 process, ask questions against saved Lean files in that project:

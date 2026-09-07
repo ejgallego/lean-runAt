@@ -20,6 +20,48 @@ private def invalidParamsJson : Json :=
 private def requestCancelledJson : Json :=
   Json.mkObj [("code", toJson "requestCancelled")]
 
+def checkRunAtTacticPositions : ScenarioM Unit := do
+  let doc ← openDoc "tests/scenario/docs/TacticPositionProof.lean"
+  syncDoc doc
+
+  -- At the start of simp, its replacement must handle the unsimplified goal.
+  requireRunAtFailureMessage "runAt at simp start" doc { line := 1, character := 2 }
+    "exact h" "0 + a = b"
+  let simplified ← requireRunAtSuccess "rerun simp at its start" doc
+    { line := 1, character := 2 } "simp"
+  unless simplified.proofState?.map (·.goals.map (·.target)) == some #["a = b"] do
+    throw <| IO.userError s!"simp should leave a = b, got {(toJson simplified).compress}"
+
+  -- Moving inside simp or to its end selects the state after it.
+  for character in [3, 6] do
+    requireRunAtSolvesProof "runAt inside/at end of simp" doc { line := 1, character }
+      "exact h"
+
+  -- Zero-based line 2 is exact h; its before-state already includes simp's effect.
+  requireRunAtSolvesProof "runAt at exact start" doc { line := 2, character := 2 } "exact h"
+  requireRunAtFailureMessage "simp at exact start" doc { line := 2, character := 2 }
+    "simp" "made no progress"
+  requireRunAtFailureMessage "runAt inside exact" doc { line := 2, character := 3 }
+    "exact h" "No goals to be solved"
+
+  -- Explicit goal queries expose both states without changing later probes.
+  for (useAfter, target) in [(false, "0 + a = b"), (true, "a = b")] do
+    let req ← sendGoals doc { line := 1, character := 2, useAfter }
+    let state : Beam.LSP.Lib.ProofState ← awaitResponseAs req
+    unless state.goals.map (·.target) == #[target] do
+      throw <| IO.userError s!"goals useAfter={useAfter}: expected {target}, got {(toJson state).compress}"
+  requireRunAtFailureMessage "runAt still uses simp's before-state" doc
+    { line := 1, character := 2 } "exact h" "0 + a = b"
+
+  -- A real LSP replacement agrees with the probe at the tactic's start.
+  changeDoc doc { line := 1, character := 2, delete := "simp", insert := "exact h" }
+  let diagnostics ← collectDiagnostics doc
+  unless diagnostics.diagnostics.any (fun diagnostic =>
+      diagnostic.severity? == some .error && diagnostic.range.start.line == 1 &&
+      diagnostic.message.contains "0 + a = b") do
+    throw <| IO.userError s!"expected replacement type mismatch, got {(toJson diagnostics).compress}"
+  closeDoc doc
+
 def checkRunAtOneCommandOnly : ScenarioM Unit := do
   let doc ← openDoc "tests/lean/BeamTest/Fixtures/Deps/DepA.lean"
   syncDoc doc
@@ -148,6 +190,7 @@ def checkRunAtWithStandardLspInterference : ScenarioM Unit := do
   closeDoc editDoc
 
 def run : ScenarioM Unit := do
+  checkRunAtTacticPositions
   checkRunAtOneCommandOnly
   checkRunAtTheoremSuccessOmitsSilentMessages
   checkRunAtTheoremProofFailure
