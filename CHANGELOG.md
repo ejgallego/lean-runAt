@@ -33,6 +33,9 @@ This project keeps a lightweight, reverse-chronological changelog. Dates use `YY
 
 ### Changed
 
+- Clarify zero-based `run-at` coordinates and how tactic positions select before/after proof states,
+  with guidance for probing tactic replacements
+  ([#253](https://github.com/leanprover/lean-beam/pull/253), @ejgallego).
 - Local builds now write to Lake's toolchain-scoped artifact cache and restore cached outputs into
   `.lake/build`, preserving the paths used by Beam's wrapper, installer, and tests. CI restores that
   cache for Lean jobs and lets one job per OS publish each commit's updated cache.
